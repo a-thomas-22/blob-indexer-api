@@ -1,0 +1,46 @@
+# Default values for blob-indexer
+replicaCount: 1
+
+image:
+  repository: blob-indexer-api
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: "nginx"
+  hosts:
+    - host: blob-indexer.localhost
+      paths:
+        - path: /
+          pathType: Prefix
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# Blob indexer specific configuration
+blobIndexer:
+  ethRpcUrl: "https://mainnet.infura.io/v3/your-api-key"
+  startBlock: "LATEST-1000" # Start 1000 blocks before latest
+  indexerVersion: "dev"
+  devMode: true
+
+# PostgreSQL configuration
+postgresql:
+  enabled: true
+  auth:
+    username: blobdev
+    password: blobdev
+    database: blobindexer
+  primary:
+    persistence:
+      size: 1Gi

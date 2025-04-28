@@ -1,0 +1,672 @@
+basePath: /api
+definitions:
+  api.BlobResponse:
+    properties:
+      base_fee_per_blob_gas:
+        type: string
+      blob_index:
+        type: integer
+      blob_size_bytes:
+        type: integer
+      block_number:
+        type: integer
+      confirmed:
+        type: boolean
+      from_address:
+        type: string
+      network_id:
+        type: integer
+      network_name:
+        type: string
+      timestamp:
+        type: string
+      tip_per_blob_gas:
+        type: string
+      total_cost_eth:
+        type: string
+      tx_hash:
+        type: string
+      user_attribution:
+        type: string
+    type: object
+  api.DatabaseStats:
+    properties:
+      connection_count:
+        type: integer
+      idle_connections:
+        type: integer
+      in_use_connections:
+        type: integer
+      last_migration_time:
+        type: string
+      max_open_connections:
+        type: integer
+      table_stats:
+        items:
+          $ref: '#/definitions/api.TableStat'
+        type: array
+      total_size:
+        type: string
+      total_tables:
+        type: integer
+    type: object
+  api.IndexerMetrics:
+    properties:
+      blocks_behind:
+        type: integer
+      confirmed_blobs_count:
+        type: integer
+      current_block:
+        type: integer
+      error_count:
+        type: integer
+      indexing_rate:
+        type: number
+      last_error:
+        type: string
+      last_error_time:
+        type: string
+      last_indexed_block:
+        type: integer
+      last_indexed_time:
+        type: string
+      network_id:
+        type: integer
+      network_name:
+        type: string
+      pending_blobs_count:
+        type: integer
+      status:
+        type: string
+      total_blobs_indexed:
+        type: integer
+    type: object
+  api.LogEntry:
+    properties:
+      fields:
+        additionalProperties:
+          type: string
+        type: object
+      level:
+        type: string
+      message:
+        type: string
+      timestamp:
+        type: string
+    type: object
+  api.QueryStat:
+    properties:
+      calls:
+        type: integer
+      execution_time:
+        type: number
+      last_executed:
+        type: string
+      query:
+        type: string
+      rows_returned:
+        type: integer
+    type: object
+  api.ReindexRequest:
+    properties:
+      end_block:
+        type: integer
+      network_id:
+        type: integer
+      start_block:
+        type: integer
+    type: object
+  api.Response:
+    properties:
+      data: {}
+      error:
+        type: string
+      success:
+        type: boolean
+    type: object
+  api.StatsResponse:
+    properties:
+      average_base_fee:
+        type: string
+      average_tip:
+        type: string
+      average_total_cost:
+        type: string
+      last_indexed_block:
+        type: integer
+      last_indexed_time:
+        type: string
+      network_id:
+        type: integer
+      network_name:
+        type: string
+      total_blobs:
+        type: integer
+      total_confirmed_blobs:
+        type: integer
+      total_pending_blobs:
+        type: integer
+    type: object
+  api.StatusResponse:
+    properties:
+      indexer_version:
+        type: string
+      last_indexed_block:
+        type: integer
+      last_indexed_time:
+        type: string
+      network_id:
+        type: integer
+      network_name:
+        type: string
+      uptime:
+        type: string
+    type: object
+  api.SystemMetrics:
+    properties:
+      active_requests:
+        type: integer
+      architecture:
+        type: string
+      current_time:
+        type: string
+      go_version:
+        type: string
+      memory_usage:
+        type: string
+      num_cpu:
+        type: integer
+      num_goroutine:
+        type: integer
+      operating_system:
+        type: string
+      start_time:
+        type: string
+      total_requests:
+        type: integer
+      uptime:
+        type: string
+    type: object
+  api.TableStat:
+    properties:
+      index_count:
+        type: integer
+      last_vacuumed:
+        type: string
+      row_count:
+        type: integer
+      size_bytes:
+        type: integer
+      table_name:
+        type: string
+    type: object
+  api.UserResponse:
+    properties:
+      address:
+        type: string
+      blob_count:
+        type: integer
+      last_timestamp:
+        type: string
+      name:
+        type: string
+      network_id:
+        type: integer
+      network_name:
+        type: string
+      total_cost_eth:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: support@example.com
+    name: API Support
+    url: https://github.com/a-thomas-22/blob-indexer-api
+  description: API for indexing and querying blob transactions on Ethereum across
+    multiple networks
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  termsOfService: http://swagger.io/terms/
+  title: Blob Indexer API
+  version: "1.0"
+paths:
+  /blob/{txHash}:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve a specific blob transaction by its hash
+      parameters:
+      - description: 'Network name or chain ID (default: first enabled network)'
+        in: query
+        name: network
+        type: string
+      - description: Transaction hash
+        in: path
+        name: txHash
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.BlobResponse'
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "404":
+          description: Blob not found
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get blob by transaction hash
+      tags:
+      - blobs
+  /blob/latest:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve the latest confirmed blob transactions from the blockchain
+      parameters:
+      - description: 'Network name or chain ID (default: first enabled network)'
+        in: query
+        name: network
+        type: string
+      - description: 'Number of blobs to return (default: 10)'
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/api.BlobResponse'
+                  type: array
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get latest confirmed blobs
+      tags:
+      - blobs
+  /blob/mempool:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve pending blob transactions from the mempool
+      parameters:
+      - description: 'Network name or chain ID (default: first enabled network)'
+        in: query
+        name: network
+        type: string
+      - description: 'Number of blobs to return (default: 10)'
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/api.BlobResponse'
+                  type: array
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get pending blobs from mempool
+      tags:
+      - blobs
+  /dev/dashboard:
+    get:
+      consumes:
+      - application/json
+      description: Access the development dashboard
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  type: string
+              type: object
+      summary: Development dashboard
+      tags:
+      - dev
+  /dev/database:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve statistics about the database
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.DatabaseStats'
+              type: object
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get database statistics
+      tags:
+      - dev
+  /dev/indexers:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve detailed metrics for all indexers
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/api.IndexerMetrics'
+                  type: array
+              type: object
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get indexer metrics
+      tags:
+      - dev
+  /dev/logs:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve recent application logs
+      parameters:
+      - description: 'Number of logs to return (default: 100)'
+        in: query
+        name: limit
+        type: integer
+      - description: Filter by log level (info, warn, error, debug)
+        in: query
+        name: level
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/api.LogEntry'
+                  type: array
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get recent logs
+      tags:
+      - dev
+  /dev/metrics:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve system-wide metrics including memory usage, goroutine
+        count, etc.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.SystemMetrics'
+              type: object
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get system metrics
+      tags:
+      - dev
+  /dev/queries:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve statistics about database queries
+      parameters:
+      - description: 'Number of queries to return (default: 20)'
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/api.QueryStat'
+                  type: array
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get database query statistics
+      tags:
+      - dev
+  /dev/reindex:
+    post:
+      consumes:
+      - application/json
+      description: Reindex a range of blocks (only available in dev mode)
+      parameters:
+      - description: Reindex request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.ReindexRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  type: string
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Trigger a reindex of blocks
+      tags:
+      - dev
+  /stats:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve statistics about blob transactions
+      parameters:
+      - description: 'Network name or chain ID (default: first enabled network)'
+        in: query
+        name: network
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.StatsResponse'
+              type: object
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get blob statistics
+      tags:
+      - stats
+  /status:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve the current status of the indexer
+      parameters:
+      - description: 'Network name or chain ID (default: first enabled network)'
+        in: query
+        name: network
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.StatusResponse'
+              type: object
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get indexer status
+      tags:
+      - status
+  /users:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve the top users of blob transactions by count
+      parameters:
+      - description: 'Network name or chain ID (default: first enabled network)'
+        in: query
+        name: network
+        type: string
+      - description: 'Number of users to return (default: 10)'
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/api.UserResponse'
+                  type: array
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get top blob users
+      tags:
+      - users
+schemes:
+- http
+- https
+swagger: "2.0"
+tags:
+- description: Network-related endpoints
+  name: networks
+- description: Blob transaction endpoints
+  name: blobs
+- description: User attribution endpoints
+  name: users
+- description: Statistics endpoints
+  name: stats
+- description: Indexer status endpoints
+  name: status
+- description: Development endpoints (only available in dev mode)
+  name: dev
