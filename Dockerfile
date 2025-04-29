@@ -1,4 +1,4 @@
-FROM golang:1.20-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
@@ -33,13 +33,6 @@ COPY --from=builder /app/internal/db/migrations ./internal/db/migrations
 
 # Expose the API port
 EXPOSE 8080
-
-# Set environment variables
-ENV DB_URL="postgres://postgres:postgres@postgres:5432/blobindexer?sslmode=disable"
-ENV RPC_URL="https://mainnet.infura.io/v3/your-api-key"
-ENV START_BLOCK="LATEST-1000"
-ENV INDEXER_VERSION="v1.0.0"
-ENV PORT="8080"
 
 # Run the application
 CMD ["./blob-indexer-api"]

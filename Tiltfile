@@ -1,14 +1,14 @@
 # Tiltfile for blob-indexer-api
 
-# Load environment variables from .env file if it exists
-load('ext://dotenv', 'dotenv')
-dotenv()
+# Get port from config for port forwarding
+port = str(local('grep -A 2 "server:" tilt-config.yaml | grep "port:" | awk \'{print $2}\'', quiet=True)).strip()
 
-# Load Helm extension
-load('ext://helm_resource', 'helm_resource', 'helm_repo')
-
-# Add Bitnami Helm repo for PostgreSQL dependency
-helm_repo('bitnami', 'https://charts.bitnami.com/bitnami')
+# Create a ConfigMap for the configuration
+local_resource(
+  'app-config',
+  cmd='kubectl create configmap app-config --from-file=tilt-config.yaml --dry-run=client -o yaml | kubectl apply -f -',
+  deps=['tilt-config.yaml'],
+)
 
 # Build the blob-indexer-api image
 docker_build(
@@ -21,49 +21,131 @@ docker_build(
         # Run go install when go.mod changes
         run('cd /app && go mod download', trigger=['./go.mod', './go.sum']),
         # Restart the process when source files change
-        run('cd /app && go install ./cmd/server', trigger=['./cmd/**/*.go', './internal/**/*.go', './pkg/**/*.go']),
+        run('cd /app && go install ./cmd/server', trigger=['./cmd/**/*.go', './internal/**/*.go']),
     ]
 )
 
-# Define custom values for development
-custom_values = {
-    'image': {
-        'repository': 'blob-indexer-api',
-        'tag': 'latest',
-        'pullPolicy': 'Never',  # Use locally built image
-    },
-    'blobIndexer': {
-        'ethRpcUrl': os.environ.get('ETH_RPC_URL', 'https://mainnet.infura.io/v3/your-api-key'),
-        'startBlock': os.environ.get('START_BLOCK', 'LATEST-1000'),
-        'indexerVersion': 'dev',
-        'devMode': 'true',
-    },
-    'postgresql': {
-        'enabled': True,
-    },
-}
+# Define PostgreSQL deployment
+postgres_yaml = """
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  selector:
+    app: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  selector:
+    matchLabels:
+      app: postgres
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:14
+        env:
+        - name: POSTGRES_USER
+          value: postgres
+        - name: POSTGRES_PASSWORD
+          value: postgres
+        - name: POSTGRES_DB
+          value: blobindexer
+        ports:
+        - containerPort: 5432
+          name: postgres
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+      volumes:
+      - name: postgres-data
+        emptyDir: {}
+"""
+k8s_yaml(blob(postgres_yaml))
 
-# Deploy the Helm chart
-helm_resource(
-    'blob-indexer',
-    'charts/blob-indexer',
-    flags=[
-        '--values=charts/blob-indexer/values.yaml',
-    ],
-    values=custom_values,
-    port_forwards=[
-        '8080:8080',  # API service
-        '5432:5432',  # PostgreSQL
-    ],
-    labels=['app'],
-    resource_deps=[],
+# Define blob-indexer-api deployment
+# Values are already defined above
+
+blob_indexer_yaml = """
+apiVersion: v1
+kind: Service
+metadata:
+  name: blob-indexer-api
+  labels:
+    app: blob-indexer-api
+spec:
+  ports:
+  - port: {port}
+    targetPort: {port}
+    name: http
+  selector:
+    app: blob-indexer-api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blob-indexer-api
+  labels:
+    app: blob-indexer-api
+spec:
+  selector:
+    matchLabels:
+      app: blob-indexer-api
+  template:
+    metadata:
+      labels:
+        app: blob-indexer-api
+    spec:
+      containers:
+      - name: blob-indexer-api
+        image: blob-indexer-api
+        imagePullPolicy: Never
+        env:
+        - name: CONFIG_PATH
+          value: /etc/config/tilt-config.yaml
+        ports:
+        - containerPort: {port}
+          name: http
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/config
+      volumes:
+      - name: config-volume
+        configMap:
+          name: app-config
+""".format(port=port)
+
+k8s_yaml(blob(blob_indexer_yaml))
+
+# Set up port forwards and dependencies
+k8s_resource('blob-indexer-api', 
+  port_forwards=[port + ':' + port],
+  resource_deps=['app-config']
 )
+k8s_resource('postgres', port_forwards=['5432:5432'])
 
 # Development tools as local resources
 local_resource(
     'test',
     'go test ./...',
-    deps=['./internal', './pkg', './cmd'],
+    deps=['./internal', './cmd'],
     labels=['tests']
 )
 
@@ -71,13 +153,12 @@ local_resource(
     'seed-test-data',
     'go run cmd/testdata/main.go',
     auto_init=False,
-    trigger_mode=TRIGGER_MODE_MANUAL,
     labels=['dev-tools']
 )
 
 # Add a resource to show development dashboard
 local_resource(
     'dev-dashboard',
-    'echo "Development dashboard available at: http://localhost:8080/api/dev/dashboard"',
+    'echo "Development dashboard available at: http://localhost:' + port + '/api/dev/dashboard"',
     labels=['dev-tools']
 )

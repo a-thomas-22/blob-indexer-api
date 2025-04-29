@@ -101,16 +101,42 @@ func (db *DB) GetMetadata(ctx context.Context, key string) (string, error) {
 	return value, nil
 }
 
+// GetNetworkMetadata retrieves a metadata value by key and network ID
+func (db *DB) GetNetworkMetadata(ctx context.Context, networkID int, key string) (string, error) {
+	var value string
+	query := "SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = $2"
+	err := db.GetContext(ctx, &value, query, networkID, key)
+	if err != nil {
+		return "", fmt.Errorf("failed to get metadata for key %s and network %d: %w", key, networkID, err)
+	}
+	return value, nil
+}
+
 // SetMetadata sets a metadata value
 func (db *DB) SetMetadata(ctx context.Context, key, value string) error {
 	query := `
 		INSERT INTO indexer_metadata (key, value)
 		VALUES ($1, $2)
 		ON CONFLICT (key) DO UPDATE SET value = $2
+		WHERE indexer_metadata.network_id IS NULL
 	`
 	_, err := db.ExecContext(ctx, query, key, value)
 	if err != nil {
 		return fmt.Errorf("failed to set metadata for key %s: %w", key, err)
+	}
+	return nil
+}
+
+// SetNetworkMetadata sets a metadata value for a specific network
+func (db *DB) SetNetworkMetadata(ctx context.Context, networkID int, key, value string) error {
+	query := `
+		INSERT INTO indexer_metadata (network_id, key, value)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (network_id, key) DO UPDATE SET value = $3
+	`
+	_, err := db.ExecContext(ctx, query, networkID, key, value)
+	if err != nil {
+		return fmt.Errorf("failed to set metadata for key %s and network %d: %w", key, networkID, err)
 	}
 	return nil
 }

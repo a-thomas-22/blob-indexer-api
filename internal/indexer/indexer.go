@@ -125,10 +125,7 @@ func (i *Indexer) Stop() {
 
 // getLastIndexedBlock gets the last indexed block from the database
 func (i *Indexer) getLastIndexedBlock() (uint64, error) {
-	// Create a network-specific metadata key
-	metadataKey := fmt.Sprintf("%s_%d", models.MetadataLastIndexedBlock, i.network.ChainID)
-
-	value, err := i.db.GetMetadata(i.ctx, metadataKey)
+	value, err := i.db.GetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataLastIndexedBlock)
 	if err != nil {
 		// If the metadata doesn't exist, return 0
 		return 0, nil
@@ -275,8 +272,7 @@ func (i *Indexer) processBlockRange(startBlock, endBlock uint64) error {
 		i.mu.Unlock()
 
 		// Update the metadata with network-specific key
-		metadataKey := fmt.Sprintf("%s_%d", models.MetadataLastIndexedBlock, i.network.ChainID)
-		if err := i.db.SetMetadata(i.ctx, metadataKey, strconv.FormatUint(blockNumber, 10)); err != nil {
+		if err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(blockNumber, 10)); err != nil {
 			logger.Error("Failed to update last indexed block metadata",
 				zap.String("network", i.network.Name),
 				zap.Error(err))
@@ -379,9 +375,16 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 
 // getSender gets the sender address for a transaction
 func (i *Indexer) getSender(tx *types.Transaction) (string, error) {
-	// This is a simplified implementation
-	// In a real implementation, you would use the signer to get the sender
-	return "0x0000000000000000000000000000000000000000", nil
+	// Get the signer for the transaction
+	signer := types.LatestSignerForChainID(big.NewInt(int64(i.network.ChainID)))
+
+	// Get the sender address
+	sender, err := types.Sender(signer, tx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get sender: %w", err)
+	}
+
+	return sender.Hex(), nil
 }
 
 // insertBlob inserts a blob record into the database
