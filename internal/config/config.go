@@ -3,175 +3,182 @@ package config
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"github.com/spf13/viper"
 )
 
 // NetworkConfig holds the configuration for a single Ethereum network
 type NetworkConfig struct {
-	Name       string `yaml:"name"`
-	ChainID    int    `yaml:"chain_id"`
-	RpcURL     string `yaml:"rpc_url"`     // RPC URL is only stored in configuration, not in the database
-	StartBlock string `yaml:"start_block"` // "LATEST", "LATEST-1000", or specific number
-	Enabled    bool   `yaml:"enabled"`
+	Name       string `mapstructure:"name" yaml:"name"`
+	ChainID    int    `mapstructure:"chain_id" yaml:"chain_id"`
+	RpcURL     string `mapstructure:"rpc_url" yaml:"rpc_url"`         // RPC URL is only stored in configuration, not in the database
+	StartBlock string `mapstructure:"start_block" yaml:"start_block"` // "LATEST", "LATEST-1000", or specific number
+	Enabled    bool   `mapstructure:"enabled" yaml:"enabled"`
 }
 
 // DatabaseConfig holds the database configuration
 type DatabaseConfig struct {
-	URL string `yaml:"url"`
+	URL string `mapstructure:"url" yaml:"url"`
 }
 
 // ServerConfig holds the server configuration
 type ServerConfig struct {
-	Port    int  `yaml:"port"`
-	DevMode bool `yaml:"dev_mode"`
+	Port    int  `mapstructure:"port" yaml:"port"`
+	DevMode bool `mapstructure:"dev_mode" yaml:"dev_mode"`
 }
 
 // LoggingConfig holds the logging configuration
 type LoggingConfig struct {
-	Level  string `yaml:"level"`
-	Format string `yaml:"format"`
+	Level  string `mapstructure:"level" yaml:"level"`
+	Format string `mapstructure:"format" yaml:"format"`
 }
 
 // IndexerConfig holds the indexer configuration
 type IndexerConfig struct {
-	Version                string        `yaml:"version"`
-	BatchSize              int           `yaml:"batch_size"`
-	PollingInterval        time.Duration `yaml:"polling_interval"`
-	MempoolPollingInterval time.Duration `yaml:"mempool_polling_interval"`
+	Version                string        `mapstructure:"version" yaml:"version"`
+	BatchSize              int           `mapstructure:"batch_size" yaml:"batch_size"`
+	PollingInterval        time.Duration `mapstructure:"polling_interval" yaml:"polling_interval"`
+	MempoolPollingInterval time.Duration `mapstructure:"mempool_polling_interval" yaml:"mempool_polling_interval"`
 }
 
 // Config holds the application configuration
 type Config struct {
-	Database DatabaseConfig  `yaml:"database"`
-	Server   ServerConfig    `yaml:"server"`
-	Logging  LoggingConfig   `yaml:"logging"`
-	Indexer  IndexerConfig   `yaml:"indexer"`
-	Networks []NetworkConfig `yaml:"networks"`
+	Database DatabaseConfig  `mapstructure:"database" yaml:"database"`
+	Server   ServerConfig    `mapstructure:"server" yaml:"server"`
+	Logging  LoggingConfig   `mapstructure:"logging" yaml:"logging"`
+	Indexer  IndexerConfig   `mapstructure:"indexer" yaml:"indexer"`
+	Networks []NetworkConfig `mapstructure:"networks" yaml:"networks"`
 }
 
-// Load loads the configuration from a YAML file and/or environment variables
+// Load loads the configuration using Viper from a YAML file and/or environment variables
 func Load() (*Config, error) {
-	// Default configuration
-	cfg := &Config{
-		Server: ServerConfig{
-			Port:    8080,
-			DevMode: false,
-		},
-		Logging: LoggingConfig{
-			Level:  "info",
-			Format: "json",
-		},
-		Indexer: IndexerConfig{
-			Version:                "v1.0.0",
-			BatchSize:              100,
-			PollingInterval:        15 * time.Second,
-			MempoolPollingInterval: 30 * time.Second,
-		},
-		Networks: []NetworkConfig{},
-	}
+	v := viper.New()
 
-	// Try to load from config file
+	// Set default values
+	v.SetDefault("server.port", 8080)
+	v.SetDefault("server.dev_mode", false)
+	v.SetDefault("logging.level", "info")
+	v.SetDefault("logging.format", "json")
+	v.SetDefault("indexer.version", "v1.0.0")
+	v.SetDefault("indexer.batch_size", 100)
+	v.SetDefault("indexer.polling_interval", "15s")
+	v.SetDefault("indexer.mempool_polling_interval", "30s")
+	v.SetDefault("networks", []NetworkConfig{})
+
+	// Configure Viper to read from config file
+	v.SetConfigName("config") // name of config file (without extension)
+	v.SetConfigType("yaml")   // YAML format
+	v.AddConfigPath(".")      // look for config in the working directory
+
+	// Check if CONFIG_PATH environment variable is set
 	configPath := os.Getenv("CONFIG_PATH")
-	if configPath == "" {
-		// Look for config.yaml in the current directory
-		if _, err := os.Stat("config.yaml"); err == nil {
-			configPath = "config.yaml"
-		}
-	}
-
 	if configPath != "" {
-		if err := loadFromFile(cfg, configPath); err != nil {
-			return nil, fmt.Errorf("failed to load config from file: %w", err)
+		// Use the specified config file
+		v.SetConfigFile(configPath)
+	}
+
+	// Read the config file
+	if err := v.ReadInConfig(); err != nil {
+		// It's okay if the config file doesn't exist
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			return nil, fmt.Errorf("failed to read config file: %w", err)
 		}
 	}
 
-	// Override with environment variables
-	if err := overrideWithEnv(cfg); err != nil {
-		return nil, fmt.Errorf("failed to override config with environment variables: %w", err)
-	}
+	// Set up environment variable binding
+	v.AutomaticEnv()
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
-	// Validate configuration
-	if err := validateConfig(cfg); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
-	}
+	// Special handling for sensitive information and environment variables
+	// that don't match our config structure exactly
 
-	return cfg, nil
-}
-
-// loadFromFile loads configuration from a YAML file
-func loadFromFile(cfg *Config, path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("failed to read config file: %w", err)
-	}
-
-	// Determine if YAML or JSON based on file extension
-	ext := strings.ToLower(filepath.Ext(path))
-	if ext == ".yaml" || ext == ".yml" {
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return fmt.Errorf("failed to parse YAML config: %w", err)
-		}
-	} else {
-		return fmt.Errorf("unsupported config file format: %s", ext)
-	}
-
-	return nil
-}
-
-// overrideWithEnv overrides configuration with environment variables
-func overrideWithEnv(cfg *Config) error {
-	// Database URL
+	// Database URL - direct environment variable override
 	if dbURL := os.Getenv("DB_URL"); dbURL != "" {
-		cfg.Database.URL = dbURL
+		v.Set("database.url", dbURL)
 	}
 
-	// Server port
+	// Server port - direct environment variable override
 	if portStr := os.Getenv("PORT"); portStr != "" {
-		port, err := strconv.Atoi(portStr)
-		if err != nil {
-			return fmt.Errorf("invalid PORT value: %v", err)
-		}
-		cfg.Server.Port = port
+		v.Set("server.port", portStr) // Viper will handle the conversion
 	}
 
-	// Development mode
+	// Development mode - direct environment variable override
 	if devMode := os.Getenv("DEV_MODE"); devMode != "" {
-		cfg.Server.DevMode = strings.ToLower(devMode) == "true"
+		v.Set("server.dev_mode", strings.ToLower(devMode) == "true")
 	}
 
-	// Indexer version
+	// Indexer version - direct environment variable override
 	if version := os.Getenv("INDEXER_VERSION"); version != "" {
-		cfg.Indexer.Version = version
+		v.Set("indexer.version", version)
 	}
 
-	// Log level
+	// Log level - direct environment variable override
 	if logLevel := os.Getenv("LOG_LEVEL"); logLevel != "" {
-		cfg.Logging.Level = logLevel
+		v.Set("logging.level", logLevel)
 	}
 
 	// Handle legacy RPC_URL and START_BLOCK for backward compatibility
-	if rpcURL := os.Getenv("RPC_URL"); rpcURL != "" && len(cfg.Networks) == 0 {
-		// Create a default mainnet network if none exists
+	networksEmpty := true
+	if v.IsSet("networks") {
+		networksVal := v.Get("networks")
+		if networks, ok := networksVal.([]interface{}); ok {
+			networksEmpty = len(networks) == 0
+		}
+	}
+
+	if rpcURL := os.Getenv("RPC_URL"); rpcURL != "" && networksEmpty {
+		// Create a default network if none exists
 		startBlock := os.Getenv("START_BLOCK")
 		if startBlock == "" {
 			startBlock = "LATEST"
 		}
 
-		cfg.Networks = append(cfg.Networks, NetworkConfig{
-			Name:       "mainnet",
-			ChainID:    1,
-			RpcURL:     rpcURL,
-			StartBlock: startBlock,
-			Enabled:    true,
+		// Check if ETH_RPC_URL is set (newer variable name)
+		if ethRpcURL := os.Getenv("ETH_RPC_URL"); ethRpcURL != "" {
+			rpcURL = ethRpcURL // Prefer ETH_RPC_URL over RPC_URL
+		}
+
+		// Try to determine the network from the RPC URL
+		networkName := "mainnet"
+		chainID := 1
+
+		// Check for common testnet URLs in the RPC URL
+		rpcLower := strings.ToLower(rpcURL)
+		if strings.Contains(rpcLower, "sepolia") {
+			networkName = "sepolia"
+			chainID = 11155111
+		} else if strings.Contains(rpcLower, "goerli") {
+			networkName = "goerli"
+			chainID = 5
+		} else if strings.Contains(rpcLower, "holesky") {
+			networkName = "holesky"
+			chainID = 17000
+		}
+
+		// Add the network to Viper's configuration
+		v.Set("networks", []map[string]interface{}{
+			{
+				"name":        networkName,
+				"chain_id":    chainID,
+				"rpc_url":     rpcURL,
+				"start_block": startBlock,
+				"enabled":     true,
+			},
 		})
 	}
 
-	// Override network-specific settings
+	// Create a config struct to unmarshal into
+	var cfg Config
+
+	// Unmarshal the configuration
+	if err := v.Unmarshal(&cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	// Process network-specific environment variables
+	// This needs to be done after unmarshaling because we need the network names
 	for i := range cfg.Networks {
 		network := &cfg.Networks[i]
 		prefix := "NETWORK_" + strings.ToUpper(network.Name) + "_"
@@ -189,7 +196,25 @@ func overrideWithEnv(cfg *Config) error {
 		}
 	}
 
-	return nil
+	// Parse duration strings into time.Duration
+	pollingInterval, err := time.ParseDuration(v.GetString("indexer.polling_interval"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid polling_interval: %w", err)
+	}
+	cfg.Indexer.PollingInterval = pollingInterval
+
+	mempoolPollingInterval, err := time.ParseDuration(v.GetString("indexer.mempool_polling_interval"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid mempool_polling_interval: %w", err)
+	}
+	cfg.Indexer.MempoolPollingInterval = mempoolPollingInterval
+
+	// Validate configuration
+	if err := validateConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	return &cfg, nil
 }
 
 // validateConfig validates the configuration

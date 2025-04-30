@@ -1,0 +1,24 @@
+server:
+  port: 8080
+  dev_mode: false
+
+logging:
+  level: "info"
+  format: "json"
+
+indexer:
+  version: "v1.0.0"
+  batch_size: 100
+  polling_interval: 15s
+  mempool_polling_interval: 30s
+
+networks:
+  # - name: "mainnet"
+  #   chain_id: 1
+  #   start_block: "LATEST-1000"
+  #   enabled: true
+
+  - name: "sepolia"
+    chain_id: 11155111
+    start_block: "5187051"
+    enabled: true

@@ -4,21 +4,46 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
+// BlockSubscription represents a subscription to new blocks
+type BlockSubscription struct {
+	Subscription ethereum.Subscription
+	Headers      chan *types.Header
+}
+
+// PendingTxSubscription represents a subscription to pending transactions
+type PendingTxSubscription struct {
+	Subscription ethereum.Subscription
+	Hashes       chan common.Hash
+}
+
 // Client is a wrapper around the Ethereum client
 type Client struct {
-	ethClient *ethclient.Client
-	rpcClient *rpc.Client
+	ethClient        *ethclient.Client
+	rpcClient        *rpc.Client
+	isWebsocket      bool
+	blockSubs        map[string]*BlockSubscription
+	pendingTxSubs    map[string]*PendingTxSubscription
+	blobBaseFeeCache *big.Int
+	blobBaseFeeTime  time.Time
+	mu               sync.RWMutex
 }
 
 // NewClient creates a new Ethereum client
 func NewClient(rpcURL string) (*Client, error) {
+	// Determine if this is a WebSocket URL
+	isWebsocket := strings.HasPrefix(rpcURL, "ws://") || strings.HasPrefix(rpcURL, "wss://")
+
 	rpcClient, err := rpc.Dial(rpcURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Ethereum node: %w", err)
@@ -26,9 +51,101 @@ func NewClient(rpcURL string) (*Client, error) {
 
 	ethClient := ethclient.NewClient(rpcClient)
 	return &Client{
-		ethClient: ethClient,
-		rpcClient: rpcClient,
+		ethClient:     ethClient,
+		rpcClient:     rpcClient,
+		isWebsocket:   isWebsocket,
+		blockSubs:     make(map[string]*BlockSubscription),
+		pendingTxSubs: make(map[string]*PendingTxSubscription),
 	}, nil
+}
+
+// IsWebsocket returns true if the client is connected via WebSocket
+func (c *Client) IsWebsocket() bool {
+	return c.isWebsocket
+}
+
+// SubscribeToNewHeads subscribes to new block headers
+func (c *Client) SubscribeToNewHeads(ctx context.Context, id string) (*BlockSubscription, error) {
+	if !c.isWebsocket {
+		return nil, fmt.Errorf("websocket connection required for subscriptions")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Check if we already have a subscription with this ID
+	if sub, exists := c.blockSubs[id]; exists {
+		return sub, nil
+	}
+
+	// Create a new subscription
+	headers := make(chan *types.Header)
+	sub, err := c.ethClient.SubscribeNewHead(ctx, headers)
+	if err != nil {
+		return nil, fmt.Errorf("failed to subscribe to new heads: %w", err)
+	}
+
+	blockSub := &BlockSubscription{
+		Subscription: sub,
+		Headers:      headers,
+	}
+
+	// Store the subscription
+	c.blockSubs[id] = blockSub
+	return blockSub, nil
+}
+
+// SubscribeToPendingTransactions subscribes to pending transactions
+func (c *Client) SubscribeToPendingTransactions(ctx context.Context, id string) (*PendingTxSubscription, error) {
+	if !c.isWebsocket {
+		return nil, fmt.Errorf("websocket connection required for subscriptions")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Check if we already have a subscription with this ID
+	if sub, exists := c.pendingTxSubs[id]; exists {
+		return sub, nil
+	}
+
+	// Create a new subscription
+	hashes := make(chan common.Hash)
+	sub, err := c.rpcClient.EthSubscribe(ctx, hashes, "newPendingTransactions")
+	if err != nil {
+		return nil, fmt.Errorf("failed to subscribe to pending transactions: %w", err)
+	}
+
+	pendingTxSub := &PendingTxSubscription{
+		Subscription: sub,
+		Hashes:       hashes,
+	}
+
+	// Store the subscription
+	c.pendingTxSubs[id] = pendingTxSub
+	return pendingTxSub, nil
+}
+
+// UnsubscribeFromNewHeads unsubscribes from new block headers
+func (c *Client) UnsubscribeFromNewHeads(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if sub, exists := c.blockSubs[id]; exists {
+		sub.Subscription.Unsubscribe()
+		delete(c.blockSubs, id)
+	}
+}
+
+// UnsubscribeFromPendingTransactions unsubscribes from pending transactions
+func (c *Client) UnsubscribeFromPendingTransactions(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if sub, exists := c.pendingTxSubs[id]; exists {
+		sub.Subscription.Unsubscribe()
+		delete(c.pendingTxSubs, id)
+	}
 }
 
 // GetLatestBlockNumber gets the latest block number
@@ -80,8 +197,17 @@ func (c *Client) IsBlobTransaction(tx *types.Transaction) bool {
 	return tx.Type() == types.BlobTxType
 }
 
-// GetBlobBaseFee gets the base fee per blob gas for a block
+// GetBlobBaseFee gets the base fee per blob gas for a block with caching
 func (c *Client) GetBlobBaseFee(ctx context.Context, blockNumber uint64) (*big.Int, error) {
+	c.mu.RLock()
+	// Check if we have a cached value that's less than 30 seconds old
+	if c.blobBaseFeeCache != nil && time.Since(c.blobBaseFeeTime) < 30*time.Second {
+		cachedValue := new(big.Int).Set(c.blobBaseFeeCache)
+		c.mu.RUnlock()
+		return cachedValue, nil
+	}
+	c.mu.RUnlock()
+
 	var result string
 	// The eth_blobBaseFee method doesn't take any arguments, it returns the current blob base fee
 	// We ignore the blockNumber parameter and just get the current blob base fee
@@ -101,6 +227,12 @@ func (c *Client) GetBlobBaseFee(ctx context.Context, blockNumber uint64) (*big.I
 		return big.NewInt(1000000000), nil // Default value of 1 Gwei
 	}
 
+	// Cache the result
+	c.mu.Lock()
+	c.blobBaseFeeCache = new(big.Int).Set(baseFee)
+	c.blobBaseFeeTime = time.Now()
+	c.mu.Unlock()
+
 	return baseFee, nil
 }
 
@@ -109,8 +241,28 @@ func (c *Client) GetBlockTimestamp(block *types.Block) time.Time {
 	return time.Unix(int64(block.Time()), 0)
 }
 
-// Close closes the Ethereum client
+// GetTransactionByHash gets a transaction by its hash
+func (c *Client) GetTransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, bool, error) {
+	return c.ethClient.TransactionByHash(ctx, hash)
+}
+
+// Close closes the Ethereum client and all subscriptions
 func (c *Client) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Unsubscribe from all block subscriptions
+	for id, sub := range c.blockSubs {
+		sub.Subscription.Unsubscribe()
+		delete(c.blockSubs, id)
+	}
+
+	// Unsubscribe from all pending transaction subscriptions
+	for id, sub := range c.pendingTxSubs {
+		sub.Subscription.Unsubscribe()
+		delete(c.pendingTxSubs, id)
+	}
+
 	c.ethClient.Close()
 	c.rpcClient.Close()
 }

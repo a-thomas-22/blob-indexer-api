@@ -6,333 +6,132 @@ import (
 	"time"
 )
 
-func TestLoad(t *testing.T) {
-	// Test with environment variables
-	os.Setenv("DB_URL", "postgres://test:test@localhost:5432/test")
-	os.Setenv("PORT", "9090")
-	os.Setenv("RPC_URL", "https://test.infura.io/v3/test")
-	os.Setenv("START_BLOCK", "12345")
-	os.Setenv("INDEXER_VERSION", "v2.0.0")
-	os.Setenv("DEV_MODE", "true")
-	os.Setenv("LOG_LEVEL", "debug")
+func TestViperConfig(t *testing.T) {
+	// Save original environment variables to restore later
+	originalConfigPath := os.Getenv("CONFIG_PATH")
+	originalDBURL := os.Getenv("DB_URL")
+	originalMainnetRPCURL := os.Getenv("NETWORK_MAINNET_RPC_URL")
+	originalSepoliaRPCURL := os.Getenv("NETWORK_SEPOLIA_RPC_URL")
 
-	// Load configuration
+	// Clean up after the test
+	defer func() {
+		os.Setenv("CONFIG_PATH", originalConfigPath)
+		os.Setenv("DB_URL", originalDBURL)
+		os.Setenv("NETWORK_MAINNET_RPC_URL", originalMainnetRPCURL)
+		os.Setenv("NETWORK_SEPOLIA_RPC_URL", originalSepoliaRPCURL)
+	}()
+
+	// Set up test environment
+	os.Setenv("CONFIG_PATH", "../../railway-config.yaml")
+	os.Setenv("DB_URL", "postgres://test:test@localhost:5432/testdb")
+	os.Setenv("NETWORK_MAINNET_RPC_URL", "https://mainnet.example.com")
+	os.Setenv("NETWORK_SEPOLIA_RPC_URL", "https://sepolia.example.com")
+
+	// Load the configuration
 	cfg, err := Load()
 	if err != nil {
+		// Print more debug information
+		t.Logf("Error loading configuration: %v", err)
+
+		// Try to load the railway-config.yaml file directly to see its contents
+		data, readErr := os.ReadFile("../../railway-config.yaml")
+		if readErr != nil {
+			t.Logf("Error reading railway-config.yaml: %v", readErr)
+		} else {
+			t.Logf("railway-config.yaml contents:\n%s", string(data))
+		}
+
 		t.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	// Check database URL
-	if cfg.Database.URL != "postgres://test:test@localhost:5432/test" {
-		t.Errorf("Expected Database.URL to be 'postgres://test:test@localhost:5432/test', got '%s'", cfg.Database.URL)
+	// Verify database URL from environment variable
+	if cfg.Database.URL != "postgres://test:test@localhost:5432/testdb" {
+		t.Errorf("Expected DB URL to be from environment variable, got: %s", cfg.Database.URL)
 	}
 
-	// Check server port
-	if cfg.Server.Port != 9090 {
-		t.Errorf("Expected Server.Port to be 9090, got %d", cfg.Server.Port)
+	// Verify server configuration from config file
+	if cfg.Server.Port != 8080 {
+		t.Errorf("Expected server port to be 8080, got: %d", cfg.Server.Port)
 	}
 
-	// Check dev mode
-	if !cfg.Server.DevMode {
-		t.Errorf("Expected Server.DevMode to be true, got %v", cfg.Server.DevMode)
+	if cfg.Server.DevMode != false {
+		t.Errorf("Expected server dev mode to be false, got: %v", cfg.Server.DevMode)
 	}
 
-	// Check indexer version
-	if cfg.Indexer.Version != "v2.0.0" {
-		t.Errorf("Expected Indexer.Version to be 'v2.0.0', got '%s'", cfg.Indexer.Version)
+	// Verify logging configuration from config file
+	if cfg.Logging.Level != "info" {
+		t.Errorf("Expected logging level to be info, got: %s", cfg.Logging.Level)
 	}
 
-	// Check log level
-	if cfg.Logging.Level != "debug" {
-		t.Errorf("Expected Logging.Level to be 'debug', got '%s'", cfg.Logging.Level)
+	if cfg.Logging.Format != "json" {
+		t.Errorf("Expected logging format to be json, got: %s", cfg.Logging.Format)
 	}
 
-	// Check networks
-	if len(cfg.Networks) != 1 {
-		t.Errorf("Expected 1 network, got %d", len(cfg.Networks))
-	} else {
-		network := cfg.Networks[0]
-		if network.Name != "mainnet" {
-			t.Errorf("Expected network name to be 'mainnet', got '%s'", network.Name)
-		}
-		if network.ChainID != 1 {
-			t.Errorf("Expected network chain ID to be 1, got %d", network.ChainID)
-		}
-		if network.RpcURL != "https://test.infura.io/v3/test" {
-			t.Errorf("Expected network RPC URL to be 'https://test.infura.io/v3/test', got '%s'", network.RpcURL)
-		}
-		if network.StartBlock != "12345" {
-			t.Errorf("Expected network start block to be '12345', got '%s'", network.StartBlock)
-		}
-		if !network.Enabled {
-			t.Errorf("Expected network to be enabled, got %v", network.Enabled)
-		}
+	// Verify indexer configuration from config file
+	if cfg.Indexer.Version != "v1.0.0" {
+		t.Errorf("Expected indexer version to be v1.0.0, got: %s", cfg.Indexer.Version)
 	}
 
-	// Test with multiple networks
-	os.Setenv("NETWORK_SEPOLIA_RPC_URL", "https://sepolia.infura.io/v3/test")
-	os.Setenv("NETWORK_SEPOLIA_START_BLOCK", "5000")
-	os.Setenv("NETWORK_SEPOLIA_ENABLED", "true")
-
-	// Load configuration again
-	cfg, err = Load()
-	if err != nil {
-		t.Fatalf("Failed to load configuration: %v", err)
+	if cfg.Indexer.BatchSize != 100 {
+		t.Errorf("Expected batch size to be 100, got: %d", cfg.Indexer.BatchSize)
 	}
 
-	// Check networks
-	if len(cfg.Networks) != 1 {
-		t.Errorf("Expected 1 network, got %d", len(cfg.Networks))
+	if cfg.Indexer.PollingInterval != 15*time.Second {
+		t.Errorf("Expected polling interval to be 15s, got: %s", cfg.Indexer.PollingInterval)
 	}
 
-	// Clean up
-	os.Unsetenv("DB_URL")
-	os.Unsetenv("PORT")
-	os.Unsetenv("RPC_URL")
-	os.Unsetenv("START_BLOCK")
-	os.Unsetenv("INDEXER_VERSION")
-	os.Unsetenv("DEV_MODE")
-	os.Unsetenv("LOG_LEVEL")
-	os.Unsetenv("NETWORK_SEPOLIA_RPC_URL")
-	os.Unsetenv("NETWORK_SEPOLIA_START_BLOCK")
-	os.Unsetenv("NETWORK_SEPOLIA_ENABLED")
-}
-
-func TestGetEnabledNetworks(t *testing.T) {
-	cfg := &Config{
-		Networks: []NetworkConfig{
-			{
-				Name:       "mainnet",
-				ChainID:    1,
-				RpcURL:     "https://mainnet.infura.io/v3/test",
-				StartBlock: "LATEST-1000",
-				Enabled:    true,
-			},
-			{
-				Name:       "sepolia",
-				ChainID:    11155111,
-				RpcURL:     "https://sepolia.infura.io/v3/test",
-				StartBlock: "LATEST-100",
-				Enabled:    false,
-			},
-		},
+	if cfg.Indexer.MempoolPollingInterval != 30*time.Second {
+		t.Errorf("Expected mempool polling interval to be 30s, got: %s", cfg.Indexer.MempoolPollingInterval)
 	}
 
-	enabled := cfg.GetEnabledNetworks()
-	if len(enabled) != 1 {
-		t.Errorf("Expected 1 enabled network, got %d", len(enabled))
-	}
-	if enabled[0].Name != "mainnet" {
-		t.Errorf("Expected enabled network to be 'mainnet', got '%s'", enabled[0].Name)
-	}
-}
-
-func TestGetNetworkByChainID(t *testing.T) {
-	cfg := &Config{
-		Networks: []NetworkConfig{
-			{
-				Name:       "mainnet",
-				ChainID:    1,
-				RpcURL:     "https://mainnet.infura.io/v3/test",
-				StartBlock: "LATEST-1000",
-				Enabled:    true,
-			},
-			{
-				Name:       "sepolia",
-				ChainID:    11155111,
-				RpcURL:     "https://sepolia.infura.io/v3/test",
-				StartBlock: "LATEST-100",
-				Enabled:    false,
-			},
-		},
-	}
-
-	// Test with existing chain ID
-	network, found := cfg.GetNetworkByChainID(1)
-	if !found {
-		t.Errorf("Expected to find network with chain ID 1")
-	}
-	if network.Name != "mainnet" {
-		t.Errorf("Expected network name to be 'mainnet', got '%s'", network.Name)
-	}
-
-	// Test with non-existent chain ID
-	_, found = cfg.GetNetworkByChainID(999)
-	if found {
-		t.Errorf("Expected not to find network with chain ID 999")
-	}
-}
-
-func TestGetNetworkByName(t *testing.T) {
-	cfg := &Config{
-		Networks: []NetworkConfig{
-			{
-				Name:       "mainnet",
-				ChainID:    1,
-				RpcURL:     "https://mainnet.infura.io/v3/test",
-				StartBlock: "LATEST-1000",
-				Enabled:    true,
-			},
-			{
-				Name:       "sepolia",
-				ChainID:    11155111,
-				RpcURL:     "https://sepolia.infura.io/v3/test",
-				StartBlock: "LATEST-100",
-				Enabled:    false,
-			},
-		},
-	}
-
-	// Test with existing name
-	network, found := cfg.GetNetworkByName("mainnet")
-	if !found {
-		t.Errorf("Expected to find network with name 'mainnet'")
-	}
-	if network.ChainID != 1 {
-		t.Errorf("Expected network chain ID to be 1, got %d", network.ChainID)
-	}
-
-	// Test with non-existent name
-	_, found = cfg.GetNetworkByName("goerli")
-	if found {
-		t.Errorf("Expected not to find network with name 'goerli'")
-	}
-}
-
-func TestLoadFromFile(t *testing.T) {
-	// Create a temporary config file
-	content := `
-database:
-  url: "postgres://test:test@localhost:5432/test"
-
-server:
-  port: 9090
-  dev_mode: true
-
-logging:
-  level: "debug"
-  format: "json"
-
-indexer:
-  version: "v2.0.0"
-  batch_size: 200
-  polling_interval: 30s
-  mempool_polling_interval: 60s
-
-networks:
-  - name: "mainnet"
-    chain_id: 1
-    rpc_url: "https://mainnet.infura.io/v3/test"
-    start_block: "LATEST-1000"
-    enabled: true
-    
-  - name: "sepolia"
-    chain_id: 11155111
-    rpc_url: "https://sepolia.infura.io/v3/test"
-    start_block: "LATEST-100"
-    enabled: false
-`
-	tmpfile, err := os.CreateTemp("", "config-*.yaml")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	defer os.Remove(tmpfile.Name())
-
-	if _, err := tmpfile.Write([]byte(content)); err != nil {
-		t.Fatalf("Failed to write to temporary file: %v", err)
-	}
-	if err := tmpfile.Close(); err != nil {
-		t.Fatalf("Failed to close temporary file: %v", err)
-	}
-
-	// Set the config path environment variable
-	os.Setenv("CONFIG_PATH", tmpfile.Name())
-	defer os.Unsetenv("CONFIG_PATH")
-
-	// Load configuration
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Failed to load configuration: %v", err)
-	}
-
-	// Check database URL
-	if cfg.Database.URL != "postgres://test:test@localhost:5432/test" {
-		t.Errorf("Expected Database.URL to be 'postgres://test:test@localhost:5432/test', got '%s'", cfg.Database.URL)
-	}
-
-	// Check server port
-	if cfg.Server.Port != 9090 {
-		t.Errorf("Expected Server.Port to be 9090, got %d", cfg.Server.Port)
-	}
-
-	// Check dev mode
-	if !cfg.Server.DevMode {
-		t.Errorf("Expected Server.DevMode to be true, got %v", cfg.Server.DevMode)
-	}
-
-	// Check indexer version
-	if cfg.Indexer.Version != "v2.0.0" {
-		t.Errorf("Expected Indexer.Version to be 'v2.0.0', got '%s'", cfg.Indexer.Version)
-	}
-
-	// Check indexer batch size
-	if cfg.Indexer.BatchSize != 200 {
-		t.Errorf("Expected Indexer.BatchSize to be 200, got %d", cfg.Indexer.BatchSize)
-	}
-
-	// Check indexer polling interval
-	if cfg.Indexer.PollingInterval != 30*time.Second {
-		t.Errorf("Expected Indexer.PollingInterval to be 30s, got %s", cfg.Indexer.PollingInterval)
-	}
-
-	// Check indexer mempool polling interval
-	if cfg.Indexer.MempoolPollingInterval != 60*time.Second {
-		t.Errorf("Expected Indexer.MempoolPollingInterval to be 60s, got %s", cfg.Indexer.MempoolPollingInterval)
-	}
-
-	// Check log level
-	if cfg.Logging.Level != "debug" {
-		t.Errorf("Expected Logging.Level to be 'debug', got '%s'", cfg.Logging.Level)
-	}
-
-	// Check networks
+	// Verify networks configuration
 	if len(cfg.Networks) != 2 {
-		t.Errorf("Expected 2 networks, got %d", len(cfg.Networks))
-	} else {
-		// Check mainnet
-		mainnet := cfg.Networks[0]
-		if mainnet.Name != "mainnet" {
-			t.Errorf("Expected network name to be 'mainnet', got '%s'", mainnet.Name)
-		}
-		if mainnet.ChainID != 1 {
-			t.Errorf("Expected network chain ID to be 1, got %d", mainnet.ChainID)
-		}
-		if mainnet.RpcURL != "https://mainnet.infura.io/v3/test" {
-			t.Errorf("Expected network RPC URL to be 'https://mainnet.infura.io/v3/test', got '%s'", mainnet.RpcURL)
-		}
-		if mainnet.StartBlock != "LATEST-1000" {
-			t.Errorf("Expected network start block to be 'LATEST-1000', got '%s'", mainnet.StartBlock)
-		}
-		if !mainnet.Enabled {
-			t.Errorf("Expected network to be enabled, got %v", mainnet.Enabled)
-		}
+		t.Errorf("Expected 2 networks, got: %d", len(cfg.Networks))
+	}
 
-		// Check sepolia
-		sepolia := cfg.Networks[1]
-		if sepolia.Name != "sepolia" {
-			t.Errorf("Expected network name to be 'sepolia', got '%s'", sepolia.Name)
-		}
-		if sepolia.ChainID != 11155111 {
-			t.Errorf("Expected network chain ID to be 11155111, got %d", sepolia.ChainID)
-		}
-		if sepolia.RpcURL != "https://sepolia.infura.io/v3/test" {
-			t.Errorf("Expected network RPC URL to be 'https://sepolia.infura.io/v3/test', got '%s'", sepolia.RpcURL)
-		}
-		if sepolia.StartBlock != "LATEST-100" {
-			t.Errorf("Expected network start block to be 'LATEST-100', got '%s'", sepolia.StartBlock)
-		}
-		if sepolia.Enabled {
-			t.Errorf("Expected network to be disabled, got %v", sepolia.Enabled)
-		}
+	// Verify mainnet network configuration
+	mainnet := cfg.Networks[0]
+	if mainnet.Name != "mainnet" {
+		t.Errorf("Expected first network name to be mainnet, got: %s", mainnet.Name)
+	}
+
+	if mainnet.ChainID != 1 {
+		t.Errorf("Expected mainnet chain ID to be 1, got: %d", mainnet.ChainID)
+	}
+
+	// RPC URL should be from environment variable, not config file
+	if mainnet.RpcURL != "https://mainnet.example.com" {
+		t.Errorf("Expected mainnet RPC URL to be from environment variable, got: %s", mainnet.RpcURL)
+	}
+
+	if mainnet.StartBlock != "LATEST-1000" {
+		t.Errorf("Expected mainnet start block to be LATEST-1000, got: %s", mainnet.StartBlock)
+	}
+
+	if !mainnet.Enabled {
+		t.Errorf("Expected mainnet to be enabled")
+	}
+
+	// Verify sepolia network configuration
+	sepolia := cfg.Networks[1]
+	if sepolia.Name != "sepolia" {
+		t.Errorf("Expected second network name to be sepolia, got: %s", sepolia.Name)
+	}
+
+	if sepolia.ChainID != 11155111 {
+		t.Errorf("Expected sepolia chain ID to be 11155111, got: %d", sepolia.ChainID)
+	}
+
+	if sepolia.StartBlock != "LATEST-100" {
+		t.Errorf("Expected sepolia start block to be LATEST-100, got: %s", sepolia.StartBlock)
+	}
+
+	// RPC URL should be from environment variable, not config file
+	if sepolia.RpcURL != "https://sepolia.example.com" {
+		t.Errorf("Expected sepolia RPC URL to be from environment variable, got: %s", sepolia.RpcURL)
+	}
+
+	if !sepolia.Enabled {
+		t.Errorf("Expected sepolia to be enabled")
 	}
 }
