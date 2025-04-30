@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -76,15 +77,47 @@ func Load() (*Config, error) {
 	configPath := os.Getenv("CONFIG_PATH")
 	if configPath != "" {
 		// Use the specified config file
+		fmt.Printf("CONFIG_PATH environment variable set to: %s\n", configPath)
+
+		// Check if the file exists
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			fmt.Printf("WARNING: Config file not found at path: %s\n", configPath)
+
+			// List files in the directory to help debug
+			dir := filepath.Dir(configPath)
+			if dir == "" {
+				dir = "."
+			}
+
+			fmt.Printf("Listing files in directory: %s\n", dir)
+			files, err := os.ReadDir(dir)
+			if err != nil {
+				fmt.Printf("Error reading directory: %v\n", err)
+			} else {
+				for _, file := range files {
+					fmt.Printf("  - %s\n", file.Name())
+				}
+			}
+		} else {
+			fmt.Printf("Config file found at path: %s\n", configPath)
+		}
+
 		v.SetConfigFile(configPath)
+	} else {
+		fmt.Println("CONFIG_PATH environment variable not set, using default config file")
 	}
 
 	// Read the config file
 	if err := v.ReadInConfig(); err != nil {
 		// It's okay if the config file doesn't exist
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			fmt.Printf("Error reading config file: %v\n", err)
 			return nil, fmt.Errorf("failed to read config file: %w", err)
+		} else {
+			fmt.Println("Config file not found, continuing with defaults and environment variables")
 		}
+	} else {
+		fmt.Printf("Successfully loaded config from: %s\n", v.ConfigFileUsed())
 	}
 
 	// Set up environment variable binding
