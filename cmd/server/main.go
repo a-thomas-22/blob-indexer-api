@@ -61,6 +61,19 @@ func main() {
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
+		// Log what file was attempted to be loaded
+		logger.Error("Failed to load configuration",
+			zap.String("config_path", os.Getenv("CONFIG_PATH")),
+			zap.String("config_file", "railway-config.yaml"),
+			zap.Error(err))
+		// Print current working directory for debugging
+		cwd, _ := os.Getwd()
+		logger.Error("Current working directory", zap.String("cwd", cwd))
+		// Print environment variables for debugging
+		for _, env := range os.Environ() {
+			logger.Debug("Environment variable", zap.String("env", env))
+		}
+
 		logger.Fatal("Failed to load configuration", zap.Error(err))
 	}
 
