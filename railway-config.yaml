@@ -13,11 +13,6 @@ indexer:
   mempool_polling_interval: 30s
 
 networks:
-  # - name: "mainnet"
-  #   chain_id: 1
-  #   start_block: "LATEST-1000"
-  #   enabled: true
-
   - name: "sepolia"
     chain_id: 11155111
     start_block: "5187051"

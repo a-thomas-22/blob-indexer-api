@@ -252,35 +252,77 @@ func Load() (*Config, error) {
 
 // validateConfig validates the configuration
 func validateConfig(cfg *Config) error {
+	fmt.Println("Validating configuration...")
+
 	// Validate database URL
 	if cfg.Database.URL == "" {
-		return fmt.Errorf("database URL is required")
+		// Check if DB_URL environment variable is set
+		if os.Getenv("DB_URL") == "" {
+			fmt.Println("ERROR: Database URL is required - set DB_URL environment variable or add database.url to config file")
+			return fmt.Errorf("database URL is required - set DB_URL environment variable or add database.url to config file")
+		} else {
+			fmt.Println("WARNING: Database URL is not set in config, but DB_URL environment variable is set")
+			// Set the database URL from the environment variable
+			cfg.Database.URL = os.Getenv("DB_URL")
+		}
 	}
+
+	fmt.Printf("Database URL: %s (masked for security)\n", maskConnectionString(cfg.Database.URL))
 
 	// Validate networks
 	if len(cfg.Networks) == 0 {
+		fmt.Println("ERROR: At least one network configuration is required")
 		return fmt.Errorf("at least one network configuration is required")
+	} else {
+		fmt.Printf("Found %d network(s) in configuration\n", len(cfg.Networks))
 	}
 
 	for i, network := range cfg.Networks {
+		fmt.Printf("Validating network #%d: %s\n", i+1, network.Name)
+
 		if network.Name == "" {
+			fmt.Printf("ERROR: Network #%d is missing a name\n", i+1)
 			return fmt.Errorf("network #%d is missing a name", i+1)
 		}
 
 		if network.ChainID <= 0 {
-			return fmt.Errorf("network '%s' has an invalid chain ID", network.Name)
+			fmt.Printf("ERROR: Network '%s' has an invalid chain ID: %d\n", network.Name, network.ChainID)
+			return fmt.Errorf("network '%s' has an invalid chain ID: %d", network.Name, network.ChainID)
+		} else {
+			fmt.Printf("  Chain ID: %d\n", network.ChainID)
 		}
 
 		if network.RpcURL == "" {
+			fmt.Printf("ERROR: Network '%s' is missing an RPC URL\n", network.Name)
 			return fmt.Errorf("network '%s' is missing an RPC URL", network.Name)
+		} else {
+			fmt.Printf("  RPC URL: %s (masked for security)\n", maskURL(network.RpcURL))
 		}
 
 		if network.StartBlock == "" {
+			fmt.Printf("ERROR: Network '%s' is missing a start block\n", network.Name)
 			return fmt.Errorf("network '%s' is missing a start block", network.Name)
+		} else {
+			fmt.Printf("  Start Block: %s\n", network.StartBlock)
 		}
+
+		fmt.Printf("  Enabled: %v\n", network.Enabled)
 	}
 
+	fmt.Println("Configuration validation successful")
 	return nil
+}
+
+// maskConnectionString masks a database connection string for security
+func maskConnectionString(connStr string) string {
+	// Simple masking for now - in a real app you might want to parse the URL properly
+	return "****"
+}
+
+// maskURL masks a URL for security
+func maskURL(url string) string {
+	// Simple masking for now - in a real app you might want to parse the URL properly
+	return "****"
 }
 
 // GetEnabledNetworks returns a slice of enabled network configurations

@@ -85,35 +85,12 @@ func TestViperConfig(t *testing.T) {
 	}
 
 	// Verify networks configuration
-	if len(cfg.Networks) != 2 {
-		t.Errorf("Expected 2 networks, got: %d", len(cfg.Networks))
-	}
-
-	// Verify mainnet network configuration
-	mainnet := cfg.Networks[0]
-	if mainnet.Name != "mainnet" {
-		t.Errorf("Expected first network name to be mainnet, got: %s", mainnet.Name)
-	}
-
-	if mainnet.ChainID != 1 {
-		t.Errorf("Expected mainnet chain ID to be 1, got: %d", mainnet.ChainID)
-	}
-
-	// RPC URL should be from environment variable, not config file
-	if mainnet.RpcURL != "https://mainnet.example.com" {
-		t.Errorf("Expected mainnet RPC URL to be from environment variable, got: %s", mainnet.RpcURL)
-	}
-
-	if mainnet.StartBlock != "LATEST-1000" {
-		t.Errorf("Expected mainnet start block to be LATEST-1000, got: %s", mainnet.StartBlock)
-	}
-
-	if !mainnet.Enabled {
-		t.Errorf("Expected mainnet to be enabled")
+	if len(cfg.Networks) != 1 {
+		t.Errorf("Expected 1 network, got: %d", len(cfg.Networks))
 	}
 
 	// Verify sepolia network configuration
-	sepolia := cfg.Networks[1]
+	sepolia := cfg.Networks[0]
 	if sepolia.Name != "sepolia" {
 		t.Errorf("Expected second network name to be sepolia, got: %s", sepolia.Name)
 	}
@@ -122,8 +99,8 @@ func TestViperConfig(t *testing.T) {
 		t.Errorf("Expected sepolia chain ID to be 11155111, got: %d", sepolia.ChainID)
 	}
 
-	if sepolia.StartBlock != "LATEST-100" {
-		t.Errorf("Expected sepolia start block to be LATEST-100, got: %s", sepolia.StartBlock)
+	if sepolia.StartBlock != "5187051" {
+		t.Errorf("Expected sepolia start block to be 5187051, got: %s", sepolia.StartBlock)
 	}
 
 	// RPC URL should be from environment variable, not config file
