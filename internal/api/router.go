@@ -33,21 +33,26 @@ func NewRouter(db *db.DB, indexers map[int]*indexer.Indexer, cfg *config.Config)
 
 	r := chi.NewRouter()
 
+	// Rate limiter: 100 requests/second per IP with burst of 200
+	rateLimiter := NewRateLimiter(100, 200)
+
 	// Middleware
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(RateLimitMiddleware(rateLimiter))
 	r.Use(LoggerMiddleware)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 
-	// CORS
+	// CORS — AllowCredentials is false since this is a public read API.
+	// Using wildcard origins with credentials enabled is a security risk.
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
+		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Content-Type"},
 		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300,
+		AllowCredentials: false,
+		MaxAge:           3600,
 	}))
 
 	// Swagger UI

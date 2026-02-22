@@ -53,6 +53,15 @@ type IndexerMetadata struct {
 	Value     string `db:"value"`
 }
 
+// IndexedBlock records a processed block's hashes for chain reorganization detection
+type IndexedBlock struct {
+	NetworkID   int       `db:"network_id"`
+	BlockNumber int64     `db:"block_number"`
+	BlockHash   string    `db:"block_hash"`
+	ParentHash  string    `db:"parent_hash"`
+	IndexedAt   time.Time `db:"indexed_at"`
+}
+
 // Common metadata keys
 const (
 	MetadataLastIndexedBlock = "last_indexed_block"

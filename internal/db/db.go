@@ -8,6 +8,7 @@ import (
 	"log"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -36,12 +37,18 @@ func (db *DB) GetContext(ctx context.Context, dest interface{}, query string, ar
 	return db.DB.GetContext(ctx, dest, query, args...)
 }
 
-// Connect establishes a connection to the database
+// Connect establishes a connection to the database with pool configuration
 func Connect(ctx context.Context, dbURL string) (*DB, error) {
 	db, err := sqlx.ConnectContext(ctx, "postgres", dbURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
+
+	// Configure connection pool
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	db.SetConnMaxIdleTime(1 * time.Minute)
 
 	// Test the connection
 	if err := db.PingContext(ctx); err != nil {
@@ -139,4 +146,30 @@ func (db *DB) SetNetworkMetadata(ctx context.Context, networkID int, key, value 
 		return fmt.Errorf("failed to set metadata for key %s and network %d: %w", key, networkID, err)
 	}
 	return nil
+}
+
+// GetIndexedBlockHash returns the stored block hash for a given block number.
+// Returns sql.ErrNoRows if the block hasn't been indexed.
+func (db *DB) GetIndexedBlockHash(ctx context.Context, networkID int, blockNumber uint64) (string, error) {
+	var hash string
+	query := "SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2"
+	err := db.GetContext(ctx, &hash, query, networkID, blockNumber)
+	if err != nil {
+		return "", err
+	}
+	return hash, nil
+}
+
+// DeleteBlobsFromBlock deletes all blobs at or above the given block number for a network.
+func (db *DB) DeleteBlobsFromBlock(ctx context.Context, networkID int, fromBlock int64) error {
+	query := "DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2"
+	_, err := db.ExecContext(ctx, query, networkID, fromBlock)
+	return err
+}
+
+// DeleteIndexedBlocksFromBlock deletes indexed block records at or above the given block number.
+func (db *DB) DeleteIndexedBlocksFromBlock(ctx context.Context, networkID int, fromBlock uint64) error {
+	query := "DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2"
+	_, err := db.ExecContext(ctx, query, networkID, fromBlock)
+	return err
 }
