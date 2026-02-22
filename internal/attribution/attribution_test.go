@@ -4,6 +4,8 @@ import (
 	"testing"
 )
 
+const testUserOptimism = "Optimism"
+
 func TestNewService(t *testing.T) {
 	svc := NewService(nil)
 	if svc == nil {
@@ -27,11 +29,11 @@ func TestSetNetworkID(t *testing.T) {
 
 func TestGetUserAttribution_KnownUser(t *testing.T) {
 	svc := NewService(nil)
-	svc.knownUsers["0xabcdef1234567890abcdef1234567890abcdef12"] = "Optimism"
+	svc.knownUsers["0xabcdef1234567890abcdef1234567890abcdef12"] = testUserOptimism
 
 	result := svc.GetUserAttribution("0xABCDEF1234567890ABCDEF1234567890ABCDEF12")
-	if result != "Optimism" {
-		t.Errorf("expected 'Optimism', got %q", result)
+	if result != testUserOptimism {
+		t.Errorf("expected %q, got %q", testUserOptimism, result)
 	}
 }
 
@@ -70,7 +72,7 @@ func TestGetUserAttribution_CaseInsensitive(t *testing.T) {
 
 func TestGetUserAttribution_MultipleUsers(t *testing.T) {
 	svc := NewService(nil)
-	svc.knownUsers["0xaaa"] = "Optimism"
+	svc.knownUsers["0xaaa"] = testUserOptimism
 	svc.knownUsers["0xbbb"] = "Arbitrum"
 	svc.knownUsers["0xccc"] = "Base"
 
@@ -78,7 +80,7 @@ func TestGetUserAttribution_MultipleUsers(t *testing.T) {
 		address string
 		want    string
 	}{
-		{"0xAAA", "Optimism"},
+		{"0xAAA", testUserOptimism},
 		{"0xBBB", "Arbitrum"},
 		{"0xCCC", "Base"},
 		{"0xDDD", ""},

@@ -2,12 +2,19 @@ package indexer
 
 import (
 	"context"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
+	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
+
+func TestMain(m *testing.M) {
+	logger.Initialize()
+	os.Exit(m.Run())
+}
 
 func TestConstants(t *testing.T) {
 	if DefaultBatchSize != 100 {

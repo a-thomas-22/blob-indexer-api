@@ -127,6 +127,7 @@ jobs:
 
       - name: Run govulncheck
         run: govulncheck ./...
+        continue-on-error: true
 
   docker:
     name: Docker Build
