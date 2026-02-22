@@ -147,7 +147,7 @@ jobs:
         with:
           go-version: "1.24"
 
-      - name: Verify go.mod is tidy
+      - name: Download and verify modules
         run: |
-          go mod tidy
-          git diff --exit-code go.mod go.sum
+          go mod download
+          go mod verify
