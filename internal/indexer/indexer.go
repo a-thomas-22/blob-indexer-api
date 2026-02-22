@@ -3,12 +3,14 @@ package indexer
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math/big"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
@@ -34,7 +36,22 @@ const (
 
 	// DefaultWorkerCount is the default number of workers for parallel processing
 	DefaultWorkerCount = 4
+
+	// maxBlockRetries is the number of inline retries per block before tracking as failed
+	maxBlockRetries = 3
+
+	// maxGapScanRetries is the total failure count before a block is considered permanently failed
+	maxGapScanRetries = 10
+
+	// gapScanInterval is how often the gap scanner re-queues failed blocks
+	gapScanInterval = 5 * time.Minute
+
+	// maxReorgDepth is the maximum number of blocks to walk back during reorg detection
+	maxReorgDepth = 64
 )
+
+// errReorgDetected is returned when a chain reorganization is detected and handled
+var errReorgDetected = errors.New("chain reorganization detected")
 
 // BlockTask represents a task to process a block
 type BlockTask struct {
@@ -55,13 +72,16 @@ type Indexer struct {
 	ctx                    context.Context
 	cancel                 context.CancelFunc
 	wg                     sync.WaitGroup
-	lastIndexedBlock       uint64
+	lastIndexedBlock       uint64 // accessed with sync/atomic
 	indexerVersion         string
-	mu                     sync.Mutex
+	mu                     sync.Mutex // protects DB metadata writes
 	blockTaskCh            chan BlockTask
 	useWebsocket           bool
 	blockSub               *ethereum.BlockSubscription
 	pendingTxSub           *ethereum.PendingTxSubscription
+	failedBlocks           map[uint64]int // block number -> cumulative failure count
+	failedBlocksMu         sync.Mutex
+	reorgDetected          uint32 // atomic flag: 1 = reorg detected, main loop should reset
 }
 
 // New creates a new indexer
@@ -96,6 +116,7 @@ func New(ctx context.Context, db *db.DB, ethClient *ethereum.Client, cfg *config
 		indexerVersion:         cfg.Indexer.Version,
 		blockTaskCh:            make(chan BlockTask, 1000), // Buffer for block tasks
 		useWebsocket:           useWebsocket,
+		failedBlocks:           make(map[uint64]int),
 	}
 }
 
@@ -117,7 +138,7 @@ func (i *Indexer) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to get last indexed block: %w", err)
 	}
-	i.lastIndexedBlock = lastBlock
+	atomic.StoreUint64(&i.lastIndexedBlock, lastBlock)
 
 	// Determine the starting block
 	startBlock, err := i.determineStartBlock()
@@ -139,6 +160,13 @@ func (i *Indexer) Start() error {
 	go func() {
 		defer i.wg.Done()
 		i.runBlockIndexer(startBlock)
+	}()
+
+	// Start the gap scanner for retrying failed blocks
+	i.wg.Add(1)
+	go func() {
+		defer i.wg.Done()
+		i.runGapScanner()
 	}()
 
 	// If websocket is available, subscribe to new blocks and pending transactions
@@ -272,13 +300,184 @@ func (i *Indexer) determineStartBlock() (uint64, error) {
 	}
 
 	// If we have a last indexed block, start from the next block
-	if i.lastIndexedBlock > 0 {
-		return i.lastIndexedBlock + 1, nil
+	lastBlock := atomic.LoadUint64(&i.lastIndexedBlock)
+	if lastBlock > 0 {
+		return lastBlock + 1, nil
 	}
 
 	// Otherwise, start from the EIP-4844 activation block (this is a placeholder)
 	// In a real implementation, you would use the actual EIP-4844 activation block
 	return 0, nil
+}
+
+// blockProcessingWorker processes blocks from the task channel with inline retries
+func (i *Indexer) blockProcessingWorker(workerID int) {
+	logger.Info("Starting block processing worker",
+		zap.String("network", i.network.Name),
+		zap.Int("worker_id", workerID))
+
+	for task := range i.blockTaskCh {
+		// Check if the context is cancelled
+		select {
+		case <-i.ctx.Done():
+			logger.Info("Block processing worker stopped",
+				zap.String("network", i.network.Name),
+				zap.Int("worker_id", workerID))
+			return
+		default:
+		}
+
+		// Process the block with inline retries and exponential backoff
+		var lastErr error
+		for attempt := 0; attempt <= maxBlockRetries; attempt++ {
+			if attempt > 0 {
+				delay := time.Duration(1<<uint(attempt-1)) * time.Second
+				select {
+				case <-time.After(delay):
+				case <-i.ctx.Done():
+					return
+				}
+			}
+
+			lastErr = i.processBlock(task.BlockNumber)
+			if lastErr == nil {
+				break
+			}
+
+			// Reorg was detected and handled — don't retry, the main loop will re-queue
+			if errors.Is(lastErr, errReorgDetected) {
+				lastErr = nil
+				break
+			}
+
+			if attempt < maxBlockRetries {
+				logger.Warn("Block processing failed, retrying",
+					zap.String("network", i.network.Name),
+					zap.Uint64("block", task.BlockNumber),
+					zap.Int("attempt", attempt+1),
+					zap.Int("max_retries", maxBlockRetries),
+					zap.Error(lastErr))
+			}
+		}
+
+		if lastErr != nil {
+			logger.Error("Block processing failed after all retries",
+				zap.String("network", i.network.Name),
+				zap.Uint64("block", task.BlockNumber),
+				zap.Int("retries", maxBlockRetries),
+				zap.Error(lastErr))
+			i.trackFailedBlock(task.BlockNumber)
+			continue
+		}
+
+		// Clear from failed blocks tracking on success
+		i.failedBlocksMu.Lock()
+		delete(i.failedBlocks, task.BlockNumber)
+		i.failedBlocksMu.Unlock()
+
+		// Update the last indexed block
+		i.updateLastIndexedBlock(task.BlockNumber)
+	}
+
+	logger.Info("Block processing worker exited",
+		zap.String("network", i.network.Name),
+		zap.Int("worker_id", workerID))
+}
+
+// updateLastIndexedBlock atomically updates the last indexed block and persists to DB
+func (i *Indexer) updateLastIndexedBlock(blockNumber uint64) {
+	for {
+		current := atomic.LoadUint64(&i.lastIndexedBlock)
+		if blockNumber <= current {
+			return
+		}
+		if atomic.CompareAndSwapUint64(&i.lastIndexedBlock, current, blockNumber) {
+			// Serialize DB writes to prevent out-of-order metadata updates
+			i.mu.Lock()
+			if err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(blockNumber, 10)); err != nil {
+				logger.Error("Failed to update last indexed block metadata",
+					zap.String("network", i.network.Name),
+					zap.Error(err))
+			}
+			i.mu.Unlock()
+			return
+		}
+	}
+}
+
+// trackFailedBlock records a block that failed processing for later retry by the gap scanner
+func (i *Indexer) trackFailedBlock(blockNumber uint64) {
+	i.failedBlocksMu.Lock()
+	i.failedBlocks[blockNumber]++
+	i.failedBlocksMu.Unlock()
+}
+
+// runBlockIndexer runs the block indexer
+func (i *Indexer) runBlockIndexer(startBlock uint64) {
+	logger.Info("Block indexer starting",
+		zap.String("network", i.network.Name),
+		zap.Uint64("start_block", startBlock))
+
+	currentBlock := startBlock
+	ticker := time.NewTicker(i.pollingInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-i.ctx.Done():
+			logger.Info("Block indexer stopped", zap.String("network", i.network.Name))
+			return
+		case <-ticker.C:
+			// Only use the ticker when we're caught up
+		}
+
+		// Check if a reorg was handled and we need to reset position
+		if atomic.CompareAndSwapUint32(&i.reorgDetected, 1, 0) {
+			newStart := atomic.LoadUint64(&i.lastIndexedBlock) + 1
+			logger.Info("Resetting indexer position after chain reorganization",
+				zap.String("network", i.network.Name),
+				zap.Uint64("old_position", currentBlock),
+				zap.Uint64("new_position", newStart))
+			currentBlock = newStart
+		}
+
+		// Get the latest block number
+		latestBlock, err := i.ethClient.GetLatestBlockNumber(i.ctx)
+		if err != nil {
+			logger.Error("Failed to get latest block number",
+				zap.String("network", i.network.Name),
+				zap.Error(err))
+			continue
+		}
+
+		// If we're caught up, wait for the next tick
+		if currentBlock > latestBlock {
+			continue
+		}
+
+		// Process blocks in batches
+		endBlock := currentBlock + uint64(i.batchSize) - 1
+		if endBlock > latestBlock {
+			endBlock = latestBlock
+		}
+
+		logger.Info("Processing blocks",
+			zap.String("network", i.network.Name),
+			zap.Uint64("start_block", currentBlock),
+			zap.Uint64("end_block", endBlock))
+
+		// Queue blocks for processing — blocks on send until channel has space
+		for blockNumber := currentBlock; blockNumber <= endBlock; blockNumber++ {
+			select {
+			case <-i.ctx.Done():
+				return
+			case i.blockTaskCh <- BlockTask{BlockNumber: blockNumber}:
+			}
+		}
+
+		// Update the current block
+		currentBlock = endBlock + 1
+	}
 }
 
 // handleNewBlockSubscription handles the websocket subscription to new blocks
@@ -311,22 +510,19 @@ func (i *Indexer) handleNewBlockSubscription() {
 			// Process the new block
 			blockNumber := header.Number.Uint64()
 
-			// Update the last indexed block if this is higher
-			i.mu.Lock()
-			if blockNumber > i.lastIndexedBlock {
-				// Queue the block for processing
+			// Use atomic read — no lock needed
+			current := atomic.LoadUint64(&i.lastIndexedBlock)
+			if blockNumber > current {
+				// Block instead of dropping when channel is full
 				select {
 				case i.blockTaskCh <- BlockTask{BlockNumber: blockNumber}:
 					logger.Debug("Queued new block from subscription",
 						zap.String("network", i.network.Name),
 						zap.Uint64("block", blockNumber))
-				default:
-					logger.Warn("Block task channel full, dropping block",
-						zap.String("network", i.network.Name),
-						zap.Uint64("block", blockNumber))
+				case <-i.ctx.Done():
+					return
 				}
 			}
-			i.mu.Unlock()
 		}
 	}
 }
@@ -451,139 +647,17 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 	}
 }
 
-// blockProcessingWorker processes blocks from the task channel
-func (i *Indexer) blockProcessingWorker(workerID int) {
-	logger.Info("Starting block processing worker",
-		zap.String("network", i.network.Name),
-		zap.Int("worker_id", workerID))
-
-	for task := range i.blockTaskCh {
-		// Check if the context is cancelled
-		select {
-		case <-i.ctx.Done():
-			logger.Info("Block processing worker stopped",
-				zap.String("network", i.network.Name),
-				zap.Int("worker_id", workerID))
-			return
-		default:
-		}
-
-		// Process the block
-		if err := i.processBlock(task.BlockNumber); err != nil {
-			logger.Error("Failed to process block",
-				zap.String("network", i.network.Name),
-				zap.Uint64("block", task.BlockNumber),
-				zap.Int("worker_id", workerID),
-				zap.Error(err))
-			continue
-		}
-
-		// Update the last indexed block if this is higher
-		i.mu.Lock()
-		if task.BlockNumber > i.lastIndexedBlock {
-			i.lastIndexedBlock = task.BlockNumber
-			// Update the metadata with network-specific key
-			if err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(task.BlockNumber, 10)); err != nil {
-				logger.Error("Failed to update last indexed block metadata",
-					zap.String("network", i.network.Name),
-					zap.Error(err))
-			}
-		}
-		i.mu.Unlock()
-	}
-
-	logger.Info("Block processing worker exited",
-		zap.String("network", i.network.Name),
-		zap.Int("worker_id", workerID))
-}
-
-// runBlockIndexer runs the block indexer
-func (i *Indexer) runBlockIndexer(startBlock uint64) {
-	logger.Info("Block indexer starting",
-		zap.String("network", i.network.Name),
-		zap.Uint64("start_block", startBlock))
-
-	currentBlock := startBlock
-	ticker := time.NewTicker(i.pollingInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-i.ctx.Done():
-			logger.Info("Block indexer stopped", zap.String("network", i.network.Name))
-			return
-		case <-ticker.C:
-			// Only use the ticker when we're caught up
-		}
-
-		// Get the latest block number
-		latestBlock, err := i.ethClient.GetLatestBlockNumber(i.ctx)
-		if err != nil {
-			logger.Error("Failed to get latest block number",
-				zap.String("network", i.network.Name),
-				zap.Error(err))
-
-			// If we're behind, don't wait for the ticker
-			if currentBlock <= latestBlock {
-				continue
-			}
-
-			// If we're caught up, wait for the next tick
-			select {
-			case <-i.ctx.Done():
-				return
-			case <-ticker.C:
-			}
-			continue
-		}
-
-		// If we're caught up, wait for the next tick
-		if currentBlock > latestBlock {
-			select {
-			case <-i.ctx.Done():
-				return
-			case <-ticker.C:
-			}
-			continue
-		}
-
-		// Process blocks in batches
-		endBlock := currentBlock + uint64(i.batchSize) - 1
-		if endBlock > latestBlock {
-			endBlock = latestBlock
-		}
-
-		logger.Info("Processing blocks",
-			zap.String("network", i.network.Name),
-			zap.Uint64("start_block", currentBlock),
-			zap.Uint64("end_block", endBlock))
-
-		// Queue blocks for processing
-		for blockNumber := currentBlock; blockNumber <= endBlock; blockNumber++ {
-			select {
-			case i.blockTaskCh <- BlockTask{BlockNumber: blockNumber}:
-				// Block successfully queued
-			default:
-				logger.Warn("Block task channel full, waiting...",
-					zap.String("network", i.network.Name),
-					zap.Uint64("block", blockNumber))
-
-				// Wait for space in the channel
-				i.blockTaskCh <- BlockTask{BlockNumber: blockNumber}
-			}
-		}
-
-		// Update the current block
-		currentBlock = endBlock + 1
-	}
-}
-
-// processBlock processes a single block
+// processBlock processes a single block with reorg detection and batch inserts
 func (i *Indexer) processBlock(blockNumber uint64) error {
 	// Get the block
 	block, err := i.ethClient.GetBlockByNumber(i.ctx, blockNumber)
 	if err != nil {
 		return fmt.Errorf("failed to get block %d: %w", blockNumber, err)
+	}
+
+	// Check for chain reorganization by comparing parent hash
+	if err := i.checkForReorg(blockNumber, block); err != nil {
+		return err
 	}
 
 	// Get the blob base fee for the block
@@ -595,7 +669,10 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 	// Get the block timestamp
 	timestamp := i.ethClient.GetBlockTimestamp(block)
 
-	// Process each transaction in the block
+	// Collect all blob records for this block
+	var blobs []models.Blob
+	var attributedUsers []string
+
 	for txIndex, tx := range block.Transactions() {
 		// Check if it's a blob transaction
 		if !i.ethClient.IsBlobTransaction(tx) {
@@ -629,8 +706,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 			new(big.Int).SetUint64(blobGasUsed),
 		)
 
-		// Create the blob record
-		blob := models.Blob{
+		blobs = append(blobs, models.Blob{
 			NetworkID:         i.network.ChainID,
 			BlockNumber:       int64(blockNumber),
 			BlobIndex:         txIndex,
@@ -644,29 +720,178 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 			Timestamp:         timestamp,
 			Confirmed:         true,
 			IndexerVersion:    i.indexerVersion,
-		}
+		})
 
-		// Insert the blob record
-		if err := i.insertBlob(blob); err != nil {
-			logger.Error("Failed to insert blob record",
-				zap.String("network", i.network.Name),
-				zap.String("tx_hash", tx.Hash().Hex()),
-				zap.Error(err))
-			continue
-		}
-
-		// Update the user's last seen timestamp
 		if userAttribution != "" {
-			if err := i.attribution.UpdateUserLastSeen(i.ctx, from); err != nil {
-				logger.Error("Failed to update user last seen",
-					zap.String("network", i.network.Name),
-					zap.String("address", from),
-					zap.Error(err))
-			}
+			attributedUsers = append(attributedUsers, from)
+		}
+	}
+
+	// Insert all blobs and record the indexed block in a single transaction
+	indexedBlock := models.IndexedBlock{
+		NetworkID:   i.network.ChainID,
+		BlockNumber: int64(blockNumber),
+		BlockHash:   block.Hash().Hex(),
+		ParentHash:  block.ParentHash().Hex(),
+	}
+
+	if err := i.insertBlockData(blobs, indexedBlock); err != nil {
+		return fmt.Errorf("failed to insert block data for block %d: %w", blockNumber, err)
+	}
+
+	// Update user last seen timestamps (non-critical, don't fail the block)
+	for _, addr := range attributedUsers {
+		if err := i.attribution.UpdateUserLastSeen(i.ctx, addr); err != nil {
+			logger.Error("Failed to update user last seen",
+				zap.String("network", i.network.Name),
+				zap.String("address", addr),
+				zap.Error(err))
 		}
 	}
 
 	return nil
+}
+
+// checkForReorg checks if the parent hash of the current block matches our stored hash
+// for the previous block. If not, a chain reorganization has occurred.
+func (i *Indexer) checkForReorg(blockNumber uint64, block *types.Block) error {
+	if blockNumber == 0 {
+		return nil
+	}
+
+	storedHash, err := i.db.GetIndexedBlockHash(i.ctx, i.network.ChainID, blockNumber-1)
+	if err != nil {
+		// Previous block not in our index — can't check (initial sync, gap, or first block)
+		return nil
+	}
+
+	parentHash := block.ParentHash().Hex()
+	if storedHash != parentHash {
+		logger.Warn("Chain reorganization detected",
+			zap.String("network", i.network.Name),
+			zap.Uint64("block", blockNumber),
+			zap.String("expected_parent", storedHash),
+			zap.String("actual_parent", parentHash))
+		return i.handleReorg(blockNumber)
+	}
+
+	return nil
+}
+
+// handleReorg handles a chain reorganization by finding the fork point,
+// deleting invalidated data, and signaling the main loop to reset.
+func (i *Indexer) handleReorg(fromBlock uint64) error {
+	// Walk back to find the fork point
+	forkBlock := fromBlock - 1
+	for depth := 0; depth < maxReorgDepth && forkBlock > 0; depth++ {
+		block, err := i.ethClient.GetBlockByNumber(i.ctx, forkBlock)
+		if err != nil {
+			return fmt.Errorf("failed to get block %d during reorg scan: %w", forkBlock, err)
+		}
+
+		storedHash, err := i.db.GetIndexedBlockHash(i.ctx, i.network.ChainID, forkBlock)
+		if err != nil {
+			// Past our indexed range
+			break
+		}
+
+		if storedHash == block.Hash().Hex() {
+			// Found the fork point — this block is still valid
+			break
+		}
+
+		forkBlock--
+	}
+
+	logger.Warn("Handling chain reorganization",
+		zap.String("network", i.network.Name),
+		zap.Uint64("from_block", fromBlock),
+		zap.Uint64("fork_point", forkBlock),
+		zap.Uint64("invalidated_blocks", fromBlock-forkBlock-1))
+
+	// Delete invalidated data
+	if err := i.db.DeleteBlobsFromBlock(i.ctx, i.network.ChainID, int64(forkBlock+1)); err != nil {
+		return fmt.Errorf("failed to delete reorged blobs: %w", err)
+	}
+	if err := i.db.DeleteIndexedBlocksFromBlock(i.ctx, i.network.ChainID, forkBlock+1); err != nil {
+		return fmt.Errorf("failed to delete reorged indexed blocks: %w", err)
+	}
+
+	// Reset lastIndexedBlock to the fork point
+	atomic.StoreUint64(&i.lastIndexedBlock, forkBlock)
+	i.mu.Lock()
+	if err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(forkBlock, 10)); err != nil {
+		logger.Error("Failed to update last indexed block after reorg",
+			zap.String("network", i.network.Name),
+			zap.Error(err))
+	}
+	i.mu.Unlock()
+
+	// Signal the main indexer loop to reset its position
+	atomic.StoreUint32(&i.reorgDetected, 1)
+
+	return fmt.Errorf("reorg handled, rewound from %d to %d: %w", fromBlock, forkBlock, errReorgDetected)
+}
+
+// insertBlockData inserts all blobs and records the indexed block in a single database transaction.
+// This ensures atomicity — either the entire block is recorded or nothing is.
+func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.IndexedBlock) error {
+	tx, err := i.db.BeginTxx(i.ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Insert blobs using a prepared statement within the transaction
+	if len(blobs) > 0 {
+		blobStmt, err := tx.PrepareContext(i.ctx, `
+			INSERT INTO blobs (
+				network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
+				timestamp, confirmed, indexer_version
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			ON CONFLICT (network_id, block_number, blob_index) DO UPDATE SET
+				tx_hash = EXCLUDED.tx_hash,
+				from_address = EXCLUDED.from_address,
+				user_attribution = EXCLUDED.user_attribution,
+				blob_size_bytes = EXCLUDED.blob_size_bytes,
+				base_fee_per_blob_gas = EXCLUDED.base_fee_per_blob_gas,
+				tip_per_blob_gas = EXCLUDED.tip_per_blob_gas,
+				total_cost_eth = EXCLUDED.total_cost_eth,
+				timestamp = EXCLUDED.timestamp,
+				confirmed = EXCLUDED.confirmed,
+				indexer_version = EXCLUDED.indexer_version
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to prepare blob statement: %w", err)
+		}
+		defer blobStmt.Close()
+
+		for _, blob := range blobs {
+			if _, err := blobStmt.ExecContext(i.ctx,
+				blob.NetworkID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
+				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
+				blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
+			); err != nil {
+				return fmt.Errorf("failed to insert blob (tx: %s): %w", blob.TxHash, err)
+			}
+		}
+	}
+
+	// Record the indexed block for reorg detection
+	_, err = tx.ExecContext(i.ctx, `
+		INSERT INTO indexed_blocks (network_id, block_number, block_hash, parent_hash)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (network_id, block_number) DO UPDATE SET
+			block_hash = EXCLUDED.block_hash,
+			parent_hash = EXCLUDED.parent_hash,
+			indexed_at = NOW()
+	`, indexedBlock.NetworkID, indexedBlock.BlockNumber, indexedBlock.BlockHash, indexedBlock.ParentHash)
+	if err != nil {
+		return fmt.Errorf("failed to record indexed block: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // getSender gets the sender address for a transaction
@@ -701,38 +926,6 @@ func (i *Indexer) getSender(tx *types.Transaction) (string, error) {
 	}
 
 	return sender.Hex(), nil
-}
-
-// insertBlob inserts a blob record into the database
-func (i *Indexer) insertBlob(blob models.Blob) error {
-	query := `
-		INSERT INTO blobs (
-			network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
-			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
-			timestamp, confirmed, indexer_version
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
-		)
-		ON CONFLICT (network_id, block_number, blob_index) DO UPDATE SET
-			tx_hash = $4,
-			from_address = $5,
-			user_attribution = $6,
-			blob_size_bytes = $7,
-			base_fee_per_blob_gas = $8,
-			tip_per_blob_gas = $9,
-			total_cost_eth = $10,
-			timestamp = $11,
-			confirmed = $12,
-			indexer_version = $13
-	`
-
-	_, err := i.db.ExecContext(i.ctx, query,
-		blob.NetworkID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
-		blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
-		blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
-	)
-
-	return err
 }
 
 // runMempoolIndexer runs the mempool indexer
@@ -851,7 +1044,7 @@ func (i *Indexer) insertPendingBlob(blob models.Blob) error {
 	var existingID int
 	var existingTxHash string
 	checkUniqueQuery := `
-		SELECT id, tx_hash FROM blobs 
+		SELECT id, tx_hash FROM blobs
 		WHERE network_id = $1 AND block_number = $2 AND blob_index = $3
 		LIMIT 1
 	`
@@ -887,7 +1080,7 @@ func (i *Indexer) insertPendingBlob(blob models.Blob) error {
 		// Find the next available blob_index for this network and block
 		var maxBlobIndex int
 		blobIndexQuery := `
-			SELECT COALESCE(MAX(blob_index), -1) FROM blobs 
+			SELECT COALESCE(MAX(blob_index), -1) FROM blobs
 			WHERE network_id = $1 AND block_number = $2
 		`
 		err = i.db.QueryRowContext(i.ctx, blobIndexQuery,
@@ -907,7 +1100,7 @@ func (i *Indexer) insertPendingBlob(blob models.Blob) error {
 	var existsPending bool
 	checkPendingQuery := `
 		SELECT EXISTS (
-			SELECT 1 FROM blobs 
+			SELECT 1 FROM blobs
 			WHERE network_id = $1 AND tx_hash = $2 AND block_number < 0
 		)
 	`
@@ -993,15 +1186,76 @@ func (i *Indexer) Reindex(startBlock, endBlock uint64) error {
 		return fmt.Errorf("failed to delete existing blob records: %w", err)
 	}
 
+	// Delete existing indexed block records in the range
+	query = "DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3"
+	_, err = i.db.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock)
+	if err != nil {
+		return fmt.Errorf("failed to delete existing indexed block records: %w", err)
+	}
+
 	// Process the block range
 	return i.processBlockRange(startBlock, endBlock)
 }
 
+// runGapScanner periodically retries blocks that failed processing
+func (i *Indexer) runGapScanner() {
+	logger.Info("Gap scanner starting", zap.String("network", i.network.Name))
+
+	ticker := time.NewTicker(gapScanInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-i.ctx.Done():
+			logger.Info("Gap scanner stopped", zap.String("network", i.network.Name))
+			return
+		case <-ticker.C:
+			i.retryFailedBlocks()
+		}
+	}
+}
+
+// retryFailedBlocks re-queues blocks that previously failed processing
+func (i *Indexer) retryFailedBlocks() {
+	i.failedBlocksMu.Lock()
+	if len(i.failedBlocks) == 0 {
+		i.failedBlocksMu.Unlock()
+		return
+	}
+
+	var toRetry []uint64
+	for block, count := range i.failedBlocks {
+		if count <= maxGapScanRetries {
+			toRetry = append(toRetry, block)
+		} else {
+			logger.Error("Block permanently failed, exceeded max retries",
+				zap.String("network", i.network.Name),
+				zap.Uint64("block", block),
+				zap.Int("total_attempts", count))
+		}
+	}
+	i.failedBlocksMu.Unlock()
+
+	if len(toRetry) == 0 {
+		return
+	}
+
+	logger.Info("Gap scanner re-queuing failed blocks",
+		zap.String("network", i.network.Name),
+		zap.Int("count", len(toRetry)))
+
+	for _, blockNum := range toRetry {
+		select {
+		case <-i.ctx.Done():
+			return
+		case i.blockTaskCh <- BlockTask{BlockNumber: blockNum}:
+		}
+	}
+}
+
 // GetLastIndexedBlock gets the last indexed block
 func (i *Indexer) GetLastIndexedBlock() uint64 {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	return i.lastIndexedBlock
+	return atomic.LoadUint64(&i.lastIndexedBlock)
 }
 
 // GetNetworkInfo gets the network information
@@ -1017,7 +1271,7 @@ func (i *Indexer) GetCurrentBlock(ctx context.Context) (uint64, error) {
 // GetBlobCounts gets the counts of confirmed and pending blobs for this network
 func (i *Indexer) GetBlobCounts(ctx context.Context) (confirmedCount, pendingCount int, err error) {
 	query := `
-		SELECT 
+		SELECT
 			SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END) as confirmed_count,
 			SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END) as pending_count
 		FROM blobs

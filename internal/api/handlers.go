@@ -14,6 +14,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// MaxQueryLimit is the maximum number of results any endpoint will return
+const MaxQueryLimit = 100
+
 // Response is a generic API response
 type Response struct {
 	Success bool        `json:"success"`
@@ -134,6 +137,9 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if limit > MaxQueryLimit {
+		limit = MaxQueryLimit
+	}
 
 	logger.Debug("Getting latest blobs",
 		zap.String("network", network.Name),
@@ -216,6 +222,9 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
 			return
 		}
+	}
+	if limit > MaxQueryLimit {
+		limit = MaxQueryLimit
 	}
 
 	logger.Debug("Getting mempool blobs",
@@ -369,6 +378,9 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
 			return
 		}
+	}
+	if limit > MaxQueryLimit {
+		limit = MaxQueryLimit
 	}
 
 	logger.Debug("Getting top blob users",
@@ -874,6 +886,9 @@ func (a *API) DevLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if limit > MaxQueryLimit {
+		limit = MaxQueryLimit
+	}
 
 	level := r.URL.Query().Get("level")
 
@@ -969,6 +984,9 @@ func (a *API) DevQueries(w http.ResponseWriter, r *http.Request) {
 			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
 			return
 		}
+	}
+	if limit > MaxQueryLimit {
+		limit = MaxQueryLimit
 	}
 
 	// This is a placeholder implementation
