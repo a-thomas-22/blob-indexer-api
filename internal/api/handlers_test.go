@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -96,5 +97,46 @@ func TestAPIError(t *testing.T) {
 func TestMaxQueryLimit(t *testing.T) {
 	if MaxQueryLimit != 100 {
 		t.Errorf("expected MaxQueryLimit=100, got %d", MaxQueryLimit)
+	}
+}
+
+func TestRespondJSON_EncodeError(t *testing.T) {
+	api := &API{}
+	w := httptest.NewRecorder()
+
+	// math.Inf causes json.Encode to fail
+	api.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"bad": math.Inf(1),
+	})
+	// Should not panic; the error handler writes an error response
+}
+
+func TestFormatBytes_LargeValues(t *testing.T) {
+	tests := []struct {
+		input    int64
+		expected string
+	}{
+		{1099511627776, "1.00 TB"},
+	}
+	for _, tt := range tests {
+		result := formatBytes(tt.input)
+		if result != tt.expected {
+			t.Errorf("formatBytes(%d) = %q, want %q", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func TestErrNetworkNotFound(t *testing.T) {
+	if ErrNetworkNotFound.Error() != "Network not found" {
+		t.Errorf("unexpected error message: %s", ErrNetworkNotFound.Error())
+	}
+	if ErrNetworkNotFound.Status != http.StatusNotFound {
+		t.Errorf("expected status 404, got %d", ErrNetworkNotFound.Status)
+	}
+}
+
+func TestErrNoNetworksAvailable(t *testing.T) {
+	if ErrNoNetworksAvailable.Error() != "No networks available" {
+		t.Errorf("unexpected error message: %s", ErrNoNetworksAvailable.Error())
 	}
 }

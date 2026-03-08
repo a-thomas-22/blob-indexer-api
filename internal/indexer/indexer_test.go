@@ -333,6 +333,125 @@ func TestGetSender_UnsignedTx(t *testing.T) {
 // suppress unused import warning
 var _ *ecdsa.PrivateKey
 
+func TestProcessBlockRange_Success(t *testing.T) {
+	idx := newTestIndexer()
+	err := idx.processBlockRange(10, 14)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have queued 5 blocks (10, 11, 12, 13, 14)
+	var blocks []uint64
+	for {
+		select {
+		case task := <-idx.blockTaskCh:
+			blocks = append(blocks, task.BlockNumber)
+		default:
+			goto done
+		}
+	}
+done:
+	if len(blocks) != 5 {
+		t.Fatalf("expected 5 blocks queued, got %d", len(blocks))
+	}
+	for i, expected := range []uint64{10, 11, 12, 13, 14} {
+		if blocks[i] != expected {
+			t.Errorf("block[%d] = %d, want %d", i, blocks[i], expected)
+		}
+	}
+}
+
+func TestProcessBlockRange_CancelledContext(t *testing.T) {
+	idx := newTestIndexer()
+	// Use a tiny channel so it blocks quickly
+	idx.blockTaskCh = make(chan BlockTask, 1)
+	idx.cancel() // cancel immediately
+
+	err := idx.processBlockRange(1, 100)
+	if err == nil {
+		t.Error("expected error for cancelled context")
+	}
+}
+
+func TestProcessBlockRange_SingleBlock(t *testing.T) {
+	idx := newTestIndexer()
+	err := idx.processBlockRange(42, 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case task := <-idx.blockTaskCh:
+		if task.BlockNumber != 42 {
+			t.Errorf("expected block 42, got %d", task.BlockNumber)
+		}
+	default:
+		t.Error("expected one block queued")
+	}
+}
+
+func TestErrReorgDetected(t *testing.T) {
+	if errReorgDetected.Error() != "chain reorganization detected" {
+		t.Errorf("unexpected error message: %s", errReorgDetected.Error())
+	}
+}
+
+func TestInternalConstants(t *testing.T) {
+	if maxBlockRetries != 3 {
+		t.Errorf("expected maxBlockRetries=3, got %d", maxBlockRetries)
+	}
+	if maxGapScanRetries != 10 {
+		t.Errorf("expected maxGapScanRetries=10, got %d", maxGapScanRetries)
+	}
+	if gapScanInterval != 5*time.Minute {
+		t.Errorf("expected gapScanInterval=5m, got %s", gapScanInterval)
+	}
+	if maxReorgDepth != 64 {
+		t.Errorf("expected maxReorgDepth=64, got %d", maxReorgDepth)
+	}
+}
+
+func TestRetryFailedBlocks_AllExceeded(t *testing.T) {
+	idx := newTestIndexer()
+	idx.failedBlocks[100] = maxGapScanRetries + 1
+	idx.failedBlocks[200] = maxGapScanRetries + 2
+
+	idx.retryFailedBlocks()
+
+	// toRetry is empty, hits early return
+	select {
+	case task := <-idx.blockTaskCh:
+		t.Errorf("unexpected block task %d", task.BlockNumber)
+	default:
+		// expected
+	}
+}
+
+func TestRetryFailedBlocks_CancelledContext(t *testing.T) {
+	idx := newTestIndexer()
+	idx.blockTaskCh = make(chan BlockTask, 0) // zero-buffer channel
+	idx.failedBlocks[100] = 1
+	idx.failedBlocks[200] = 1
+
+	idx.cancel() // cancel immediately
+	idx.retryFailedBlocks()
+	// Should not hang
+}
+
+func TestProcessBlockRange_EmptyRange(t *testing.T) {
+	idx := newTestIndexer()
+	err := idx.processBlockRange(10, 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	select {
+	case task := <-idx.blockTaskCh:
+		t.Errorf("unexpected block task %d", task.BlockNumber)
+	default:
+		// expected - nothing queued for reversed range
+	}
+}
+
 func TestRunGapScanner_StopsOnCancel(t *testing.T) {
 	idx := newTestIndexer()
 

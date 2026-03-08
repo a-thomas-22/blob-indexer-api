@@ -45,6 +45,15 @@ func TestGetUserAttribution_Unknown(t *testing.T) {
 	}
 }
 
+func TestUpdateUserLastSeen_UnknownAddress(t *testing.T) {
+	s := NewService(nil)
+	// Unknown address should return nil without DB call
+	err := s.UpdateUserLastSeen(nil, "0xunknown")
+	if err != nil {
+		t.Errorf("expected nil error for unknown address, got %v", err)
+	}
+}
+
 func TestGetUserAttribution_CaseInsensitive(t *testing.T) {
 	s := NewService(nil)
 	s.knownUsers["0xdeadbeef"] = "TestUser"

@@ -1,4 +1,4 @@
-.PHONY: build run test clean docker-build docker-run tilt-up seed-data
+.PHONY: build run test test-coverage clean docker-build docker-run tilt-up seed-data
 
 # Go parameters
 GOCMD=go
@@ -19,6 +19,18 @@ run:
 
 test:
 	$(GOTEST) -v ./...
+
+COVERAGE_THRESHOLD=50
+
+test-coverage:
+	$(GOTEST) ./... -coverprofile=coverage.out -count=1
+	@COVERAGE=$$($(GOCMD) tool cover -func=coverage.out | grep total | awk '{print $$NF}' | tr -d '%'); \
+	echo "Total coverage: $${COVERAGE}%"; \
+	if [ $$(echo "$${COVERAGE} < $(COVERAGE_THRESHOLD)" | bc -l) -eq 1 ]; then \
+		echo "FAIL: Coverage $${COVERAGE}% is below $(COVERAGE_THRESHOLD)% threshold"; \
+		exit 1; \
+	fi; \
+	echo "OK: Coverage $${COVERAGE}% meets $(COVERAGE_THRESHOLD)% threshold"
 
 clean:
 	rm -f $(BINARY_NAME)
