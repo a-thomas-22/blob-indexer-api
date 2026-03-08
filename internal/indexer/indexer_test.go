@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"math/big"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,9 +13,9 @@ import (
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
-func init() {
-	// Initialize the logger so that log calls inside the indexer package don't panic.
+func TestMain(m *testing.M) {
 	logger.Initialize()
+	os.Exit(m.Run())
 }
 
 // --------------------------------------------------------------------
@@ -541,21 +542,21 @@ func TestStop_CancelsContext(t *testing.T) {
 	cfg := defaultTestConfig()
 	idx := newTestIndexer(cfg, defaultTestNetwork())
 
-	// Verify context is not cancelled initially
+	// Verify context is not canceled initially
 	select {
 	case <-idx.ctx.Done():
-		t.Fatal("context should not be cancelled before Stop")
+		t.Fatal("context should not be canceled before Stop")
 	default:
 	}
 
 	idx.Stop()
 
-	// Verify context is cancelled after Stop
+	// Verify context is canceled after Stop
 	select {
 	case <-idx.ctx.Done():
 		// OK
 	default:
-		t.Fatal("context should be cancelled after Stop")
+		t.Fatal("context should be canceled after Stop")
 	}
 }
 
@@ -622,7 +623,7 @@ func TestProcessBlockRange_SingleBlock(t *testing.T) {
 	}
 }
 
-func TestProcessBlockRange_CancelledContext(t *testing.T) {
+func TestProcessBlockRange_CanceledContext(t *testing.T) {
 	cfg := defaultTestConfig()
 	idx := newTestIndexer(cfg, defaultTestNetwork())
 
@@ -631,7 +632,7 @@ func TestProcessBlockRange_CancelledContext(t *testing.T) {
 
 	err := idx.processBlockRange(1, 1000)
 	if err == nil {
-		t.Fatal("expected error from cancelled context, got nil")
+		t.Fatal("expected error from canceled context, got nil")
 	}
 }
 

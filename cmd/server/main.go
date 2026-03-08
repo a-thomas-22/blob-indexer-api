@@ -42,6 +42,8 @@ import (
 	"syscall"
 	"time"
 
+	"go.uber.org/zap"
+
 	_ "github.com/a-thomas-22/blob-indexer-api/docs"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/api"
@@ -50,7 +52,6 @@ import (
 	"github.com/a-thomas-22/blob-indexer-api/internal/ethereum"
 	"github.com/a-thomas-22/blob-indexer-api/internal/indexer"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
-	"go.uber.org/zap"
 )
 
 func main() {

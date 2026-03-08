@@ -17,13 +17,13 @@ func TestLoggerMiddleware_SetsRequestID(t *testing.T) {
 	var capturedRequestID string
 	handler := LoggerMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Capture the request ID from context
-		if rid, ok := r.Context().Value("requestID").(string); ok {
+		if rid, ok := r.Context().Value(logger.RequestIDKey).(string); ok {
 			capturedRequestID = rid
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/test", http.NoBody)
 	rr := httptest.NewRecorder()
 
 	handler.ServeHTTP(rr, req)
@@ -36,14 +36,14 @@ func TestLoggerMiddleware_SetsRequestID(t *testing.T) {
 func TestLoggerMiddleware_UniqueRequestIDs(t *testing.T) {
 	var ids []string
 	handler := LoggerMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if rid, ok := r.Context().Value("requestID").(string); ok {
+		if rid, ok := r.Context().Value(logger.RequestIDKey).(string); ok {
 			ids = append(ids, rid)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
 
 	for i := 0; i < 3; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		req := httptest.NewRequest(http.MethodGet, "/test", http.NoBody)
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 	}
@@ -67,7 +67,7 @@ func TestLoggerMiddleware_PassesResponseStatusCode(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/missing", nil)
+	req := httptest.NewRequest(http.MethodGet, "/missing", http.NoBody)
 	rr := httptest.NewRecorder()
 
 	handler.ServeHTTP(rr, req)
@@ -83,7 +83,7 @@ func TestLoggerMiddleware_PassesResponseBody(t *testing.T) {
 		w.Write([]byte("hello"))
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/test", http.NoBody)
 	rr := httptest.NewRecorder()
 
 	handler.ServeHTTP(rr, req)
