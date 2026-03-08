@@ -64,11 +64,11 @@ func TestBlobUserModel(t *testing.T) {
 
 func TestNetworkModel(t *testing.T) {
 	network := Network{
-		ID:        1,
-		ChainID:   1,
-		Name:      "mainnet",
+		ID:         1,
+		ChainID:    1,
+		Name:       "mainnet",
 		StartBlock: "12345",
-		IsEnabled: true,
+		IsEnabled:  true,
 	}
 
 	if network.Name != "mainnet" {

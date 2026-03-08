@@ -196,11 +196,11 @@ func TestStop(t *testing.T) {
 	// Stop should not panic
 	idx.Stop()
 
-	// Context should be cancelled
+	// Context should be canceled
 	select {
 	case <-ctx.Done():
 		// expected
 	default:
-		t.Error("expected context to be cancelled after Stop")
+		t.Error("expected context to be canceled after Stop")
 	}
 }

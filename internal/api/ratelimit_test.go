@@ -79,7 +79,7 @@ func TestRateLimitMiddleware_AllowsRequest(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.RemoteAddr = "192.168.1.1:1234"
 	rr := httptest.NewRecorder()
 
@@ -98,7 +98,7 @@ func TestRateLimitMiddleware_BlocksExcessiveRequests(t *testing.T) {
 	}))
 
 	// First request passes
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.RemoteAddr = "10.0.0.1:5000"
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -139,7 +139,7 @@ func TestRateLimitMiddleware_UsesXRealIP(t *testing.T) {
 	}))
 
 	// First request with X-Real-Ip
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.RemoteAddr = "proxy:8080"
 	req.Header.Set("X-Real-Ip", "client-ip-1")
 	rr := httptest.NewRecorder()
@@ -156,7 +156,7 @@ func TestRateLimitMiddleware_UsesXRealIP(t *testing.T) {
 	}
 
 	// Request with different X-Real-Ip should be allowed
-	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req2.RemoteAddr = "proxy:8080"
 	req2.Header.Set("X-Real-Ip", "client-ip-2")
 	rr3 := httptest.NewRecorder()
