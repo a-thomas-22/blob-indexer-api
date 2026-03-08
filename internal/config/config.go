@@ -26,8 +26,9 @@ type DatabaseConfig struct {
 
 // ServerConfig holds the server configuration
 type ServerConfig struct {
-	Port    int  `mapstructure:"port" yaml:"port"`
-	DevMode bool `mapstructure:"dev_mode" yaml:"dev_mode"`
+	Port            int           `mapstructure:"port" yaml:"port"`
+	DevMode         bool          `mapstructure:"dev_mode" yaml:"dev_mode"`
+	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout" yaml:"shutdown_timeout"`
 }
 
 // LoggingConfig holds the logging configuration
@@ -60,6 +61,7 @@ func Load() (*Config, error) {
 	// Set default values
 	v.SetDefault("server.port", 8080)
 	v.SetDefault("server.dev_mode", false)
+	v.SetDefault("server.shutdown_timeout", "15s")
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")
 	v.SetDefault("indexer.version", "v1.0.0")
@@ -241,6 +243,12 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid mempool_polling_interval: %w", err)
 	}
 	cfg.Indexer.MempoolPollingInterval = mempoolPollingInterval
+
+	shutdownTimeout, err := time.ParseDuration(v.GetString("server.shutdown_timeout"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid shutdown_timeout: %w", err)
+	}
+	cfg.Server.ShutdownTimeout = shutdownTimeout
 
 	// Validate configuration
 	if err := validateConfig(&cfg); err != nil {
