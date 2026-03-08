@@ -1,4 +1,4 @@
-.PHONY: build run test clean docker-build docker-run tilt-up seed-data
+.PHONY: build run test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data
 
 # Go parameters
 GOCMD=go
@@ -7,8 +7,11 @@ GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 BINARY_NAME=blob-indexer-api
+COVERAGE_DIR=coverage
+COVERAGE_FILE=$(COVERAGE_DIR)/coverage.out
+COVERAGE_HTML=$(COVERAGE_DIR)/coverage.html
 
-all: test build
+all: lint test build
 
 build:
 	$(GOBUILD) -o $(BINARY_NAME) -v ./cmd/server
@@ -20,9 +23,32 @@ run:
 test:
 	$(GOTEST) -v ./...
 
+test-coverage:
+	@mkdir -p $(COVERAGE_DIR)
+	$(GOTEST) -v -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./...
+	$(GOCMD) tool cover -html=$(COVERAGE_FILE) -o $(COVERAGE_HTML)
+	$(GOCMD) tool cover -func=$(COVERAGE_FILE)
+
+test-race:
+	$(GOTEST) -v -race ./...
+
+lint:
+	golangci-lint run ./...
+
+lint-fix:
+	golangci-lint run --fix ./...
+
+vet:
+	$(GOCMD) vet ./...
+
+fmt:
+	gofmt -s -w .
+	goimports -w -local github.com/a-thomas-22/blob-indexer-api .
+
 clean:
 	rm -f $(BINARY_NAME)
 	rm -f $(BINARY_NAME).exe
+	rm -rf $(COVERAGE_DIR)
 
 deps:
 	$(GOMOD) download
