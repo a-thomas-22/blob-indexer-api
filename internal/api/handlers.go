@@ -1074,6 +1074,11 @@ func (a *API) DevReindex(w http.ResponseWriter, r *http.Request) {
 	// Parse the request body
 	var req ReindexRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if isMaxBytesError(err) {
+			logger.Warn("Reindex request body too large", zap.Error(err))
+			RespondMaxBytesError(w)
+			return
+		}
 		logger.Warn("Invalid reindex request body", zap.Error(err))
 		a.respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
