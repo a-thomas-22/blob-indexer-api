@@ -1,0 +1,135 @@
+package models
+
+import (
+	"testing"
+	"time"
+)
+
+func TestBlobModel(t *testing.T) {
+	now := time.Now()
+	blob := Blob{
+		ID:                1,
+		NetworkID:         1,
+		BlockNumber:       12345,
+		BlobIndex:         0,
+		TxHash:            "0xabc123",
+		FromAddress:       "0xdef456",
+		UserAttribution:   "Optimism",
+		BlobSizeBytes:     131072,
+		BaseFeePerBlobGas: "1000000000",
+		TipPerBlobGas:     "100000000",
+		TotalCostETH:      "0.001",
+		Timestamp:         now,
+		Confirmed:         true,
+		IndexerVersion:    "v1.0.0",
+	}
+
+	if blob.ID != 1 {
+		t.Errorf("expected ID 1, got %d", blob.ID)
+	}
+	if blob.NetworkID != 1 {
+		t.Errorf("expected NetworkID 1, got %d", blob.NetworkID)
+	}
+	if blob.BlockNumber != 12345 {
+		t.Errorf("expected BlockNumber 12345, got %d", blob.BlockNumber)
+	}
+	if blob.TxHash != "0xabc123" {
+		t.Errorf("expected TxHash '0xabc123', got %q", blob.TxHash)
+	}
+	if !blob.Confirmed {
+		t.Error("expected Confirmed to be true")
+	}
+}
+
+func TestBlobUserModel(t *testing.T) {
+	now := time.Now()
+	user := BlobUser{
+		ID:          1,
+		NetworkID:   1,
+		Address:     "0xabc",
+		Name:        "Optimism",
+		Description: "Optimism rollup",
+		Category:    "rollup",
+		FirstSeen:   now,
+		LastSeen:    now,
+	}
+
+	if user.Name != "Optimism" {
+		t.Errorf("expected Name 'Optimism', got %q", user.Name)
+	}
+	if user.Category != "rollup" {
+		t.Errorf("expected Category 'rollup', got %q", user.Category)
+	}
+}
+
+func TestNetworkModel(t *testing.T) {
+	network := Network{
+		ID:        1,
+		ChainID:   1,
+		Name:      "mainnet",
+		StartBlock: "12345",
+		IsEnabled: true,
+	}
+
+	if network.Name != "mainnet" {
+		t.Errorf("expected Name 'mainnet', got %q", network.Name)
+	}
+	if !network.IsEnabled {
+		t.Error("expected IsEnabled to be true")
+	}
+}
+
+func TestIndexerMetadataModel(t *testing.T) {
+	meta := IndexerMetadata{
+		ID:        1,
+		NetworkID: 1,
+		Key:       MetadataLastIndexedBlock,
+		Value:     "12345",
+	}
+
+	if meta.Key != "last_indexed_block" {
+		t.Errorf("expected Key 'last_indexed_block', got %q", meta.Key)
+	}
+}
+
+func TestIndexedBlockModel(t *testing.T) {
+	now := time.Now()
+	block := IndexedBlock{
+		NetworkID:   1,
+		BlockNumber: 12345,
+		BlockHash:   "0xhash",
+		ParentHash:  "0xparent",
+		IndexedAt:   now,
+	}
+
+	if block.BlockNumber != 12345 {
+		t.Errorf("expected BlockNumber 12345, got %d", block.BlockNumber)
+	}
+	if block.BlockHash != "0xhash" {
+		t.Errorf("expected BlockHash '0xhash', got %q", block.BlockHash)
+	}
+}
+
+func TestMetadataConstants(t *testing.T) {
+	if MetadataLastIndexedBlock != "last_indexed_block" {
+		t.Errorf("expected MetadataLastIndexedBlock to be 'last_indexed_block', got %q", MetadataLastIndexedBlock)
+	}
+	if MetadataIndexerVersion != "indexer_version" {
+		t.Errorf("expected MetadataIndexerVersion to be 'indexer_version', got %q", MetadataIndexerVersion)
+	}
+}
+
+func TestBlobPendingTransaction(t *testing.T) {
+	blob := Blob{
+		NetworkID:   1,
+		BlockNumber: -1, // Pending transaction marker
+		Confirmed:   false,
+	}
+
+	if blob.BlockNumber != -1 {
+		t.Errorf("expected BlockNumber -1 for pending tx, got %d", blob.BlockNumber)
+	}
+	if blob.Confirmed {
+		t.Error("expected Confirmed to be false for pending tx")
+	}
+}
