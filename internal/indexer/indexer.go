@@ -739,12 +739,12 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		return fmt.Errorf("failed to insert block data for block %d: %w", blockNumber, err)
 	}
 
-	// Update user last seen timestamps (non-critical, don't fail the block)
-	for _, addr := range attributedUsers {
-		if err := i.attribution.UpdateUserLastSeen(i.ctx, addr); err != nil {
-			logger.Error("Failed to update user last seen",
+	// Update user last seen timestamps in batch (non-critical, don't fail the block)
+	if len(attributedUsers) > 0 {
+		if err := i.attribution.BatchUpdateUserLastSeen(i.ctx, attributedUsers); err != nil {
+			logger.Error("Failed to batch update user last seen",
 				zap.String("network", i.network.Name),
-				zap.String("address", addr),
+				zap.Int("address_count", len(attributedUsers)),
 				zap.Error(err))
 		}
 	}
