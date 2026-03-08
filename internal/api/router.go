@@ -60,8 +60,8 @@ func NewRouter(db *db.DB, indexers map[int]*indexer.Indexer, cfg *config.Config)
 		httpSwagger.URL("/swagger/doc.json"), // The URL pointing to API definition
 	))
 
-	// Routes
-	r.Route("/api", func(r chi.Router) {
+	// Versioned API routes under /api/v1
+	r.Route("/api/v1", func(r chi.Router) {
 		// Networks endpoint
 		r.Route("/networks", func(r chi.Router) {
 			r.Get("/", api.GetNetworks)
@@ -105,7 +105,27 @@ func NewRouter(db *db.DB, indexers map[int]*indexer.Indexer, cfg *config.Config)
 		})
 	})
 
+	// Backward compatibility: redirect /api/* to /api/v1/* with 301 Moved Permanently
+	r.HandleFunc("/api/*", func(w http.ResponseWriter, r *http.Request) {
+		// Strip the "/api" prefix and prepend "/api/v1"
+		newPath := "/api/v1" + r.URL.Path[len("/api"):]
+		if r.URL.RawQuery != "" {
+			newPath += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, newPath, http.StatusMovedPermanently)
+	})
+
+	// Also handle the exact /api path (without trailing slash or sub-paths)
+	r.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
+		newPath := "/api/v1"
+		if r.URL.RawQuery != "" {
+			newPath += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, newPath, http.StatusMovedPermanently)
+	})
+
 	logger.Info("API routes initialized",
+		zap.String("api_base", "/api/v1"),
 		zap.String("swagger_ui", "/swagger/index.html"),
 		zap.Bool("dev_mode", cfg.Server.DevMode))
 
