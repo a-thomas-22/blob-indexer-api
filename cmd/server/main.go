@@ -74,7 +74,7 @@ func main() {
 	defer cancel()
 
 	// Initialize database connection
-	database, err := db.Connect(ctx, cfg.Database.URL)
+	database, err := db.Connect(ctx, cfg.Database)
 	if err != nil {
 		logger.Fatal("Failed to connect to database", zap.Error(err))
 	}
