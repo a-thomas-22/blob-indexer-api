@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"runtime"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
@@ -537,8 +538,8 @@ func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Calculate uptime (placeholder)
-	uptime := "1h 30m"
+	// Calculate uptime from real server start time
+	uptime := time.Since(a.startTime).String()
 
 	// Create the response
 	response := StatusResponse{
@@ -639,22 +640,17 @@ type QueryStat struct {
 func (a *API) DevMetrics(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting system metrics")
 
-	// Get current time
 	currentTime := time.Now()
+	uptime := currentTime.Sub(a.startTime).String()
 
-	// Calculate uptime
-	startTime := currentTime.Add(-1 * time.Hour) // Placeholder, should be actual start time
-	uptime := currentTime.Sub(startTime).String()
-
-	// Create metrics response
 	metrics := SystemMetrics{
 		Uptime:          uptime,
 		GoVersion:       runtime.Version(),
 		NumGoroutine:    runtime.NumGoroutine(),
 		MemoryUsage:     getMemoryUsage(),
-		TotalRequests:   1000, // Placeholder
-		ActiveRequests:  10,   // Placeholder
-		StartTime:       startTime,
+		TotalRequests:   atomic.LoadInt64(&a.totalRequests),
+		ActiveRequests:  int(atomic.LoadInt64(&a.activeRequests)),
+		StartTime:       a.startTime,
 		CurrentTime:     currentTime,
 		NumCPU:          runtime.NumCPU(),
 		OperatingSystem: runtime.GOOS,
@@ -807,12 +803,26 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 			indexCount = 0 // Fallback
 		}
 
+		// Get last vacuum time from pg_stat_user_tables
+		var lastVacuumed time.Time
+		query = `
+			SELECT COALESCE(last_autovacuum, last_vacuum, '1970-01-01'::timestamp)
+			FROM pg_stat_user_tables
+			WHERE relname = $1
+		`
+		if err := a.db.GetContext(r.Context(), &lastVacuumed, query, table); err != nil {
+			logger.Error("Failed to get last vacuum time",
+				zap.String("table", table),
+				zap.Error(err))
+			// Zero value of time.Time is used as fallback
+		}
+
 		tableStats = append(tableStats, TableStat{
 			TableName:    table,
 			RowCount:     rowCount,
 			SizeBytes:    sizeBytes,
 			IndexCount:   indexCount,
-			LastVacuumed: time.Now().Add(-24 * time.Hour), // Placeholder
+			LastVacuumed: lastVacuumed,
 		})
 	}
 
@@ -829,6 +839,20 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 	// Get connection statistics
 	stats := a.db.Stats()
 
+	// Query the schema_migrations table for the last migration time, if it exists.
+	// This is best-effort; if the table doesn't exist the zero time is used.
+	var lastMigrationTime time.Time
+	migrationQuery := `
+		SELECT COALESCE(
+			(SELECT MAX(applied_at) FROM schema_migrations WHERE applied_at IS NOT NULL),
+			'1970-01-01'::timestamp
+		)
+	`
+	if err := a.db.GetContext(r.Context(), &lastMigrationTime, migrationQuery); err != nil {
+		logger.Debug("Could not query schema_migrations table (may not exist)", zap.Error(err))
+		// Leave as zero value
+	}
+
 	// Create database stats response
 	dbStats := DatabaseStats{
 		TotalTables:        len(tableStats),
@@ -838,7 +862,7 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 		IdleConnections:    stats.Idle,
 		InUseConnections:   stats.InUse,
 		MaxOpenConnections: stats.MaxOpenConnections,
-		LastMigrationTime:  time.Now().Add(-7 * 24 * time.Hour), // Placeholder
+		LastMigrationTime:  lastMigrationTime,
 	}
 
 	a.respondJSON(w, http.StatusOK, Response{
@@ -862,200 +886,57 @@ func formatBytes(bytes int64) string {
 }
 
 // DevLogs godoc
-// @Summary Get recent logs
-// @Description Retrieve recent application logs
+// @Summary Get recent logs (not implemented)
+// @Description Log retrieval is not yet implemented. Logs are written to stdout/stderr.
 // @Tags dev
 // @Accept json
 // @Produce json
-// @Param limit query int false "Number of logs to return (default: 100)"
-// @Param level query string false "Filter by log level (info, warn, error, debug)"
-// @Success 200 {object} Response{data=[]LogEntry} "Success"
-// @Failure 400 {object} Response "Bad request"
-// @Failure 500 {object} Response "Internal server error"
+// @Failure 501 {object} Response "Not implemented"
 // @Router /dev/logs [get]
 func (a *API) DevLogs(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting recent logs")
 
-	// Get query parameters
-	limit := 100
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil || limit <= 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
-			return
-		}
-	}
-	if limit > MaxQueryLimit {
-		limit = MaxQueryLimit
-	}
-
-	level := r.URL.Query().Get("level")
-
-	// This is a placeholder implementation
-	// In a real implementation, you would retrieve logs from a log store
-	logs := []LogEntry{
-		{
-			Timestamp: time.Now().Add(-5 * time.Minute),
-			Level:     "info",
-			Message:   "API server started",
-			Fields: map[string]string{
-				"port": "8080",
-			},
-		},
-		{
-			Timestamp: time.Now().Add(-4 * time.Minute),
-			Level:     "info",
-			Message:   "Connected to database",
-			Fields: map[string]string{
-				"db_name": "blobindexer",
-			},
-		},
-		{
-			Timestamp: time.Now().Add(-3 * time.Minute),
-			Level:     "info",
-			Message:   "Indexer started",
-			Fields: map[string]string{
-				"network": "mainnet",
-			},
-		},
-		{
-			Timestamp: time.Now().Add(-2 * time.Minute),
-			Level:     "warn",
-			Message:   "Slow query detected",
-			Fields: map[string]string{
-				"query":          "SELECT * FROM blobs WHERE...",
-				"execution_time": "1.5s",
-			},
-		},
-		{
-			Timestamp: time.Now().Add(-1 * time.Minute),
-			Level:     "error",
-			Message:   "Failed to connect to Ethereum node",
-			Fields: map[string]string{
-				"network": "sepolia",
-				"error":   "connection refused",
-			},
-		},
-	}
-
-	// Filter by level if specified
-	if level != "" {
-		var filtered []LogEntry
-		for _, log := range logs {
-			if log.Level == level {
-				filtered = append(filtered, log)
-			}
-		}
-		logs = filtered
-	}
-
-	// Limit the number of logs
-	if len(logs) > limit {
-		logs = logs[:limit]
-	}
-
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    logs,
+	// Log retrieval requires a log store (e.g., ring buffer or external service).
+	// Return not-implemented rather than misleading hardcoded data.
+	a.respondJSON(w, http.StatusNotImplemented, Response{
+		Success: false,
+		Error:   "Log retrieval is not implemented. Logs are written to stdout/stderr.",
 	})
 }
 
 // DevQueries godoc
-// @Summary Get database query statistics
-// @Description Retrieve statistics about database queries
+// @Summary Get database query statistics (not implemented)
+// @Description Query statistics require pg_stat_statements and are not yet implemented.
 // @Tags dev
 // @Accept json
 // @Produce json
-// @Param limit query int false "Number of queries to return (default: 20)"
-// @Success 200 {object} Response{data=[]QueryStat} "Success"
-// @Failure 400 {object} Response "Bad request"
-// @Failure 500 {object} Response "Internal server error"
+// @Failure 501 {object} Response "Not implemented"
 // @Router /dev/queries [get]
 func (a *API) DevQueries(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting database query statistics")
 
-	// Get query parameters
-	limit := 20
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil || limit <= 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
-			return
-		}
-	}
-	if limit > MaxQueryLimit {
-		limit = MaxQueryLimit
-	}
-
-	// This is a placeholder implementation
-	// In a real implementation, you would retrieve query statistics from pg_stat_statements
-	queries := []QueryStat{
-		{
-			Query:         "SELECT * FROM blobs WHERE confirmed = true AND network_id = $1 ORDER BY block_number DESC, blob_index ASC LIMIT $2",
-			ExecutionTime: 0.05,
-			Calls:         1000,
-			RowsReturned:  10,
-			LastExecuted:  time.Now().Add(-5 * time.Minute),
-		},
-		{
-			Query:         "SELECT * FROM blobs WHERE confirmed = false AND network_id = $1 ORDER BY timestamp DESC LIMIT $2",
-			ExecutionTime: 0.03,
-			Calls:         500,
-			RowsReturned:  5,
-			LastExecuted:  time.Now().Add(-10 * time.Minute),
-		},
-		{
-			Query:         "SELECT * FROM blobs WHERE tx_hash = $1 AND network_id = $2",
-			ExecutionTime: 0.01,
-			Calls:         200,
-			RowsReturned:  1,
-			LastExecuted:  time.Now().Add(-15 * time.Minute),
-		},
-		{
-			Query:         "SELECT COUNT(*) FROM blobs WHERE network_id = $1",
-			ExecutionTime: 0.1,
-			Calls:         100,
-			RowsReturned:  1,
-			LastExecuted:  time.Now().Add(-20 * time.Minute),
-		},
-		{
-			Query:         "SELECT MAX(timestamp) FROM blobs WHERE confirmed = true AND network_id = $1",
-			ExecutionTime: 0.02,
-			Calls:         300,
-			RowsReturned:  1,
-			LastExecuted:  time.Now().Add(-25 * time.Minute),
-		},
-	}
-
-	// Limit the number of queries
-	if len(queries) > limit {
-		queries = queries[:limit]
-	}
-
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    queries,
+	// Query statistics require pg_stat_statements extension which may not be available.
+	// Return not-implemented rather than misleading hardcoded data.
+	a.respondJSON(w, http.StatusNotImplemented, Response{
+		Success: false,
+		Error:   "Query statistics are not implemented. Enable pg_stat_statements for real query metrics.",
 	})
 }
 
 // DevDashboard godoc
-// @Summary Development dashboard
-// @Description Access the development dashboard
+// @Summary Development dashboard (not implemented)
+// @Description Development dashboard is not yet implemented.
 // @Tags dev
 // @Accept json
 // @Produce json
-// @Success 200 {object} Response{data=string} "Success"
+// @Failure 501 {object} Response "Not implemented"
 // @Router /dev/dashboard [get]
 func (a *API) DevDashboard(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Accessing development dashboard")
 
-	// This is a placeholder for a development dashboard
-	// In a real implementation, you would render an HTML page with charts and stats
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    "Development dashboard",
+	a.respondJSON(w, http.StatusNotImplemented, Response{
+		Success: false,
+		Error:   "Development dashboard is not implemented",
 	})
 }
 
