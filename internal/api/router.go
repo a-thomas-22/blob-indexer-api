@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
-	"github.com/a-thomas-22/blob-indexer-api/internal/db"
-	"github.com/a-thomas-22/blob-indexer-api/internal/indexer"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -18,13 +16,13 @@ import (
 
 // API holds the API dependencies
 type API struct {
-	db       *db.DB
-	indexers map[int]*indexer.Indexer
+	db       DBProvider
+	indexers map[int]IndexerProvider
 	config   *config.Config
 }
 
 // NewRouter creates a new API router
-func NewRouter(db *db.DB, indexers map[int]*indexer.Indexer, cfg *config.Config) http.Handler {
+func NewRouter(db DBProvider, indexers map[int]IndexerProvider, cfg *config.Config) http.Handler {
 	api := &API{
 		db:       db,
 		indexers: indexers,
@@ -114,7 +112,7 @@ func NewRouter(db *db.DB, indexers map[int]*indexer.Indexer, cfg *config.Config)
 
 // getNetworkFromRequest gets the network from the request query parameters
 // If no network is specified, it returns the first enabled network
-func (a *API) getNetworkFromRequest(r *http.Request) (*indexer.Indexer, error) {
+func (a *API) getNetworkFromRequest(r *http.Request) (IndexerProvider, error) {
 	// Check if network is specified in query parameters
 	networkParam := r.URL.Query().Get("network")
 	if networkParam != "" {
