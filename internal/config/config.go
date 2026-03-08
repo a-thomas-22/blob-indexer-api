@@ -44,13 +44,23 @@ type IndexerConfig struct {
 	MempoolPollingInterval time.Duration `mapstructure:"mempool_polling_interval" yaml:"mempool_polling_interval"`
 }
 
+// RateLimitConfig holds the rate limiting configuration
+type RateLimitConfig struct {
+	// TrustedProxies is a list of CIDR ranges whose X-Real-Ip / X-Forwarded-For
+	// headers are trusted. When a request arrives from an IP outside these ranges,
+	// the headers are ignored and r.RemoteAddr is used instead.
+	// Defaults to private network ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, ::1/128.
+	TrustedProxies []string `mapstructure:"trusted_proxies" yaml:"trusted_proxies"`
+}
+
 // Config holds the application configuration
 type Config struct {
-	Database DatabaseConfig  `mapstructure:"database" yaml:"database"`
-	Server   ServerConfig    `mapstructure:"server" yaml:"server"`
-	Logging  LoggingConfig   `mapstructure:"logging" yaml:"logging"`
-	Indexer  IndexerConfig   `mapstructure:"indexer" yaml:"indexer"`
-	Networks []NetworkConfig `mapstructure:"networks" yaml:"networks"`
+	Database  DatabaseConfig  `mapstructure:"database" yaml:"database"`
+	Server    ServerConfig    `mapstructure:"server" yaml:"server"`
+	Logging   LoggingConfig   `mapstructure:"logging" yaml:"logging"`
+	Indexer   IndexerConfig   `mapstructure:"indexer" yaml:"indexer"`
+	Networks  []NetworkConfig `mapstructure:"networks" yaml:"networks"`
+	RateLimit RateLimitConfig `mapstructure:"rate_limit" yaml:"rate_limit"`
 }
 
 // Load loads the configuration using Viper from a YAML file and/or environment variables
@@ -67,6 +77,13 @@ func Load() (*Config, error) {
 	v.SetDefault("indexer.polling_interval", "15s")
 	v.SetDefault("indexer.mempool_polling_interval", "30s")
 	v.SetDefault("networks", []NetworkConfig{})
+	v.SetDefault("rate_limit.trusted_proxies", []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"::1/128",
+	})
 
 	// Configure Viper to read from config file
 	v.SetConfigName("config") // name of config file (without extension)

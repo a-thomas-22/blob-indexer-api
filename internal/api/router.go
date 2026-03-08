@@ -34,7 +34,7 @@ func NewRouter(db *db.DB, indexers map[int]*indexer.Indexer, cfg *config.Config)
 	r := chi.NewRouter()
 
 	// Rate limiter: 100 requests/second per IP with burst of 200
-	rateLimiter := NewRateLimiter(100, 200)
+	rateLimiter := NewRateLimiter(100, 200, cfg.RateLimit.TrustedProxies)
 
 	// Middleware
 	r.Use(middleware.RequestID)
