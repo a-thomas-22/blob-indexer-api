@@ -737,19 +737,16 @@ func TestGetBlobCountsAndTopUsers(t *testing.T) {
 }
 
 func TestInsertPendingBlob(t *testing.T) {
-	t.Run("existing row with same tx updates record", func(t *testing.T) {
+	t.Run("inserts new pending blob", func(t *testing.T) {
 		idx := newTestIndexer()
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
 		blob := newBlobFixture()
 
-		mock.ExpectQuery("SELECT id, tx_hash FROM blobs").
-			WithArgs(blob.NetworkID, blob.BlockNumber, blob.BlobIndex).
-			WillReturnRows(sqlmock.NewRows([]string{"id", "tx_hash"}).AddRow(5, blob.TxHash))
-		mock.ExpectExec("UPDATE blobs SET").
-			WithArgs(5, blob.TxHash, blob.FromAddress, blob.UserAttribution, blob.BlobSizeBytes,
-				blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH, blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
-				blob.MaxFeePerBlobGas, blob.BlobGasUsed).
+		mock.ExpectExec("WITH chosen_index AS").
+			WithArgs(blob.NetworkID, blob.TxHash, blob.BlockNumber, blob.FromAddress, blob.UserAttribution,
+				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
+				blob.Timestamp, blob.Confirmed, blob.IndexerVersion, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
 		if err := idx.insertPendingBlob(blob); err != nil {
@@ -757,50 +754,16 @@ func TestInsertPendingBlob(t *testing.T) {
 		}
 	})
 
-	t.Run("existing row with different tx inserts with next blob index", func(t *testing.T) {
+	t.Run("upserts existing pending blob", func(t *testing.T) {
 		idx := newTestIndexer()
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
 		blob := newBlobFixture()
 
-		mock.ExpectQuery("SELECT id, tx_hash FROM blobs").
-			WithArgs(blob.NetworkID, blob.BlockNumber, blob.BlobIndex).
-			WillReturnRows(sqlmock.NewRows([]string{"id", "tx_hash"}).AddRow(5, "0xother"))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(blob_index), -1) FROM blobs")).
-			WithArgs(blob.NetworkID, blob.BlockNumber).
-			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(7))
-		mock.ExpectQuery("SELECT EXISTS").
-			WithArgs(blob.NetworkID, blob.TxHash).
-			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
-		mock.ExpectExec("INSERT INTO blobs").
-			WithArgs(blob.NetworkID, blob.BlockNumber, 8, blob.TxHash, blob.FromAddress, blob.UserAttribution,
+		mock.ExpectExec("WITH chosen_index AS").
+			WithArgs(blob.NetworkID, blob.TxHash, blob.BlockNumber, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
-				blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
-				blob.MaxFeePerBlobGas, blob.BlobGasUsed).
-			WillReturnResult(sqlmock.NewResult(1, 1))
-
-		if err := idx.insertPendingBlob(blob); err != nil {
-			t.Fatalf("insertPendingBlob() error = %v", err)
-		}
-	})
-
-	t.Run("existing pending tx updates", func(t *testing.T) {
-		idx := newTestIndexer()
-		idxDB, mock := newMockIndexerDB(t)
-		idx.db = idxDB
-		blob := newBlobFixture()
-
-		mock.ExpectQuery("SELECT id, tx_hash FROM blobs").
-			WithArgs(blob.NetworkID, blob.BlockNumber, blob.BlobIndex).
-			WillReturnError(sql.ErrNoRows)
-		mock.ExpectQuery("SELECT EXISTS").
-			WithArgs(blob.NetworkID, blob.TxHash).
-			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
-		mock.ExpectExec("UPDATE blobs SET").
-			WithArgs(blob.NetworkID, blob.TxHash, blob.BlobIndex, blob.FromAddress, blob.UserAttribution,
-				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
-				blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
-				blob.MaxFeePerBlobGas, blob.BlobGasUsed).
+				blob.Timestamp, blob.Confirmed, blob.IndexerVersion, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
 		if err := idx.insertPendingBlob(blob); err != nil {
@@ -808,38 +771,21 @@ func TestInsertPendingBlob(t *testing.T) {
 		}
 	})
 
-	t.Run("check existing error", func(t *testing.T) {
+	t.Run("upsert returns wrapped error", func(t *testing.T) {
 		idx := newTestIndexer()
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
 		blob := newBlobFixture()
 
-		mock.ExpectQuery("SELECT id, tx_hash FROM blobs").
-			WithArgs(blob.NetworkID, blob.BlockNumber, blob.BlobIndex).
-			WillReturnError(errors.New("query failed"))
+		mock.ExpectExec("WITH chosen_index AS").
+			WithArgs(blob.NetworkID, blob.TxHash, blob.BlockNumber, blob.FromAddress, blob.UserAttribution,
+				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
+				blob.Timestamp, blob.Confirmed, blob.IndexerVersion, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
+			WillReturnError(errors.New("upsert failed"))
 
 		err := idx.insertPendingBlob(blob)
-		if err == nil || !strings.Contains(err.Error(), "failed to check for existing blob") {
-			t.Fatalf("expected check error, got %v", err)
-		}
-	})
-
-	t.Run("pending existence check error", func(t *testing.T) {
-		idx := newTestIndexer()
-		idxDB, mock := newMockIndexerDB(t)
-		idx.db = idxDB
-		blob := newBlobFixture()
-
-		mock.ExpectQuery("SELECT id, tx_hash FROM blobs").
-			WithArgs(blob.NetworkID, blob.BlockNumber, blob.BlobIndex).
-			WillReturnError(sql.ErrNoRows)
-		mock.ExpectQuery("SELECT EXISTS").
-			WithArgs(blob.NetworkID, blob.TxHash).
-			WillReturnError(errors.New("exists failed"))
-
-		err := idx.insertPendingBlob(blob)
-		if err == nil || !strings.Contains(err.Error(), "failed to check if pending blob exists") {
-			t.Fatalf("expected pending exists error, got %v", err)
+		if err == nil || !strings.Contains(err.Error(), "failed to upsert pending blob") {
+			t.Fatalf("expected wrapped upsert error, got %v", err)
 		}
 	})
 }
