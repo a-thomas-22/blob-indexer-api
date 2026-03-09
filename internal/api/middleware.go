@@ -6,10 +6,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
 // DevModeMiddleware returns a middleware that gates access behind dev mode.
@@ -39,7 +40,7 @@ func LoggerMiddleware(next http.Handler) http.Handler {
 
 		// Create a request ID
 		requestID := uuid.New().String()
-		ctx := context.WithValue(r.Context(), "requestID", requestID)
+		ctx := context.WithValue(r.Context(), logger.RequestIDKey, requestID)
 		r = r.WithContext(ctx)
 
 		// Create a response wrapper to capture status code
