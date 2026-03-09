@@ -1056,16 +1056,42 @@ func TestGetBlobByTxHash_BadNetwork(t *testing.T) {
 }
 
 func TestGetBlobByTxHash_InvalidFormat(t *testing.T) {
-	a := newTestAPIWithDB(&mockDB{})
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("txHash", "invalid-hash")
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
-	w := httptest.NewRecorder()
-	a.GetBlobByTxHash(w, req)
+	testCases := []struct {
+		name   string
+		txHash string
+	}{
+		{
+			name:   "missing 0x prefix with 64 hex chars",
+			txHash: strings.Repeat("a", 64),
+		},
+		{
+			name:   "with 0x prefix but wrong length",
+			txHash: "0xabc",
+		},
+		{
+			name:   "with 0x prefix and non-hex characters",
+			txHash: "0xgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+		},
+		{
+			name:   "completely invalid string",
+			txHash: "invalid-hash",
+		},
+	}
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for invalid hash format, got %d", w.Code)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestAPIWithDB(&mockDB{})
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("txHash", tc.txHash)
+			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+			w := httptest.NewRecorder()
+			a.GetBlobByTxHash(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for invalid hash format, got %d", w.Code)
+			}
+		})
 	}
 }
 
