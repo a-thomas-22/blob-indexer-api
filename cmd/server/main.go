@@ -11,7 +11,7 @@
 // @license.url https://opensource.org/licenses/MIT
 
 // @host localhost:8080
-// @BasePath /api
+// @BasePath /api/v1
 // @schemes http https
 
 // @tag.name networks
