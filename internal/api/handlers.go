@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -768,11 +769,19 @@ type LogEntry struct {
 
 // QueryStat represents statistics for a database query
 type QueryStat struct {
-	Query         string    `json:"query"`
-	ExecutionTime float64   `json:"execution_time"`
-	Calls         int       `json:"calls"`
-	RowsReturned  int       `json:"rows_returned"`
-	LastExecuted  time.Time `json:"last_executed"`
+	Query         string    `db:"query" json:"query"`
+	ExecutionTime float64   `db:"execution_time" json:"execution_time"`
+	Calls         int       `db:"calls" json:"calls"`
+	RowsReturned  int       `db:"rows_returned" json:"rows_returned"`
+	LastExecuted  time.Time `db:"last_executed" json:"last_executed"`
+}
+
+type devDashboardResponse struct {
+	CurrentTime     time.Time `json:"current_time"`
+	EnabledNetworks int       `json:"enabled_networks"`
+	TotalRequests   int64     `json:"total_requests"`
+	ActiveRequests  int64     `json:"active_requests"`
+	Uptime          string    `json:"uptime"`
 }
 
 // DevMetrics godoc
@@ -1011,70 +1020,21 @@ func (a *API) DevLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	level := r.URL.Query().Get("level")
-
-	// This is a placeholder implementation
-	// In a real implementation, you would retrieve logs from a log store
-	logs := []LogEntry{
-		{
-			Timestamp: time.Now().Add(-5 * time.Minute),
-			Level:     "info",
-			Message:   "API server started",
-			Fields: map[string]string{
-				"port": "8080",
-			},
-		},
-		{
-			Timestamp: time.Now().Add(-4 * time.Minute),
-			Level:     "info",
-			Message:   "Connected to database",
-			Fields: map[string]string{
-				"db_name": "blobindexer",
-			},
-		},
-		{
-			Timestamp: time.Now().Add(-3 * time.Minute),
-			Level:     "info",
-			Message:   "Indexer started",
-			Fields: map[string]string{
-				"network": "mainnet",
-			},
-		},
-		{
-			Timestamp: time.Now().Add(-2 * time.Minute),
-			Level:     "warn",
-			Message:   "Slow query detected",
-			Fields: map[string]string{
-				"query":          "SELECT * FROM blobs WHERE...",
-				"execution_time": "1.5s",
-			},
-		},
-		{
-			Timestamp: time.Now().Add(-1 * time.Minute),
-			Level:     "error",
-			Message:   "Failed to connect to Ethereum node",
-			Fields: map[string]string{
-				"network": "sepolia",
-				"error":   "connection refused",
-			},
-		},
-	}
-
-	// Filter by level if specified
 	if level != "" {
-		var filtered []LogEntry
-		for _, log := range logs {
-			if log.Level == level {
-				filtered = append(filtered, log)
-			}
+		switch level {
+		case "debug", "info", "warn", "error":
+		default:
+			a.respondError(w, http.StatusBadRequest, "Invalid level parameter")
+			return
 		}
-		logs = filtered
 	}
 
-	// Limit the number of logs
-	if len(logs) > limit {
-		logs = logs[:limit]
+	// Log ingestion is not wired to a persistent store yet; return an explicit empty set.
+	logs := make([]LogEntry, 0, limit)
+	if level != "" {
+		logger.Debug("Dev log level filter requested without backing log store",
+			zap.String("level", level))
 	}
-
 	a.respondSuccess(w, logs)
 }
 
@@ -1098,46 +1058,23 @@ func (a *API) DevQueries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// This is a placeholder implementation
-	// In a real implementation, you would retrieve query statistics from pg_stat_statements
-	queries := []QueryStat{
-		{
-			Query:         "SELECT * FROM blobs WHERE confirmed = true AND network_id = $1 ORDER BY block_number DESC, blob_index ASC LIMIT $2",
-			ExecutionTime: 0.05,
-			Calls:         1000,
-			RowsReturned:  10,
-			LastExecuted:  time.Now().Add(-5 * time.Minute),
-		},
-		{
-			Query:         "SELECT * FROM blobs WHERE confirmed = false AND network_id = $1 ORDER BY timestamp DESC LIMIT $2",
-			ExecutionTime: 0.03,
-			Calls:         500,
-			RowsReturned:  5,
-			LastExecuted:  time.Now().Add(-10 * time.Minute),
-		},
-		{
-			Query:         "SELECT * FROM blobs WHERE tx_hash = $1 AND network_id = $2",
-			ExecutionTime: 0.01,
-			Calls:         200,
-			RowsReturned:  1,
-			LastExecuted:  time.Now().Add(-15 * time.Minute),
-		},
-		{
-			Query:         "SELECT COUNT(*) FROM blobs WHERE network_id = $1",
-			ExecutionTime: 0.1,
-			Calls:         100,
-			RowsReturned:  1,
-			LastExecuted:  time.Now().Add(-20 * time.Minute),
-		},
-		{
-			Query:         "SELECT MAX(timestamp) FROM blobs WHERE confirmed = true AND network_id = $1",
-			ExecutionTime: 0.02,
-			Calls:         300,
-			RowsReturned:  1,
-			LastExecuted:  time.Now().Add(-25 * time.Minute),
-		},
+	queries := make([]QueryStat, 0, limit)
+	query := `
+		SELECT
+			query,
+			mean_exec_time AS execution_time,
+			calls,
+			rows::int AS rows_returned,
+			COALESCE(last_exec_time, NOW()) AS last_executed
+		FROM pg_stat_statements
+		ORDER BY mean_exec_time DESC
+		LIMIT $1
+	`
+	if err := a.db.SelectContext(r.Context(), &queries, query, limit); err != nil {
+		// pg_stat_statements may be unavailable in development/test DBs.
+		logger.Warn("Failed to load pg_stat_statements data, returning empty query stats",
+			zap.Error(err))
 	}
-
 	// Limit the number of queries
 	if len(queries) > limit {
 		queries = queries[:limit]
@@ -1157,7 +1094,13 @@ func (a *API) DevQueries(w http.ResponseWriter, r *http.Request) {
 func (a *API) DevDashboard(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Accessing development dashboard")
 
-	// This is a placeholder for a development dashboard
-	// In a real implementation, you would render an HTML page with charts and stats
-	a.respondSuccess(w, "Development dashboard")
+	uptime := time.Since(a.startTime).Truncate(time.Second).String()
+	resp := devDashboardResponse{
+		CurrentTime:     time.Now(),
+		EnabledNetworks: len(a.networks),
+		TotalRequests:   atomic.LoadInt64(&a.totalRequests),
+		ActiveRequests:  atomic.LoadInt64(&a.activeRequests),
+		Uptime:          uptime,
+	}
+	a.respondSuccess(w, resp)
 }
