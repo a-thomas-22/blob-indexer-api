@@ -131,3 +131,58 @@ func TestGetTopBlobUsers_ReturnsRows(t *testing.T) {
 		t.Fatalf("unmet expectations: %v", err)
 	}
 }
+
+func TestInitialize_ReturnsErrorOnQueryFailure(t *testing.T) {
+	svc, mock := newMockService(t)
+	mock.ExpectQuery("SELECT \\* FROM blob_users WHERE network_id = \\$1").
+		WithArgs(1).
+		WillReturnError(assertiveError("load failed"))
+
+	if err := svc.Initialize(context.TODO()); err == nil {
+		t.Fatal("expected Initialize() to return an error")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestUpdateUserLastSeen_KnownUser(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		svc, mock := newMockService(t)
+		svc.knownUsers["0xabc"] = "Alice"
+
+		mock.ExpectExec("UPDATE blob_users SET last_seen = \\$1 WHERE address = \\$2 AND network_id = \\$3").
+			WithArgs(sqlmock.AnyArg(), "0xabc", 1).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		if err := svc.UpdateUserLastSeen(context.TODO(), "0xABC"); err != nil {
+			t.Fatalf("UpdateUserLastSeen() error = %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("db error", func(t *testing.T) {
+		svc, mock := newMockService(t)
+		svc.knownUsers["0xabc"] = "Alice"
+
+		mock.ExpectExec("UPDATE blob_users SET last_seen = \\$1 WHERE address = \\$2 AND network_id = \\$3").
+			WithArgs(sqlmock.AnyArg(), "0xabc", 1).
+			WillReturnError(assertiveError("update failed"))
+
+		if err := svc.UpdateUserLastSeen(context.TODO(), "0xABC"); err == nil {
+			t.Fatal("expected UpdateUserLastSeen() to return error")
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+}
+
+type assertiveError string
+
+func (e assertiveError) Error() string { return string(e) }
