@@ -1053,6 +1053,117 @@ func TestGetBlobByTxHash_BadNetwork(t *testing.T) {
 	}
 }
 
+func TestRespondMaxBytesError(t *testing.T) {
+	w := httptest.NewRecorder()
+	RespondMaxBytesError(w)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", w.Code)
+	}
+	var resp Response
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Success {
+		t.Error("expected Success=false")
+	}
+}
+
+func TestDevModeMiddleware_Disabled(t *testing.T) {
+	handler := DevModeMiddleware(false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when dev mode disabled, got %d", w.Code)
+	}
+}
+
+func TestDevModeMiddleware_Enabled(t *testing.T) {
+	handler := DevModeMiddleware(true)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 when dev mode enabled, got %d", w.Code)
+	}
+}
+
+func TestGetLastIndexedBlockFromDB_ValidValue(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			v := dest.(*string)
+			*v = "12345"
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	block := a.getLastIndexedBlockFromDB(context.Background(), 42)
+	if block != 12345 {
+		t.Fatalf("expected 12345, got %d", block)
+	}
+}
+
+func TestGetLastIndexedBlockFromDB_DBError(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return fmt.Errorf("db error")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	block := a.getLastIndexedBlockFromDB(context.Background(), 42)
+	if block != 0 {
+		t.Fatalf("expected 0, got %d", block)
+	}
+}
+
+func TestContentTypeJSON_RejectsNonJSON(t *testing.T) {
+	handler := ContentTypeJSON(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("data"))
+	req.Header.Set("Content-Type", "text/plain")
+	req.ContentLength = 4
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected 415, got %d", w.Code)
+	}
+}
+
+func TestContentTypeJSON_AllowsJSON(t *testing.T) {
+	handler := ContentTypeJSON(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = 2
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestContentTypeJSON_SkipsGET(t *testing.T) {
+	handler := ContentTypeJSON(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
 func TestGetMempoolBlobs_WithData(t *testing.T) {
 	db := &mockDB{
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {

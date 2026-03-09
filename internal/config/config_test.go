@@ -6,6 +6,58 @@ import (
 	"time"
 )
 
+func TestLoadForAPI(t *testing.T) {
+	originalConfigPath := os.Getenv("CONFIG_PATH")
+	originalDBURL := os.Getenv("DB_URL")
+	defer func() {
+		os.Setenv("CONFIG_PATH", originalConfigPath)
+		os.Setenv("DB_URL", originalDBURL)
+	}()
+
+	os.Setenv("CONFIG_PATH", "../../railway-config.yaml")
+	os.Setenv("DB_URL", "postgres://test:test@localhost:5432/testdb")
+
+	// LoadForAPI should succeed even without RPC URLs set
+	cfg, err := LoadForAPI()
+	if err != nil {
+		t.Fatalf("LoadForAPI failed: %v", err)
+	}
+
+	if cfg.Database.URL != "postgres://test:test@localhost:5432/testdb" {
+		t.Errorf("Expected DB URL from env, got: %s", cfg.Database.URL)
+	}
+
+	if len(cfg.Networks) == 0 {
+		t.Fatal("Expected at least one network")
+	}
+}
+
+func TestValidateForAPI_NoRPCRequired(t *testing.T) {
+	cfg := &Config{
+		Database: DatabaseConfig{URL: "postgres://localhost/test"},
+		Networks: []NetworkConfig{
+			{Name: "test", ChainID: 1, Enabled: true},
+		},
+	}
+
+	if err := ValidateForAPI(cfg); err != nil {
+		t.Errorf("ValidateForAPI should not require RPC URL, got: %v", err)
+	}
+}
+
+func TestValidateConfig_RequiresRPC(t *testing.T) {
+	cfg := &Config{
+		Database: DatabaseConfig{URL: "postgres://localhost/test"},
+		Networks: []NetworkConfig{
+			{Name: "test", ChainID: 1, Enabled: true},
+		},
+	}
+
+	if err := validateConfig(cfg); err == nil {
+		t.Error("validateConfig should require RPC URL")
+	}
+}
+
 func TestViperConfig(t *testing.T) {
 	// Save original environment variables to restore later
 	originalConfigPath := os.Getenv("CONFIG_PATH")

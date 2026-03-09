@@ -80,7 +80,6 @@ type StatusResponse struct {
 	LastIndexedTime  time.Time `json:"last_indexed_time"`
 }
 
-
 // respondJSON responds with JSON
 func (a *API) respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -438,12 +437,12 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 	response := make([]UserResponse, 0, len(users))
 	for _, user := range users {
 		response = append(response, UserResponse{
-			NetworkID:    network.ChainID,
-			NetworkName:  network.Name,
-			Address:      user.Address,
-			Name:         user.Name,
-			BlobCount:    user.BlobCount,
-			TotalCostETH: user.TotalCostETH,
+			NetworkID:     network.ChainID,
+			NetworkName:   network.Name,
+			Address:       user.Address,
+			Name:          user.Name,
+			BlobCount:     user.BlobCount,
+			TotalCostETH:  user.TotalCostETH,
 			LastTimestamp: user.LastTimestamp,
 		})
 	}
@@ -1065,4 +1064,3 @@ func (a *API) DevDashboard(w http.ResponseWriter, r *http.Request) {
 		Data:    "Development dashboard",
 	})
 }
-
