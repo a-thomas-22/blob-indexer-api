@@ -248,11 +248,15 @@ func (c *Client) GetBlobBaseFee(ctx context.Context, blockNumber uint64) (*big.I
 	}
 
 	// If the result is empty or "0x", return a default value
-	if result == "" || result == "0x" {
+	clean := strings.TrimSpace(result)
+	if clean == "" || strings.EqualFold(clean, "0x") {
+		return big.NewInt(1000000000), nil // Default value of 1 Gwei
+	}
+	if !strings.HasPrefix(clean, "0x") || len(clean) < 3 {
 		return big.NewInt(1000000000), nil // Default value of 1 Gwei
 	}
 
-	baseFee, success := big.NewInt(0).SetString(result[2:], 16)
+	baseFee, success := big.NewInt(0).SetString(clean[2:], 16)
 	if !success {
 		// If we can't parse the result, return a default value
 		return big.NewInt(1000000000), nil // Default value of 1 Gwei
