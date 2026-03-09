@@ -24,10 +24,14 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: {{ .Chart.Name }}-api
           image: "{{ .Values.api.image.repository | default .Values.image.repository }}:{{ .Values.api.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           ports:
             - name: http
               containerPort: {{ .Values.appConfig.server.port }}
@@ -83,10 +87,14 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: {{ .Chart.Name }}-indexer
           image: "{{ .Values.indexer.image.repository | default .Values.image.repository }}:{{ .Values.indexer.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           env:
             - name: CONFIG_PATH
               value: /etc/config/config.yaml

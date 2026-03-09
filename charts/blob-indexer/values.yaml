@@ -39,6 +39,18 @@ resources:
     cpu: 250m
     memory: 256Mi
 
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
 # ConfigMap creation toggle. Set to false when config is managed externally (e.g., Tilt).
 configMap:
   create: true
