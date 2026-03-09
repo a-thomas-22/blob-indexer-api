@@ -174,3 +174,10 @@ func (db *DB) DeleteIndexedBlocksFromBlock(ctx context.Context, networkID int, f
 	_, err := db.ExecContext(ctx, query, networkID, fromBlock)
 	return err
 }
+
+// DeleteBlockMetricsFromBlock deletes block metrics at or above the given block number for a network.
+func (db *DB) DeleteBlockMetricsFromBlock(ctx context.Context, networkID int, fromBlock int64) error {
+	query := "DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2"
+	_, err := db.ExecContext(ctx, query, networkID, fromBlock)
+	return err
+}

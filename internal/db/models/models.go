@@ -20,6 +20,8 @@ type Blob struct {
 	Timestamp         time.Time `db:"timestamp"`
 	Confirmed         bool      `db:"confirmed"`
 	IndexerVersion    string    `db:"indexer_version"`
+	MaxFeePerBlobGas  *string   `db:"max_fee_per_blob_gas"` // Nullable for pre-migration rows
+	BlobGasUsed       *int64    `db:"blob_gas_used"`         // Nullable for pre-migration rows
 }
 
 // BlobUser represents a known blob transaction sender
@@ -69,6 +71,23 @@ type BlobUserStats struct {
 	BlobCount     int       `db:"blob_count" json:"blob_count"`
 	TotalCostETH  string    `db:"total_cost_eth" json:"total_cost_eth"`
 	LastTimestamp time.Time `db:"last_timestamp" json:"last_timestamp"`
+}
+
+// BlockMetrics represents block-level blob pricing data.
+type BlockMetrics struct {
+	NetworkID        int       `db:"network_id"`
+	BlockNumber      int64     `db:"block_number"`
+	BlockTimestamp   time.Time `db:"block_timestamp"`
+	BlobCount        int       `db:"blob_count"`
+	BlobGasUsed      int64     `db:"blob_gas_used"`
+	BlobGasTarget    int64     `db:"blob_gas_target"`
+	BlobGasLimit     int64     `db:"blob_gas_limit"`
+	ExcessBlobGas    int64     `db:"excess_blob_gas"`
+	BlobBaseFee      string    `db:"blob_base_fee"`
+	UtilizationRatio string    `db:"utilization_ratio"`
+	BlobParamsTarget int       `db:"blob_params_target"`
+	BlobParamsMax    int       `db:"blob_params_max"`
+	UpdateFraction   int64     `db:"update_fraction"`
 }
 
 // Common metadata keys

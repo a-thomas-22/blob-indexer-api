@@ -14,10 +14,13 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params"
 	"go.uber.org/zap"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
+	"github.com/a-thomas-22/blob-indexer-api/internal/blobparams"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
@@ -77,6 +80,7 @@ type Indexer struct {
 	failedBlocks           map[uint64]int // block number -> cumulative failure count
 	failedBlocksMu         sync.Mutex
 	reorgDetected          uint32 // atomic flag: 1 = reorg detected, main loop should reset
+	chainConfig            *params.ChainConfig // go-ethereum chain config for fork-aware blob math
 }
 
 // New creates a new indexer
@@ -118,6 +122,7 @@ func New(ctx context.Context, db *db.DB, ethClient *ethereum.Client, cfg *config
 		blockTaskCh:            make(chan BlockTask, 1000), // Buffer for block tasks
 		useWebsocket:           useWebsocket,
 		failedBlocks:           make(map[uint64]int),
+		chainConfig:            blobparams.ChainConfigForID(network.ChainID),
 	}
 }
 
@@ -581,8 +586,8 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 		return
 	}
 
-	// Get the blob base fee for the latest block
-	latestBlock, err := i.ethClient.GetLatestBlockNumber(i.ctx)
+	// Get the blob base fee from the latest block header
+	latestBlockNum, err := i.ethClient.GetLatestBlockNumber(i.ctx)
 	if err != nil {
 		logger.Error("Failed to get latest block number for pending tx",
 			zap.String("network", i.network.Name),
@@ -590,12 +595,19 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 		return
 	}
 
-	blobBaseFee, err := i.ethClient.GetBlobBaseFee(i.ctx, latestBlock)
+	latestBlock, err := i.ethClient.GetBlockByNumber(i.ctx, latestBlockNum)
 	if err != nil {
-		logger.Error("Failed to get blob base fee for pending tx",
+		logger.Error("Failed to get latest block for pending tx",
 			zap.String("network", i.network.Name),
 			zap.Error(err))
 		return
+	}
+
+	var blobBaseFee *big.Int
+	if latestBlock.Header().ExcessBlobGas != nil {
+		blobBaseFee = eip4844.CalcBlobFee(i.chainConfig, latestBlock.Header())
+	} else {
+		blobBaseFee = big.NewInt(1)
 	}
 
 	// Get the sender address
@@ -625,6 +637,9 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 		new(big.Int).SetUint64(blobGasUsed),
 	)
 
+	maxFeeStr := maxFeePerBlobGas.String()
+	blobGasUsedInt := int64(blobGasUsed)
+
 	// Create the blob record
 	blob := models.Blob{
 		NetworkID:         i.network.ChainID,
@@ -640,6 +655,8 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 		Timestamp:         time.Now(),
 		Confirmed:         false,
 		IndexerVersion:    i.indexerVersion,
+		MaxFeePerBlobGas:  &maxFeeStr,
+		BlobGasUsed:       &blobGasUsedInt,
 	}
 
 	// Insert the blob record
@@ -664,24 +681,47 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		return err
 	}
 
-	// Get the blob base fee for the block
-	blobBaseFee, err := i.ethClient.GetBlobBaseFee(i.ctx, blockNumber)
-	if err != nil {
-		return fmt.Errorf("failed to get blob base fee for block %d: %w", blockNumber, err)
+	// Compute blob base fee from the block header (fixes historical accuracy bug
+	// where eth_blobBaseFee RPC returned the current fee, not the block's actual fee)
+	header := block.Header()
+	var blobBaseFee *big.Int
+	if header.ExcessBlobGas != nil {
+		blobBaseFee = eip4844.CalcBlobFee(i.chainConfig, header)
+	} else {
+		blobBaseFee = big.NewInt(1) // pre-4844 block, minimum fee
 	}
 
 	// Get the block timestamp
 	timestamp := i.ethClient.GetBlockTimestamp(block)
 
+	// Extract block-level blob metrics from the header
+	bp := blobparams.GetBlobParams(i.chainConfig, block.Time())
+
+	var blockBlobGasUsed uint64
+	if header.BlobGasUsed != nil {
+		blockBlobGasUsed = *header.BlobGasUsed
+	}
+	var excessBlobGas uint64
+	if header.ExcessBlobGas != nil {
+		excessBlobGas = *header.ExcessBlobGas
+	}
+
+	var utilizationRatio float64
+	if bp.TargetGas > 0 {
+		utilizationRatio = float64(blockBlobGasUsed) / float64(bp.TargetGas)
+	}
+
 	// Collect all blob records for this block
 	blobs := make([]models.Blob, 0, len(block.Transactions()))
 	var attributedUsers []string
+	blobTxCount := 0
 
 	for txIndex, tx := range block.Transactions() {
 		// Check if it's a blob transaction
 		if !i.ethClient.IsBlobTransaction(tx) {
 			continue
 		}
+		blobTxCount++
 
 		// Get the sender address
 		from, err := i.getSender(tx)
@@ -710,6 +750,9 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 			new(big.Int).SetUint64(blobGasUsed),
 		)
 
+		maxFeeStr := maxFeePerBlobGas.String()
+		blobGasUsedInt := int64(blobGasUsed)
+
 		blobs = append(blobs, models.Blob{
 			NetworkID:         i.network.ChainID,
 			BlockNumber:       int64(blockNumber),
@@ -724,6 +767,8 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 			Timestamp:         timestamp,
 			Confirmed:         true,
 			IndexerVersion:    i.indexerVersion,
+			MaxFeePerBlobGas:  &maxFeeStr,
+			BlobGasUsed:       &blobGasUsedInt,
 		})
 
 		if userAttribution != "" {
@@ -731,7 +776,24 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		}
 	}
 
-	// Insert all blobs and record the indexed block in a single transaction
+	// Build block-level metrics
+	blockMetrics := &models.BlockMetrics{
+		NetworkID:        i.network.ChainID,
+		BlockNumber:      int64(blockNumber),
+		BlockTimestamp:   timestamp,
+		BlobCount:        blobTxCount,
+		BlobGasUsed:      int64(blockBlobGasUsed),
+		BlobGasTarget:    int64(bp.TargetGas),
+		BlobGasLimit:     int64(bp.MaxGas),
+		ExcessBlobGas:    int64(excessBlobGas),
+		BlobBaseFee:      blobBaseFee.String(),
+		UtilizationRatio: fmt.Sprintf("%.6f", utilizationRatio),
+		BlobParamsTarget: bp.Target,
+		BlobParamsMax:    bp.Max,
+		UpdateFraction:   int64(bp.UpdateFraction),
+	}
+
+	// Insert all blobs, block metrics, and indexed block in a single transaction
 	indexedBlock := models.IndexedBlock{
 		NetworkID:   i.network.ChainID,
 		BlockNumber: int64(blockNumber),
@@ -739,7 +801,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		ParentHash:  block.ParentHash().Hex(),
 	}
 
-	if err := i.insertBlockData(blobs, indexedBlock); err != nil {
+	if err := i.insertBlockData(blobs, indexedBlock, blockMetrics); err != nil {
 		return fmt.Errorf("failed to insert block data for block %d: %w", blockNumber, err)
 	}
 
@@ -820,6 +882,9 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 	if err := i.db.DeleteBlobsFromBlock(i.ctx, i.network.ChainID, int64(forkBlock+1)); err != nil {
 		return fmt.Errorf("failed to delete reorged blobs: %w", err)
 	}
+	if err := i.db.DeleteBlockMetricsFromBlock(i.ctx, i.network.ChainID, int64(forkBlock+1)); err != nil {
+		return fmt.Errorf("failed to delete reorged block metrics: %w", err)
+	}
 	if err := i.db.DeleteIndexedBlocksFromBlock(i.ctx, i.network.ChainID, forkBlock+1); err != nil {
 		return fmt.Errorf("failed to delete reorged indexed blocks: %w", err)
 	}
@@ -840,9 +905,9 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 	return fmt.Errorf("reorg handled, rewound from %d to %d: %w", fromBlock, forkBlock, errReorgDetected)
 }
 
-// insertBlockData inserts all blobs and records the indexed block in a single database transaction.
-// This ensures atomicity — either the entire block is recorded or nothing is.
-func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.IndexedBlock) error {
+// insertBlockData inserts all blobs, block metrics, and records the indexed block in a single
+// database transaction. This ensures atomicity — either the entire block is recorded or nothing is.
+func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.IndexedBlock, blockMetrics *models.BlockMetrics) error {
 	tx, err := i.db.BeginTxx(i.ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -855,8 +920,8 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			INSERT INTO blobs (
 				network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
-				timestamp, confirmed, indexer_version
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+				timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			ON CONFLICT (network_id, block_number, blob_index) DO UPDATE SET
 				tx_hash = EXCLUDED.tx_hash,
 				from_address = EXCLUDED.from_address,
@@ -867,7 +932,9 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				total_cost_eth = EXCLUDED.total_cost_eth,
 				timestamp = EXCLUDED.timestamp,
 				confirmed = EXCLUDED.confirmed,
-				indexer_version = EXCLUDED.indexer_version
+				indexer_version = EXCLUDED.indexer_version,
+				max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
+				blob_gas_used = EXCLUDED.blob_gas_used
 		`)
 		if err != nil {
 			return fmt.Errorf("failed to prepare blob statement: %w", err)
@@ -878,10 +945,40 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			if _, err := blobStmt.ExecContext(i.ctx,
 				blob.NetworkID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
-				blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
+				blob.Timestamp, blob.Confirmed, blob.IndexerVersion, blob.MaxFeePerBlobGas, blob.BlobGasUsed,
 			); err != nil {
 				return fmt.Errorf("failed to insert blob (tx: %s): %w", blob.TxHash, err)
 			}
+		}
+	}
+
+	// Insert block-level blob metrics
+	if blockMetrics != nil {
+		_, err = tx.ExecContext(i.ctx, `
+			INSERT INTO block_metrics (
+				network_id, block_number, block_timestamp, blob_count,
+				blob_gas_used, blob_gas_target, blob_gas_limit,
+				excess_blob_gas, blob_base_fee, utilization_ratio,
+				blob_params_target, blob_params_max, update_fraction
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			ON CONFLICT (network_id, block_number) DO UPDATE SET
+				block_timestamp = EXCLUDED.block_timestamp,
+				blob_count = EXCLUDED.blob_count,
+				blob_gas_used = EXCLUDED.blob_gas_used,
+				blob_gas_target = EXCLUDED.blob_gas_target,
+				blob_gas_limit = EXCLUDED.blob_gas_limit,
+				excess_blob_gas = EXCLUDED.excess_blob_gas,
+				blob_base_fee = EXCLUDED.blob_base_fee,
+				utilization_ratio = EXCLUDED.utilization_ratio,
+				blob_params_target = EXCLUDED.blob_params_target,
+				blob_params_max = EXCLUDED.blob_params_max,
+				update_fraction = EXCLUDED.update_fraction
+		`, blockMetrics.NetworkID, blockMetrics.BlockNumber, blockMetrics.BlockTimestamp, blockMetrics.BlobCount,
+			blockMetrics.BlobGasUsed, blockMetrics.BlobGasTarget, blockMetrics.BlobGasLimit,
+			blockMetrics.ExcessBlobGas, blockMetrics.BlobBaseFee, blockMetrics.UtilizationRatio,
+			blockMetrics.BlobParamsTarget, blockMetrics.BlobParamsMax, blockMetrics.UpdateFraction)
+		if err != nil {
+			return fmt.Errorf("failed to insert block metrics: %w", err)
 		}
 	}
 
@@ -966,16 +1063,22 @@ func (i *Indexer) processPendingTransactions() error {
 		return fmt.Errorf("failed to get pending transactions: %w", err)
 	}
 
-	// Get the latest block number
-	latestBlock, err := i.ethClient.GetLatestBlockNumber(i.ctx)
+	// Get the blob base fee from the latest block header
+	latestBlockNum, err := i.ethClient.GetLatestBlockNumber(i.ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get latest block number: %w", err)
 	}
 
-	// Get the blob base fee for the latest block
-	blobBaseFee, err := i.ethClient.GetBlobBaseFee(i.ctx, latestBlock)
+	latestBlock, err := i.ethClient.GetBlockByNumber(i.ctx, latestBlockNum)
 	if err != nil {
-		return fmt.Errorf("failed to get blob base fee for latest block: %w", err)
+		return fmt.Errorf("failed to get latest block: %w", err)
+	}
+
+	var blobBaseFee *big.Int
+	if latestBlock.Header().ExcessBlobGas != nil {
+		blobBaseFee = eip4844.CalcBlobFee(i.chainConfig, latestBlock.Header())
+	} else {
+		blobBaseFee = big.NewInt(1)
 	}
 
 	// Process each pending transaction
@@ -1012,6 +1115,9 @@ func (i *Indexer) processPendingTransactions() error {
 			new(big.Int).SetUint64(blobGasUsed),
 		)
 
+		maxFeeStr := maxFeePerBlobGas.String()
+		blobGasUsedInt := int64(blobGasUsed)
+
 		// Create the blob record
 		blob := models.Blob{
 			NetworkID:         i.network.ChainID,
@@ -1027,6 +1133,8 @@ func (i *Indexer) processPendingTransactions() error {
 			Timestamp:         time.Now(),
 			Confirmed:         false,
 			IndexerVersion:    i.indexerVersion,
+			MaxFeePerBlobGas:  &maxFeeStr,
+			BlobGasUsed:       &blobGasUsedInt,
 		}
 
 		// Insert the blob record
@@ -1072,13 +1180,16 @@ func (i *Indexer) insertPendingBlob(blob models.Blob) error {
 					total_cost_eth = $8,
 					timestamp = $9,
 					confirmed = $10,
-					indexer_version = $11
+					indexer_version = $11,
+					max_fee_per_blob_gas = $12,
+					blob_gas_used = $13
 				WHERE id = $1 AND tx_hash = $2
 			`
 			_, err = i.db.ExecContext(i.ctx, query,
 				existingID, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
 				blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
+				blob.MaxFeePerBlobGas, blob.BlobGasUsed,
 			)
 			return err
 		}
@@ -1130,13 +1241,16 @@ func (i *Indexer) insertPendingBlob(blob models.Blob) error {
 				total_cost_eth = $9,
 				timestamp = $10,
 				confirmed = $11,
-				indexer_version = $12
+				indexer_version = $12,
+				max_fee_per_blob_gas = $13,
+				blob_gas_used = $14
 			WHERE network_id = $1 AND tx_hash = $2 AND block_number < 0
 		`
 		_, err = i.db.ExecContext(i.ctx, query,
 			blob.NetworkID, blob.TxHash, blob.BlobIndex, blob.FromAddress, blob.UserAttribution,
 			blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
 			blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
+			blob.MaxFeePerBlobGas, blob.BlobGasUsed,
 		)
 	} else {
 		// Insert a new record
@@ -1144,15 +1258,16 @@ func (i *Indexer) insertPendingBlob(blob models.Blob) error {
 			INSERT INTO blobs (
 				network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
-				timestamp, confirmed, indexer_version
+				timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
 			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
 			)
 		`
 		_, err = i.db.ExecContext(i.ctx, query,
 			blob.NetworkID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 			blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
 			blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
+			blob.MaxFeePerBlobGas, blob.BlobGasUsed,
 		)
 	}
 
@@ -1191,6 +1306,13 @@ func (i *Indexer) Reindex(startBlock, endBlock uint64) error {
 	_, err := i.db.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock)
 	if err != nil {
 		return fmt.Errorf("failed to delete existing blob records: %w", err)
+	}
+
+	// Delete existing block metrics in the range
+	query = "DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3"
+	_, err = i.db.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock)
+	if err != nil {
+		return fmt.Errorf("failed to delete existing block metrics: %w", err)
 	}
 
 	// Delete existing indexed block records in the range

@@ -85,6 +85,7 @@ func NewRouter(db DBProvider, cfg *config.Config) http.Handler {
 		r.Route("/blob", func(r chi.Router) {
 			r.Get("/latest", api.GetLatestBlobs)
 			r.Get("/mempool", api.GetMempoolBlobs)
+			r.Get("/pricing", api.GetBlobPricing)
 			r.Get("/{txHash}", api.GetBlobByTxHash)
 		})
 
