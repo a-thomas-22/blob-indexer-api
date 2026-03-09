@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "blob-indexer.fullname" . }}-test-connection"
+  labels:
+    {{- include "blob-indexer.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: test-connection
+      image: curlimages/curl:8.5.0
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "=== Connection Test ==="
+          echo "Testing API at {{ include "blob-indexer.fullname" . }}:{{ .Values.service.port }}"
+
+          # Wait for DNS to resolve
+          for i in $(seq 1 30); do
+            if nslookup {{ include "blob-indexer.fullname" . }} >/dev/null 2>&1; then
+              echo "DNS resolved on attempt $i"
+              break
+            fi
+            echo "Waiting for DNS... attempt $i/30"
+            sleep 2
+          done
+
+          # Test status endpoint returns 200
+          HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            --retry 10 --retry-delay 3 --retry-max-time 120 \
+            --retry-all-errors \
+            http://{{ include "blob-indexer.fullname" . }}:{{ .Values.service.port }}/api/v1/status)
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "FAIL: /api/v1/status returned HTTP $HTTP_CODE, expected 200"
+            exit 1
+          fi
+
+          echo "PASS: /api/v1/status returned HTTP 200"

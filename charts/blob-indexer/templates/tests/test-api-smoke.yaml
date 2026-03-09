@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "blob-indexer.fullname" . }}-test-api-smoke"
+  labels:
+    {{- include "blob-indexer.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: test-api-smoke
+      image: curlimages/curl:8.5.0
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          BASE_URL="http://{{ include "blob-indexer.fullname" . }}:{{ .Values.service.port }}"
+          PASS=0
+          FAIL=0
+
+          check_endpoint() {
+            local path="$1"
+            local expect_data="$2"
+            local description="$3"
+
+            RESPONSE=$(curl -sf --max-time 10 "$BASE_URL$path" 2>/dev/null || true)
+            HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$BASE_URL$path")
+
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "FAIL: $description - HTTP $HTTP_CODE"
+              FAIL=$((FAIL + 1))
+              return
+            fi
+
+            if ! echo "$RESPONSE" | grep -q '"success":true'; then
+              echo "FAIL: $description - missing success:true"
+              FAIL=$((FAIL + 1))
+              return
+            fi
+
+            if [ "$expect_data" = "nonempty" ]; then
+              if echo "$RESPONSE" | grep -q '"data":\[\]'; then
+                echo "FAIL: $description - expected non-empty data array"
+                FAIL=$((FAIL + 1))
+                return
+              fi
+            fi
+
+            echo "PASS: $description"
+            PASS=$((PASS + 1))
+          }
+
+          echo "=== API Smoke Tests ==="
+          echo "Base URL: $BASE_URL"
+          echo ""
+
+          # Wait for API to be ready
+          echo "Waiting for API readiness..."
+          curl -sf --retry 15 --retry-delay 3 --retry-max-time 120 \
+            --retry-all-errors -o /dev/null "$BASE_URL/api/v1/status"
+          echo "API is ready."
+
+          # Wait for indexer to process blobs (poll /stats)
+          echo "Waiting for indexer to process blobs..."
+          BLOB_WAIT=0
+          BLOB_TIMEOUT=180
+          while [ "$BLOB_WAIT" -lt "$BLOB_TIMEOUT" ]; do
+            STATS=$(curl -sf --max-time 10 "$BASE_URL/api/v1/stats" 2>/dev/null || true)
+            if echo "$STATS" | grep -q '"total_blobs"' && \
+               ! echo "$STATS" | grep -q '"total_blobs":0'; then
+              echo "Blobs detected after ${BLOB_WAIT}s"
+              break
+            fi
+            sleep 5
+            BLOB_WAIT=$((BLOB_WAIT + 5))
+          done
+
+          if [ "$BLOB_WAIT" -ge "$BLOB_TIMEOUT" ]; then
+            echo "WARNING: No blobs indexed after ${BLOB_TIMEOUT}s, running tests anyway"
+          fi
+
+          echo ""
+          echo "--- Running endpoint checks ---"
+
+          check_endpoint "/api/v1/status"       ""          "GET /api/v1/status"
+          check_endpoint "/api/v1/networks"      "nonempty"  "GET /api/v1/networks"
+          check_endpoint "/api/v1/blob/latest"   ""          "GET /api/v1/blob/latest"
+          check_endpoint "/api/v1/blob/mempool"  ""          "GET /api/v1/blob/mempool"
+          check_endpoint "/api/v1/users"         ""          "GET /api/v1/users"
+          check_endpoint "/api/v1/stats"         ""          "GET /api/v1/stats"
+
+          echo ""
+          echo "=== Results: $PASS passed, $FAIL failed ==="
+
+          if [ "$FAIL" -gt 0 ]; then
+            exit 1
+          fi

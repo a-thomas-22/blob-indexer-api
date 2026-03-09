@@ -695,7 +695,7 @@ func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
 
 	logger.Debug("Getting indexer status", zap.String("network", network.Name))
 
-	var lastIndexedTime time.Time
+	var lastIndexedTime *time.Time
 	query := "SELECT MAX(timestamp) FROM blobs WHERE confirmed = true AND network_id = $1"
 	if err := a.db.GetContext(r.Context(), &lastIndexedTime, query, network.ChainID); err != nil {
 		logger.Error("Failed to get last indexed time",
@@ -707,13 +707,18 @@ func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
 
 	uptime := time.Since(a.startTime).Truncate(time.Second).String()
 
+	var indexedTime time.Time
+	if lastIndexedTime != nil {
+		indexedTime = *lastIndexedTime
+	}
+
 	response := StatusResponse{
 		NetworkID:        network.ChainID,
 		NetworkName:      network.Name,
 		LastIndexedBlock: a.getLastIndexedBlockFromDB(r.Context(), network.ChainID),
 		IndexerVersion:   a.config.Indexer.Version,
 		Uptime:           uptime,
-		LastIndexedTime:  lastIndexedTime,
+		LastIndexedTime:  indexedTime,
 	}
 
 	a.respondSuccess(w, response)

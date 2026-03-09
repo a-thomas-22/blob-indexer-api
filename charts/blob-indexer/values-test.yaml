@@ -1,0 +1,62 @@
+# Test values for chart-testing (ct install / helm test)
+# Deploys API + indexer against live Sepolia with a small block range.
+# RPC URL injected via --set appConfig.networks[0].rpc_url=...
+
+image:
+  repository: blob-indexer-api
+  pullPolicy: Never
+  tag: "test"
+
+api:
+  replicaCount: 1
+
+indexer:
+  replicaCount: 1
+  image:
+    repository: blob-indexer-indexer
+    tag: "test"
+
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+appConfig:
+  server:
+    port: 8080
+    dev_mode: true
+  logging:
+    level: "debug"
+    format: "json"
+  indexer:
+    version: "test"
+    batch_size: 10
+    polling_interval: "15s"
+    mempool_polling_interval: "60s"
+  networks:
+    - name: "sepolia"
+      chain_id: 11155111
+      rpc_url: ""  # Set via --set in CI/Makefile
+      start_block: "LATEST-10"
+      enabled: true
+
+healthCheck:
+  path: /api/v1/status
+  initialDelaySeconds: 15
+  periodSeconds: 5
+
+postgresql:
+  enabled: true
+  auth:
+    username: testuser
+    password: testpass
+    database: blobindexer
+  primary:
+    persistence:
+      enabled: false

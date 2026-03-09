@@ -714,6 +714,28 @@ func TestGetIndexerStatus_DBError(t *testing.T) {
 	}
 }
 
+func TestGetIndexerStatus_EmptyDatabase(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			// Simulate SQL NULL from MAX(timestamp) on empty table — dest remains nil
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetIndexerStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for empty database, got %d: %s", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, `"success":true`) {
+		t.Fatalf("expected success:true in response, got: %s", body)
+	}
+}
+
 func TestDevIndexers_Success(t *testing.T) {
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
