@@ -9,12 +9,13 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file" // file source driver for migrations
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq" // PostgreSQL driver
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 )
 
 // DB is a wrapper around sqlx.DB
