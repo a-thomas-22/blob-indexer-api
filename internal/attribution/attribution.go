@@ -29,12 +29,17 @@ func normalizeAddress(address string) string {
 	return strings.ToLower(address)
 }
 
-// NewService creates a new attribution service
-func NewService(database *db.DB) *Service {
+// NewService creates a new attribution service. If networkID is omitted, mainnet (1) is used.
+func NewService(database *db.DB, networkID ...int) *Service {
+	effectiveNetworkID := 1
+	if len(networkID) > 0 {
+		effectiveNetworkID = networkID[0]
+	}
+
 	return &Service{
 		db:         database,
 		knownUsers: make(map[string]string),
-		networkID:  1, // Default to mainnet
+		networkID:  effectiveNetworkID,
 	}
 }
 

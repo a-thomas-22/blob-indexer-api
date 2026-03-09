@@ -17,8 +17,7 @@ func NewForTest(database *db.DB, cfg *config.Config, network config.NetworkConfi
 
 	var attrSvc *attribution.Service
 	if database != nil {
-		attrSvc = attribution.NewService(database)
-		attrSvc.SetNetworkID(network.ChainID)
+		attrSvc = attribution.NewService(database, network.ChainID)
 	}
 
 	return &Indexer{
