@@ -283,61 +283,44 @@ func loadConfig() (*Config, error) {
 	}
 
 	// Parse duration strings into time.Duration
-	pollingInterval, err := time.ParseDuration(v.GetString("indexer.polling_interval"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid polling_interval: %w", err)
+	var err error
+	if cfg.Indexer.PollingInterval, err = parseDuration(v, "indexer.polling_interval", "polling_interval"); err != nil {
+		return nil, err
 	}
-	cfg.Indexer.PollingInterval = pollingInterval
-
-	mempoolPollingInterval, err := time.ParseDuration(v.GetString("indexer.mempool_polling_interval"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid mempool_polling_interval: %w", err)
+	if cfg.Indexer.MempoolPollingInterval, err = parseDuration(v, "indexer.mempool_polling_interval", "mempool_polling_interval"); err != nil {
+		return nil, err
 	}
-	cfg.Indexer.MempoolPollingInterval = mempoolPollingInterval
-
-	shutdownTimeout, err := time.ParseDuration(v.GetString("server.shutdown_timeout"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid shutdown_timeout: %w", err)
+	if cfg.Server.ShutdownTimeout, err = parseDuration(v, "server.shutdown_timeout", "shutdown_timeout"); err != nil {
+		return nil, err
 	}
-	cfg.Server.ShutdownTimeout = shutdownTimeout
-
-	readTimeout, err := time.ParseDuration(v.GetString("server.read_timeout"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid read_timeout: %w", err)
+	if cfg.Server.ReadTimeout, err = parseDuration(v, "server.read_timeout", "read_timeout"); err != nil {
+		return nil, err
 	}
-	cfg.Server.ReadTimeout = readTimeout
-
-	writeTimeout, err := time.ParseDuration(v.GetString("server.write_timeout"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid write_timeout: %w", err)
+	if cfg.Server.WriteTimeout, err = parseDuration(v, "server.write_timeout", "write_timeout"); err != nil {
+		return nil, err
 	}
-	cfg.Server.WriteTimeout = writeTimeout
-
-	idleTimeout, err := time.ParseDuration(v.GetString("server.idle_timeout"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid idle_timeout: %w", err)
+	if cfg.Server.IdleTimeout, err = parseDuration(v, "server.idle_timeout", "idle_timeout"); err != nil {
+		return nil, err
 	}
-	cfg.Server.IdleTimeout = idleTimeout
-
-	connMaxLifetime, err := time.ParseDuration(v.GetString("database.conn_max_lifetime"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid conn_max_lifetime: %w", err)
+	if cfg.Database.ConnMaxLifetime, err = parseDuration(v, "database.conn_max_lifetime", "conn_max_lifetime"); err != nil {
+		return nil, err
 	}
-	cfg.Database.ConnMaxLifetime = connMaxLifetime
-
-	connMaxIdleTime, err := time.ParseDuration(v.GetString("database.conn_max_idle_time"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid conn_max_idle_time: %w", err)
+	if cfg.Database.ConnMaxIdleTime, err = parseDuration(v, "database.conn_max_idle_time", "conn_max_idle_time"); err != nil {
+		return nil, err
 	}
-	cfg.Database.ConnMaxIdleTime = connMaxIdleTime
-
-	gapScanInterval, err := time.ParseDuration(v.GetString("indexer.gap_scan_interval"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid gap_scan_interval: %w", err)
+	if cfg.Indexer.GapScanInterval, err = parseDuration(v, "indexer.gap_scan_interval", "gap_scan_interval"); err != nil {
+		return nil, err
 	}
-	cfg.Indexer.GapScanInterval = gapScanInterval
 
 	return &cfg, nil
+}
+
+func parseDuration(v *viper.Viper, key, field string) (time.Duration, error) {
+	duration, err := time.ParseDuration(v.GetString(key))
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", field, err)
+	}
+	return duration, nil
 }
 
 // LoadForAPI loads configuration with relaxed validation (no RPC URL requirement).
