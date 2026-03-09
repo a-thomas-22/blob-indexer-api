@@ -46,6 +46,7 @@ func NewRouter(db DBProvider, indexers map[int]IndexerProvider, cfg *config.Conf
 	r.Use(MaxBytesMiddleware)
 	r.Use(RateLimitMiddleware(rateLimiter))
 	r.Use(LoggerMiddleware)
+	r.Use(ContentTypeJSON)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 	r.Use(api.requestCounterMiddleware)

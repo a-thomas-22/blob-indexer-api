@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
 const (
@@ -84,11 +87,11 @@ func Load() (*Config, error) {
 	configPath := os.Getenv("CONFIG_PATH")
 	if configPath != "" {
 		// Use the specified config file
-		fmt.Printf("CONFIG_PATH environment variable set to: %s\n", configPath)
+		logger.Info("CONFIG_PATH environment variable set", zap.String("path", configPath))
 
 		// Check if the file exists
 		if _, err := os.Stat(configPath); os.IsNotExist(err) {
-			fmt.Printf("WARNING: Config file not found at path: %s\n", configPath)
+			logger.Warn("Config file not found at specified path", zap.String("path", configPath))
 
 			// List files in the directory to help debug
 			dir := filepath.Dir(configPath)
@@ -96,22 +99,24 @@ func Load() (*Config, error) {
 				dir = "."
 			}
 
-			fmt.Printf("Listing files in directory: %s\n", dir)
+			logger.Debug("Listing files in directory", zap.String("directory", dir))
 			files, err := os.ReadDir(dir)
 			if err != nil {
-				fmt.Printf("Error reading directory: %v\n", err)
+				logger.Error("Error reading directory", zap.String("directory", dir), zap.Error(err))
 			} else {
+				fileNames := make([]string, 0, len(files))
 				for _, file := range files {
-					fmt.Printf("  - %s\n", file.Name())
+					fileNames = append(fileNames, file.Name())
 				}
+				logger.Debug("Directory contents", zap.String("directory", dir), zap.Strings("files", fileNames))
 			}
 		} else {
-			fmt.Printf("Config file found at path: %s\n", configPath)
+			logger.Info("Config file found", zap.String("path", configPath))
 		}
 
 		v.SetConfigFile(configPath)
 	} else {
-		fmt.Println("CONFIG_PATH environment variable not set, using default config file")
+		logger.Info("CONFIG_PATH environment variable not set, using default config file")
 	}
 
 	// Read the config file
@@ -124,7 +129,7 @@ func Load() (*Config, error) {
 		}
 		fmt.Println("Config file not found, continuing with defaults and environment variables")
 	} else {
-		fmt.Printf("Successfully loaded config from: %s\n", v.ConfigFileUsed())
+		logger.Info("Successfully loaded config file", zap.String("path", v.ConfigFileUsed()))
 	}
 
 	// Set up environment variable binding
@@ -260,13 +265,13 @@ func Load() (*Config, error) {
 
 // validateConfig validates the configuration
 func validateConfig(cfg *Config) error {
-	fmt.Println("Validating configuration...")
+	logger.Info("Validating configuration")
 
 	// Validate database URL
 	if cfg.Database.URL == "" {
 		// Check if DB_URL environment variable is set
 		if os.Getenv("DB_URL") == "" {
-			fmt.Println("ERROR: Database URL is required - set DB_URL environment variable or add database.url to config file")
+			logger.Error("Database URL is required", zap.String("hint", "set DB_URL environment variable or add database.url to config file"))
 			return fmt.Errorf("database URL is required - set DB_URL environment variable or add database.url to config file")
 		}
 		fmt.Println("WARNING: Database URL is not set in config, but DB_URL environment variable is set")
@@ -274,45 +279,45 @@ func validateConfig(cfg *Config) error {
 		cfg.Database.URL = os.Getenv("DB_URL")
 	}
 
-	fmt.Printf("Database URL: %s (masked for security)\n", maskConnectionString(cfg.Database.URL))
+	logger.Debug("Database URL configured", zap.String("url", maskConnectionString(cfg.Database.URL)))
 
 	// Validate networks
 	if len(cfg.Networks) == 0 {
-		fmt.Println("ERROR: At least one network configuration is required")
+		logger.Error("At least one network configuration is required")
 		return fmt.Errorf("at least one network configuration is required")
 	}
 	fmt.Printf("Found %d network(s) in configuration\n", len(cfg.Networks))
 
 	for i, network := range cfg.Networks {
-		fmt.Printf("Validating network #%d: %s\n", i+1, network.Name)
+		logger.Debug("Validating network", zap.Int("index", i+1), zap.String("name", network.Name))
 
 		if network.Name == "" {
-			fmt.Printf("ERROR: Network #%d is missing a name\n", i+1)
+			logger.Error("Network is missing a name", zap.Int("index", i+1))
 			return fmt.Errorf("network #%d is missing a name", i+1)
 		}
 
 		if network.ChainID <= 0 {
-			fmt.Printf("ERROR: Network '%s' has an invalid chain ID: %d\n", network.Name, network.ChainID)
+			logger.Error("Network has invalid chain ID", zap.String("network", network.Name), zap.Int("chain_id", network.ChainID))
 			return fmt.Errorf("network '%s' has an invalid chain ID: %d", network.Name, network.ChainID)
 		}
 		fmt.Printf("  Chain ID: %d\n", network.ChainID)
 
 		if network.RpcURL == "" {
-			fmt.Printf("ERROR: Network '%s' is missing an RPC URL\n", network.Name)
+			logger.Error("Network is missing an RPC URL", zap.String("network", network.Name))
 			return fmt.Errorf("network '%s' is missing an RPC URL", network.Name)
 		}
 		fmt.Printf("  RPC URL: %s (masked for security)\n", maskURL(network.RpcURL))
 
 		if network.StartBlock == "" {
-			fmt.Printf("ERROR: Network '%s' is missing a start block\n", network.Name)
+			logger.Error("Network is missing a start block", zap.String("network", network.Name))
 			return fmt.Errorf("network '%s' is missing a start block", network.Name)
 		}
 		fmt.Printf("  Start Block: %s\n", network.StartBlock)
 
-		fmt.Printf("  Enabled: %v\n", network.Enabled)
+		logger.Debug("Network enabled status", zap.String("network", network.Name), zap.Bool("enabled", network.Enabled))
 	}
 
-	fmt.Println("Configuration validation successful")
+	logger.Info("Configuration validation successful")
 	return nil
 }
 
