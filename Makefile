@@ -1,4 +1,4 @@
-.PHONY: build build-api build-indexer run-api run-indexer test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall
+.PHONY: build build-api build-indexer run-api run-indexer test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall ci staticcheck
 
 # Go parameters
 GOCMD=go
@@ -61,6 +61,14 @@ vet:
 fmt:
 	gofmt -s -w .
 	goimports -w -local github.com/a-thomas-22/blob-indexer-api .
+
+staticcheck:
+	staticcheck ./...
+
+# Run all CI-equivalent checks locally (format, lint, vet, staticcheck, test, build, mod verify)
+ci: fmt vet lint staticcheck test-coverage build
+	$(GOMOD) verify
+	@echo "All CI checks passed."
 
 clean:
 	rm -f $(API_BINARY)
