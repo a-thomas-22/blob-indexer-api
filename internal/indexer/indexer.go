@@ -457,14 +457,11 @@ func (i *Indexer) updateLastIndexedBlock(blockNumber uint64) {
 			return
 		}
 		if atomic.CompareAndSwapUint64(&i.lastIndexedBlock, current, blockNumber) {
-			// Serialize DB writes to prevent out-of-order metadata updates
-			i.mu.Lock()
 			if err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(blockNumber, 10)); err != nil {
 				logger.Error("Failed to update last indexed block metadata",
 					zap.String("network", i.network.Name),
 					zap.Error(err))
 			}
-			i.mu.Unlock()
 			return
 		}
 	}
