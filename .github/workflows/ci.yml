@@ -72,10 +72,21 @@ jobs:
         run: go mod download
 
       - name: Run tests with coverage
-        run: go test -v -coverprofile=coverage.out -covermode=atomic ./...
+        run: go test -v -coverprofile=coverage.out -covermode=atomic ./internal/... ./docs
 
       - name: Display coverage summary
         run: go tool cover -func=coverage.out
+
+      - name: Enforce coverage threshold
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          THRESHOLD=90
+          echo "Total coverage: ${COVERAGE}%"
+          if awk -v cov="${COVERAGE}" -v threshold="${THRESHOLD}" 'BEGIN {exit !(cov < threshold)}'; then
+            echo "::error::Coverage ${COVERAGE}% is below the ${THRESHOLD}% threshold"
+            exit 1
+          fi
+          echo "Coverage ${COVERAGE}% meets the ${THRESHOLD}% threshold"
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
