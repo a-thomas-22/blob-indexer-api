@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,12 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+)
+
+const (
+	networkMainnet = "mainnet"
+	networkSepolia = "sepolia"
+	maskedValue    = "****"
 )
 
 // NetworkConfig holds the configuration for a single Ethereum network
@@ -112,12 +119,12 @@ func Load() (*Config, error) {
 	// Read the config file
 	if err := v.ReadInConfig(); err != nil {
 		// It's okay if the config file doesn't exist
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+		var configFileNotFoundError viper.ConfigFileNotFoundError
+		if !errors.As(err, &configFileNotFoundError) {
 			fmt.Printf("Error reading config file: %v\n", err)
 			return nil, fmt.Errorf("failed to read config file: %w", err)
-		} else {
-			fmt.Println("Config file not found, continuing with defaults and environment variables")
 		}
+		fmt.Println("Config file not found, continuing with defaults and environment variables")
 	} else {
 		fmt.Printf("Successfully loaded config from: %s\n", v.ConfigFileUsed())
 	}
@@ -141,7 +148,7 @@ func Load() (*Config, error) {
 
 	// Development mode - direct environment variable override
 	if devMode := os.Getenv("DEV_MODE"); devMode != "" {
-		v.Set("server.dev_mode", strings.ToLower(devMode) == "true")
+		v.Set("server.dev_mode", strings.EqualFold(devMode, "true"))
 	}
 
 	// Indexer version - direct environment variable override
@@ -171,23 +178,24 @@ func Load() (*Config, error) {
 		}
 
 		// Check if ETH_RPC_URL is set (newer variable name)
-		if ethRpcURL := os.Getenv("ETH_RPC_URL"); ethRpcURL != "" {
-			rpcURL = ethRpcURL // Prefer ETH_RPC_URL over RPC_URL
+		if ethRPCURL := os.Getenv("ETH_RPC_URL"); ethRPCURL != "" {
+			rpcURL = ethRPCURL // Prefer ETH_RPC_URL over RPC_URL
 		}
 
 		// Try to determine the network from the RPC URL
-		networkName := "mainnet"
+		networkName := networkMainnet
 		chainID := 1
 
 		// Check for common testnet URLs in the RPC URL
 		rpcLower := strings.ToLower(rpcURL)
-		if strings.Contains(rpcLower, "sepolia") {
-			networkName = "sepolia"
+		switch {
+		case strings.Contains(rpcLower, networkSepolia):
+			networkName = networkSepolia
 			chainID = 11155111
-		} else if strings.Contains(rpcLower, "goerli") {
+		case strings.Contains(rpcLower, "goerli"):
 			networkName = "goerli"
 			chainID = 5
-		} else if strings.Contains(rpcLower, "holesky") {
+		case strings.Contains(rpcLower, "holesky"):
 			networkName = "holesky"
 			chainID = 17000
 		}
@@ -227,7 +235,7 @@ func Load() (*Config, error) {
 		}
 
 		if enabled := os.Getenv(prefix + "ENABLED"); enabled != "" {
-			network.Enabled = strings.ToLower(enabled) == "true"
+			network.Enabled = strings.EqualFold(enabled, "true")
 		}
 	}
 
@@ -268,11 +276,10 @@ func validateConfig(cfg *Config) error {
 		if os.Getenv("DB_URL") == "" {
 			fmt.Println("ERROR: Database URL is required - set DB_URL environment variable or add database.url to config file")
 			return fmt.Errorf("database URL is required - set DB_URL environment variable or add database.url to config file")
-		} else {
-			fmt.Println("WARNING: Database URL is not set in config, but DB_URL environment variable is set")
-			// Set the database URL from the environment variable
-			cfg.Database.URL = os.Getenv("DB_URL")
 		}
+		fmt.Println("WARNING: Database URL is not set in config, but DB_URL environment variable is set")
+		// Set the database URL from the environment variable
+		cfg.Database.URL = os.Getenv("DB_URL")
 	}
 
 	fmt.Printf("Database URL: %s (masked for security)\n", maskConnectionString(cfg.Database.URL))
@@ -281,9 +288,8 @@ func validateConfig(cfg *Config) error {
 	if len(cfg.Networks) == 0 {
 		fmt.Println("ERROR: At least one network configuration is required")
 		return fmt.Errorf("at least one network configuration is required")
-	} else {
-		fmt.Printf("Found %d network(s) in configuration\n", len(cfg.Networks))
 	}
+	fmt.Printf("Found %d network(s) in configuration\n", len(cfg.Networks))
 
 	for i, network := range cfg.Networks {
 		fmt.Printf("Validating network #%d: %s\n", i+1, network.Name)
@@ -296,23 +302,20 @@ func validateConfig(cfg *Config) error {
 		if network.ChainID <= 0 {
 			fmt.Printf("ERROR: Network '%s' has an invalid chain ID: %d\n", network.Name, network.ChainID)
 			return fmt.Errorf("network '%s' has an invalid chain ID: %d", network.Name, network.ChainID)
-		} else {
-			fmt.Printf("  Chain ID: %d\n", network.ChainID)
 		}
+		fmt.Printf("  Chain ID: %d\n", network.ChainID)
 
 		if network.RpcURL == "" {
 			fmt.Printf("ERROR: Network '%s' is missing an RPC URL\n", network.Name)
 			return fmt.Errorf("network '%s' is missing an RPC URL", network.Name)
-		} else {
-			fmt.Printf("  RPC URL: %s (masked for security)\n", maskURL(network.RpcURL))
 		}
+		fmt.Printf("  RPC URL: %s (masked for security)\n", maskURL(network.RpcURL))
 
 		if network.StartBlock == "" {
 			fmt.Printf("ERROR: Network '%s' is missing a start block\n", network.Name)
 			return fmt.Errorf("network '%s' is missing a start block", network.Name)
-		} else {
-			fmt.Printf("  Start Block: %s\n", network.StartBlock)
 		}
+		fmt.Printf("  Start Block: %s\n", network.StartBlock)
 
 		fmt.Printf("  Enabled: %v\n", network.Enabled)
 	}
@@ -322,15 +325,15 @@ func validateConfig(cfg *Config) error {
 }
 
 // maskConnectionString masks a database connection string for security
-func maskConnectionString(connStr string) string {
+func maskConnectionString(_ string) string {
 	// Simple masking for now - in a real app you might want to parse the URL properly
-	return "****"
+	return maskedValue
 }
 
 // maskURL masks a URL for security
-func maskURL(url string) string {
+func maskURL(_ string) string {
 	// Simple masking for now - in a real app you might want to parse the URL properly
-	return "****"
+	return maskedValue
 }
 
 // GetEnabledNetworks returns a slice of enabled network configurations
