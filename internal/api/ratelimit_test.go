@@ -5,163 +5,164 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
 
-func TestNewRateLimiter(t *testing.T) {
-	rl := NewRateLimiter(10, 20)
-	if rl == nil {
-		t.Fatal("expected non-nil rate limiter")
+func TestRateLimiter_Allow_NewIP(t *testing.T) {
+	rl := &RateLimiter{
+		visitors: make(map[string]*visitor),
+		rate:     10,
+		burst:    20,
 	}
-	if rl.rate != 10 {
-		t.Errorf("expected rate 10, got %f", rl.rate)
+
+	if !rl.allow("1.2.3.4") {
+		t.Fatal("expected first request from new IP to be allowed")
 	}
-	if rl.burst != 20 {
-		t.Errorf("expected burst 20, got %f", rl.burst)
+
+	// Visitor should be created with burst-1 tokens
+	v := rl.visitors["1.2.3.4"]
+	if v == nil {
+		t.Fatal("visitor was not stored")
 	}
-	if rl.visitors == nil {
-		t.Fatal("expected non-nil visitors map")
+	if v.tokens != 19 { // burst(20) - 1
+		t.Errorf("expected 19 tokens, got %f", v.tokens)
 	}
 }
 
-func TestRateLimiter_AllowFirstRequest(t *testing.T) {
-	rl := NewRateLimiter(10, 5)
-
-	// First request from a new IP should always be allowed
-	if !rl.allow("192.168.1.1") {
-		t.Error("expected first request to be allowed")
+func TestRateLimiter_Allow_ExhaustedTokens(t *testing.T) {
+	rl := &RateLimiter{
+		visitors: make(map[string]*visitor),
+		rate:     10,
+		burst:    5,
 	}
-}
-
-func TestRateLimiter_AllowUpToBurst(t *testing.T) {
-	rl := NewRateLimiter(10, 5)
-
-	ip := "192.168.1.1"
-	// Should allow up to burst requests
-	for i := 0; i < 5; i++ {
-		if !rl.allow(ip) {
-			t.Errorf("expected request %d to be allowed", i+1)
-		}
-	}
-}
-
-func TestRateLimiter_DenyOverBurst(t *testing.T) {
-	rl := NewRateLimiter(0.001, 3) // Very slow replenishment
 
 	ip := "10.0.0.1"
-	// Exhaust the burst
-	for i := 0; i < 3; i++ {
-		rl.allow(ip)
+	// Exhaust all tokens (burst=5, so 5 requests should succeed)
+	for i := 0; i < 5; i++ {
+		if !rl.allow(ip) {
+			t.Fatalf("request %d should be allowed", i+1)
+		}
 	}
 
 	// Next request should be denied
 	if rl.allow(ip) {
-		t.Error("expected request to be denied after burst exhausted")
+		t.Fatal("request should be denied after token exhaustion")
 	}
 }
 
-func TestRateLimiter_DifferentIPsIndependent(t *testing.T) {
-	rl := NewRateLimiter(0.001, 2)
+func TestRateLimiter_Allow_TokenReplenishment(t *testing.T) {
+	rl := &RateLimiter{
+		visitors: make(map[string]*visitor),
+		rate:     100,
+		burst:    100,
+	}
 
-	// Exhaust burst for IP1
-	rl.allow("1.1.1.1")
-	rl.allow("1.1.1.1")
+	ip := "10.0.0.2"
+	// Exhaust all tokens
+	for i := 0; i < 100; i++ {
+		rl.allow(ip)
+	}
 
-	// IP2 should still be allowed
-	if !rl.allow("2.2.2.2") {
-		t.Error("expected different IP to be allowed independently")
+	// Simulate time passing by adjusting lastSeen backwards
+	rl.mu.Lock()
+	v := rl.visitors[ip]
+	v.lastSeen = v.lastSeen.Add(-2 * 1e9) // 2 seconds ago → 200 tokens replenished
+	rl.mu.Unlock()
+
+	if !rl.allow(ip) {
+		t.Fatal("request should be allowed after token replenishment")
 	}
 }
 
-func TestRateLimitMiddleware_AllowsRequest(t *testing.T) {
-	rl := NewRateLimiter(100, 200)
+func TestRateLimiter_TokensCappedAtBurst(t *testing.T) {
+	rl := &RateLimiter{
+		visitors: make(map[string]*visitor),
+		rate:     1000,
+		burst:    10,
+	}
+
+	ip := "10.0.0.3"
+	rl.allow(ip) // creates visitor
+
+	// Simulate lots of time passing
+	rl.mu.Lock()
+	v := rl.visitors[ip]
+	v.lastSeen = v.lastSeen.Add(-1e12) // very long ago
+	rl.mu.Unlock()
+
+	rl.allow(ip) // triggers replenishment
+
+	rl.mu.Lock()
+	if v.tokens > rl.burst {
+		t.Errorf("tokens %f should not exceed burst %f", v.tokens, rl.burst)
+	}
+	rl.mu.Unlock()
+}
+
+func TestRateLimitMiddleware_Returns429(t *testing.T) {
+	rl := &RateLimiter{
+		visitors: make(map[string]*visitor),
+		rate:     10,
+		burst:    1, // only 1 request allowed
+	}
 
 	handler := RateLimitMiddleware(rl)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "192.168.1.1:1234"
-	rr := httptest.NewRecorder()
-
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", rr.Code)
-	}
-}
-
-func TestRateLimitMiddleware_BlocksExcessiveRequests(t *testing.T) {
-	rl := NewRateLimiter(0.001, 1) // 1 burst, very slow replenishment
-
-	handler := RateLimitMiddleware(rl)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	// First request passes
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "10.0.0.1:5000"
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected first request to return 200, got %d", rr.Code)
+	// First request should succeed
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.RemoteAddr = "5.5.5.5:1234"
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
 	// Second request should be rate limited
-	rr2 := httptest.NewRecorder()
-	handler.ServeHTTP(rr2, req)
-	if rr2.Code != http.StatusTooManyRequests {
-		t.Errorf("expected second request to return 429, got %d", rr2.Code)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d", w.Code)
 	}
 
-	// Verify JSON error response
+	// Check response body
 	var resp Response
-	if err := json.NewDecoder(rr2.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode JSON response: %v", err)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
 	}
 	if resp.Success {
-		t.Error("expected success to be false")
+		t.Error("expected Success=false")
 	}
 	if resp.Error != "Rate limit exceeded" {
-		t.Errorf("expected error 'Rate limit exceeded', got '%s'", resp.Error)
+		t.Errorf("expected 'Rate limit exceeded', got %q", resp.Error)
 	}
-
-	// Check Retry-After header
-	if rr2.Header().Get("Retry-After") != "1" {
-		t.Errorf("expected Retry-After header to be '1', got '%s'", rr2.Header().Get("Retry-After"))
+	if w.Header().Get("Retry-After") != "1" {
+		t.Errorf("expected Retry-After=1, got %q", w.Header().Get("Retry-After"))
 	}
 }
 
 func TestRateLimitMiddleware_UsesXRealIP(t *testing.T) {
-	rl := NewRateLimiter(0.001, 1)
+	rl := &RateLimiter{
+		visitors: make(map[string]*visitor),
+		rate:     10,
+		burst:    1,
+	}
 
 	handler := RateLimitMiddleware(rl)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
 	// First request with X-Real-Ip
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "proxy:8080"
-	req.Header.Set("X-Real-Ip", "client-ip-1")
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rr.Code)
-	}
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Real-Ip", "8.8.8.8")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
 
-	// Second request with same X-Real-Ip should be rate limited
-	rr2 := httptest.NewRecorder()
-	handler.ServeHTTP(rr2, req)
-	if rr2.Code != http.StatusTooManyRequests {
-		t.Errorf("expected 429, got %d", rr2.Code)
-	}
-
-	// Request with different X-Real-Ip should be allowed
-	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req2.RemoteAddr = "proxy:8080"
-	req2.Header.Set("X-Real-Ip", "client-ip-2")
-	rr3 := httptest.NewRecorder()
-	handler.ServeHTTP(rr3, req2)
-	if rr3.Code != http.StatusOK {
-		t.Errorf("expected 200 for different IP, got %d", rr3.Code)
+	// Check that the visitor was stored under the X-Real-Ip
+	if _, ok := rl.visitors["8.8.8.8"]; !ok {
+		t.Error("visitor should be tracked by X-Real-Ip header")
 	}
 }

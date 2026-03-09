@@ -51,6 +51,7 @@ linters-settings:
     excludes:
       - G101 # false positives for hardcoded credentials in test files
       - G104 # unhandled errors (covered by errcheck)
+      - G115 # integer overflow conversion (intentional uint64<->int64 casts for Ethereum types)
       - G304 # file path from variable (false positives)
   revive:
     rules:
@@ -76,11 +77,16 @@ linters-settings:
 
 issues:
   exclude-rules:
-    # Allow unchecked errors in test files
+    # RpcURL is used across many files; suppress var-naming suggestion to rename to RPCURL
+    - text: "struct field RpcURL should be RPCURL"
+      linters:
+        - revive
+    # Allow unchecked errors and string constants in test files
     - path: _test\.go
       linters:
         - errcheck
         - gosec
+        - goconst
         - noctx
     # Allow fmt.Sprintf in SQL queries (false positive for SQL injection)
     - path: internal/api/handlers\.go
