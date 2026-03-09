@@ -1202,7 +1202,16 @@ func TestBlockProcessingWorker_ProcessesTask(t *testing.T) {
 	}()
 
 	idx.blockTaskCh <- BlockTask{BlockNumber: 1}
-	close(idx.blockTaskCh)
+	deadline := time.After(400 * time.Millisecond)
+	for idx.GetLastIndexedBlock() != 1 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for processed block")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	idx.cancel()
 
 	select {
 	case <-done:
@@ -1236,7 +1245,22 @@ func TestBlockProcessingWorker_TracksFailedBlock(t *testing.T) {
 	}()
 
 	idx.blockTaskCh <- BlockTask{BlockNumber: 2}
-	close(idx.blockTaskCh)
+	deadline := time.After(400 * time.Millisecond)
+	for {
+		idx.failedBlocksMu.Lock()
+		failures := idx.failedBlocks[2]
+		idx.failedBlocksMu.Unlock()
+		if failures == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for failed block tracking")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	idx.cancel()
 
 	select {
 	case <-done:
