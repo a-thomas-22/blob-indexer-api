@@ -45,6 +45,7 @@ type ServerConfig struct {
 	ReadTimeout     time.Duration `mapstructure:"read_timeout" yaml:"read_timeout"`
 	WriteTimeout    time.Duration `mapstructure:"write_timeout" yaml:"write_timeout"`
 	IdleTimeout     time.Duration `mapstructure:"idle_timeout" yaml:"idle_timeout"`
+	DevAPIKey       string        `mapstructure:"dev_api_key" yaml:"dev_api_key"`
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout" yaml:"shutdown_timeout"`
 }
 
@@ -100,6 +101,7 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("server.read_timeout", "30s")
 	v.SetDefault("server.write_timeout", "30s")
 	v.SetDefault("server.idle_timeout", "120s")
+	v.SetDefault("server.dev_api_key", "")
 	v.SetDefault("server.shutdown_timeout", "15s")
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")
@@ -192,6 +194,11 @@ func loadConfig() (*Config, error) {
 	// Development mode - direct environment variable override
 	if devMode := os.Getenv("DEV_MODE"); devMode != "" {
 		v.Set("server.dev_mode", strings.EqualFold(devMode, "true"))
+	}
+
+	// Development API key for privileged dev endpoints
+	if devAPIKey := os.Getenv("DEV_API_KEY"); devAPIKey != "" {
+		v.Set("server.dev_api_key", devAPIKey)
 	}
 
 	// Indexer version - direct environment variable override

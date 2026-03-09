@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"mime"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
@@ -31,6 +33,44 @@ func DevModeMiddleware(devMode bool) func(http.Handler) http.Handler {
 				}
 				return
 			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// DevAPIKeyMiddleware protects dev endpoints with a static API key.
+// If no key is configured, the endpoints behave as not found.
+func DevAPIKeyMiddleware(requiredAPIKey string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.TrimSpace(requiredAPIKey) == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(Response{
+					Success: false,
+					Error:   "Not found",
+				})
+				return
+			}
+
+			provided := strings.TrimSpace(r.Header.Get("X-API-Key"))
+			if provided == "" {
+				authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+				if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+					provided = strings.TrimSpace(authHeader[len("Bearer "):])
+				}
+			}
+
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(requiredAPIKey)) != 1 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(Response{
+					Success: false,
+					Error:   "Unauthorized",
+				})
+				return
+			}
+
 			next.ServeHTTP(w, r)
 		})
 	}

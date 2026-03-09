@@ -1143,6 +1143,47 @@ func TestDevModeMiddleware_Enabled(t *testing.T) {
 	}
 }
 
+func TestDevAPIKeyMiddleware_KeyMissing(t *testing.T) {
+	handler := DevAPIKeyMiddleware("")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when dev API key is not configured, got %d", w.Code)
+	}
+}
+
+func TestDevAPIKeyMiddleware_RejectsInvalidKey(t *testing.T) {
+	handler := DevAPIKeyMiddleware("secret")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.Header.Set("X-API-Key", "wrong")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for invalid API key, got %d", w.Code)
+	}
+}
+
+func TestDevAPIKeyMiddleware_AllowsBearerToken(t *testing.T) {
+	handler := DevAPIKeyMiddleware("secret")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for valid bearer token, got %d", w.Code)
+	}
+}
+
 func TestGetLastIndexedBlockFromDB_ValidValue(t *testing.T) {
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
