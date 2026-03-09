@@ -26,17 +26,17 @@ func TestMain(m *testing.M) {
 func newTestIndexer(cfg *config.Config, network config.NetworkConfig) *Indexer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Indexer{
-		config:              cfg,
-		network:             network,
-		batchSize:           cfg.Indexer.BatchSize,
-		pollingInterval:     cfg.Indexer.PollingInterval,
+		config:                 cfg,
+		network:                network,
+		batchSize:              cfg.Indexer.BatchSize,
+		pollingInterval:        cfg.Indexer.PollingInterval,
 		mempoolPollingInterval: cfg.Indexer.MempoolPollingInterval,
-		workerCount:         DefaultWorkerCount,
-		ctx:                 ctx,
-		cancel:              cancel,
-		indexerVersion:      cfg.Indexer.Version,
-		blockTaskCh:         make(chan BlockTask, 100),
-		failedBlocks:        make(map[uint64]int),
+		workerCount:            DefaultWorkerCount,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		indexerVersion:         cfg.Indexer.Version,
+		blockTaskCh:            make(chan BlockTask, 100),
+		failedBlocks:           make(map[uint64]int),
 	}
 }
 
@@ -298,7 +298,7 @@ func TestRetryFailedBlocks_RequeuesEligibleBlocks(t *testing.T) {
 
 	// Add some failed blocks: one under the retry limit, one at the limit, one over
 	idx.failedBlocksMu.Lock()
-	idx.failedBlocks[10] = 1                    // eligible
+	idx.failedBlocks[10] = 1                     // eligible
 	idx.failedBlocks[20] = maxGapScanRetries     // eligible (at limit)
 	idx.failedBlocks[30] = maxGapScanRetries + 1 // permanently failed
 	idx.failedBlocksMu.Unlock()
@@ -376,9 +376,9 @@ func TestUpdateLastIndexedBlock_IncrementsOnly(t *testing.T) {
 		}
 	}
 
-	testAtomicUpdate(10, 10)  // 0 -> 10
-	testAtomicUpdate(5, 10)   // 10 stays (5 < 10)
-	testAtomicUpdate(10, 10)  // 10 stays (equal)
+	testAtomicUpdate(10, 10)   // 0 -> 10
+	testAtomicUpdate(5, 10)    // 10 stays (5 < 10)
+	testAtomicUpdate(10, 10)   // 10 stays (equal)
 	testAtomicUpdate(100, 100) // 10 -> 100
 }
 
@@ -430,9 +430,9 @@ func TestBlobCostCalculation(t *testing.T) {
 		{
 			name:             "normal case: tip is positive",
 			maxFeePerBlobGas: big.NewInt(2000000000), // 2 Gwei
-			blobBaseFee:      big.NewInt(1000000000),  // 1 Gwei
-			blobGasUsed:      131072,                  // 1 blob = 131072 gas
-			wantTip:          big.NewInt(1000000000),   // 1 Gwei
+			blobBaseFee:      big.NewInt(1000000000), // 1 Gwei
+			blobGasUsed:      131072,                 // 1 blob = 131072 gas
+			wantTip:          big.NewInt(1000000000), // 1 Gwei
 			wantTotalCost:    new(big.Int).Mul(big.NewInt(2000000000), big.NewInt(131072)),
 		},
 		{
@@ -463,9 +463,9 @@ func TestBlobCostCalculation(t *testing.T) {
 		{
 			name:             "large values",
 			maxFeePerBlobGas: new(big.Int).Mul(big.NewInt(100), big.NewInt(1000000000)), // 100 Gwei
-			blobBaseFee:      new(big.Int).Mul(big.NewInt(10), big.NewInt(1000000000)),   // 10 Gwei
-			blobGasUsed:      131072 * 6,                                                 // 6 blobs
-			wantTip:          new(big.Int).Mul(big.NewInt(90), big.NewInt(1000000000)),    // 90 Gwei
+			blobBaseFee:      new(big.Int).Mul(big.NewInt(10), big.NewInt(1000000000)),  // 10 Gwei
+			blobGasUsed:      131072 * 6,                                                // 6 blobs
+			wantTip:          new(big.Int).Mul(big.NewInt(90), big.NewInt(1000000000)),  // 90 Gwei
 			wantTotalCost: new(big.Int).Mul(
 				new(big.Int).Mul(big.NewInt(100), big.NewInt(1000000000)),
 				big.NewInt(131072*6),
