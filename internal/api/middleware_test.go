@@ -88,3 +88,24 @@ func TestRequestCounterMiddleware_TracksCounts(t *testing.T) {
 		t.Fatalf("expected activeRequests=0 after request, got %d", got)
 	}
 }
+
+func TestSecurityHeadersMiddleware(t *testing.T) {
+	handler := SecurityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/status", http.NoBody)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("expected nosniff header, got %q", got)
+	}
+	if got := w.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("expected DENY frame header, got %q", got)
+	}
+	if got := w.Header().Get("Strict-Transport-Security"); got == "" {
+		t.Fatal("expected strict transport security header on https")
+	}
+}

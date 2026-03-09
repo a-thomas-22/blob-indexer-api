@@ -23,9 +23,6 @@ RUN apk add --no-cache ca-certificates tzdata \
 COPY --from=builder /app/blob-indexer-api .
 COPY --from=builder /app/internal/db/migrations ./internal/db/migrations
 
-# Copy configuration files
-COPY --from=builder /app/config.yaml ./
-
 RUN chown -R appuser:appgroup /app
 
 USER appuser
