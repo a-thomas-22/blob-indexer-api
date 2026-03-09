@@ -62,10 +62,12 @@ func ContentTypeJSON(next http.Handler) http.Handler {
 				if err != nil || mediaType != "application/json" {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusUnsupportedMediaType)
-					json.NewEncoder(w).Encode(Response{
+					if err := json.NewEncoder(w).Encode(Response{
 						Success: false,
 						Error:   "Content-Type must be application/json",
-					})
+					}); err != nil {
+						logger.Error("Failed to encode unsupported media type response", zap.Error(err))
+					}
 					return
 				}
 			}
