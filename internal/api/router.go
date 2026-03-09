@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"sync/atomic"
@@ -19,7 +20,7 @@ import (
 // API holds the API dependencies
 type API struct {
 	db             DBProvider
-	indexers       map[int]IndexerProvider
+	networks       map[int]config.NetworkConfig
 	config         *config.Config
 	startTime      time.Time
 	totalRequests  int64 // accessed via sync/atomic
@@ -27,10 +28,15 @@ type API struct {
 }
 
 // NewRouter creates a new API router
-func NewRouter(db DBProvider, indexers map[int]IndexerProvider, cfg *config.Config) http.Handler {
+func NewRouter(db DBProvider, cfg *config.Config) http.Handler {
+	networks := make(map[int]config.NetworkConfig)
+	for _, n := range cfg.GetEnabledNetworks() {
+		networks[n.ChainID] = n
+	}
+
 	api := &API{
 		db:        db,
-		indexers:  indexers,
+		networks:  networks,
 		config:    cfg,
 		startTime: time.Now(),
 	}
@@ -97,18 +103,12 @@ func NewRouter(db DBProvider, indexers map[int]IndexerProvider, cfg *config.Conf
 
 		// Development endpoints
 		r.Route("/dev", func(r chi.Router) {
-			// These endpoints are always available
 			r.Get("/metrics", api.DevMetrics)
 			r.Get("/indexers", api.DevIndexers)
 			r.Get("/database", api.DevDatabase)
 			r.Get("/logs", api.DevLogs)
 			r.Get("/queries", api.DevQueries)
 			r.Get("/dashboard", api.DevDashboard)
-
-			// Privileged endpoints that require dev mode
-			if cfg.Server.DevMode {
-				r.Post("/reindex", api.DevReindex)
-			}
 		})
 	})
 
@@ -139,54 +139,50 @@ func NewRouter(db DBProvider, indexers map[int]IndexerProvider, cfg *config.Conf
 	return r
 }
 
-// getNetworkFromRequest gets the network from the request query parameters
-// If no network is specified, it returns the first enabled network
-func (a *API) getNetworkFromRequest(r *http.Request) (IndexerProvider, error) {
-	// Check if network is specified in query parameters
+// getNetworkFromRequest gets the network from the request query parameters.
+// If no network is specified, it returns the first enabled network.
+func (a *API) getNetworkFromRequest(r *http.Request) (config.NetworkConfig, error) {
 	networkParam := r.URL.Query().Get("network")
 	if networkParam != "" {
 		// Try to parse as chain ID
 		chainID, err := strconv.Atoi(networkParam)
 		if err == nil {
-			// Look up by chain ID
-			if idx, ok := a.indexers[chainID]; ok {
-				return idx, nil
+			if n, ok := a.networks[chainID]; ok {
+				return n, nil
 			}
 		}
 
 		// Try to look up by name
-		for _, idx := range a.indexers {
-			if idx.GetNetworkInfo().Name == networkParam {
-				return idx, nil
+		for _, n := range a.networks {
+			if n.Name == networkParam {
+				return n, nil
 			}
 		}
 
-		// Network not found
-		return nil, ErrNetworkNotFound
+		return config.NetworkConfig{}, ErrNetworkNotFound
 	}
 
-	// No network specified, return the first one
-	if len(a.indexers) == 0 {
-		return nil, ErrNoNetworksAvailable
+	if len(a.networks) == 0 {
+		return config.NetworkConfig{}, ErrNoNetworksAvailable
 	}
 
-	// Return the first indexer (usually mainnet)
-	for _, idx := range a.indexers {
-		return idx, nil
+	// Return the first network
+	for _, n := range a.networks {
+		return n, nil
 	}
 
-	return nil, ErrNoNetworksAvailable
+	return config.NetworkConfig{}, ErrNoNetworksAvailable
 }
 
 // GetNetworks returns the list of available networks
 func (a *API) GetNetworks(w http.ResponseWriter, r *http.Request) {
-	networks := make([]NetworkResponse, 0, len(a.indexers))
-	for _, idx := range a.indexers {
-		network := idx.GetNetworkInfo()
+	networks := make([]NetworkResponse, 0, len(a.networks))
+	for _, n := range a.networks {
+		lastBlock := a.getLastIndexedBlockFromDB(r.Context(), n.ChainID)
 		networks = append(networks, NetworkResponse{
-			ChainID:          network.ChainID,
-			Name:             network.Name,
-			LastIndexedBlock: idx.GetLastIndexedBlock(),
+			ChainID:          n.ChainID,
+			Name:             n.Name,
+			LastIndexedBlock: lastBlock,
 		})
 	}
 
@@ -198,7 +194,6 @@ func (a *API) GetNetworks(w http.ResponseWriter, r *http.Request) {
 
 // GetNetworkStatus returns the status of a specific network
 func (a *API) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
-	// Get the chain ID from the URL
 	chainIDStr := chi.URLParam(r, "chainId")
 	chainID, err := strconv.Atoi(chainIDStr)
 	if err != nil {
@@ -206,21 +201,16 @@ func (a *API) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get the indexer for this network
-	idx, ok := a.indexers[chainID]
+	n, ok := a.networks[chainID]
 	if !ok {
 		a.respondError(w, http.StatusNotFound, "Network not found")
 		return
 	}
 
-	// Get the network info
-	network := idx.GetNetworkInfo()
-
-	// Create the response
 	response := NetworkStatusResponse{
-		ChainID:          network.ChainID,
-		Name:             network.Name,
-		LastIndexedBlock: idx.GetLastIndexedBlock(),
+		ChainID:          n.ChainID,
+		Name:             n.Name,
+		LastIndexedBlock: a.getLastIndexedBlockFromDB(r.Context(), n.ChainID),
 		IndexerVersion:   a.config.Indexer.Version,
 	}
 
@@ -278,4 +268,18 @@ func (a *API) requestCounterMiddleware(next http.Handler) http.Handler {
 		defer atomic.AddInt64(&a.activeRequests, -1)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// getLastIndexedBlockFromDB reads the last indexed block from the indexer_metadata table.
+func (a *API) getLastIndexedBlockFromDB(ctx context.Context, networkID int) uint64 {
+	var value string
+	query := "SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = 'last_indexed_block'"
+	if err := a.db.GetContext(ctx, &value, query, networkID); err != nil {
+		return 0
+	}
+	block, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return block
 }

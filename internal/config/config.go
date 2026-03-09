@@ -63,8 +63,22 @@ type Config struct {
 	Networks []NetworkConfig `mapstructure:"networks" yaml:"networks"`
 }
 
-// Load loads the configuration using Viper from a YAML file and/or environment variables
+// Load loads the configuration using Viper with full validation (for the indexer).
 func Load() (*Config, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validateConfig(cfg); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	return cfg, nil
+}
+
+// loadConfig loads and parses config without validation.
+func loadConfig() (*Config, error) {
 	v := viper.New()
 
 	// Set default values
@@ -255,27 +269,45 @@ func Load() (*Config, error) {
 	}
 	cfg.Indexer.MempoolPollingInterval = mempoolPollingInterval
 
-	// Validate configuration
-	if err := validateConfig(&cfg); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
-	}
-
 	return &cfg, nil
 }
 
-// validateConfig validates the configuration
+// LoadForAPI loads configuration with relaxed validation (no RPC URL requirement).
+func LoadForAPI() (*Config, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := ValidateForAPI(cfg); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	return cfg, nil
+}
+
+// validateConfig validates the configuration with full checks (used by indexer).
 func validateConfig(cfg *Config) error {
+	return validateConfigWithOptions(cfg, true)
+}
+
+// ValidateForAPI validates config for the API binary (RPC URLs not required).
+func ValidateForAPI(cfg *Config) error {
+	return validateConfigWithOptions(cfg, false)
+}
+
+// validateConfigWithOptions validates config. When requireRPC is true, each
+// network must have an RPC URL and start block (indexer mode).
+func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 	logger.Info("Validating configuration")
 
 	// Validate database URL
 	if cfg.Database.URL == "" {
-		// Check if DB_URL environment variable is set
 		if os.Getenv("DB_URL") == "" {
 			logger.Error("Database URL is required", zap.String("hint", "set DB_URL environment variable or add database.url to config file"))
 			return fmt.Errorf("database URL is required - set DB_URL environment variable or add database.url to config file")
 		}
 		fmt.Println("WARNING: Database URL is not set in config, but DB_URL environment variable is set")
-		// Set the database URL from the environment variable
 		cfg.Database.URL = os.Getenv("DB_URL")
 	}
 
@@ -302,17 +334,19 @@ func validateConfig(cfg *Config) error {
 		}
 		fmt.Printf("  Chain ID: %d\n", network.ChainID)
 
-		if network.RpcURL == "" {
-			logger.Error("Network is missing an RPC URL", zap.String("network", network.Name))
-			return fmt.Errorf("network '%s' is missing an RPC URL", network.Name)
-		}
-		fmt.Printf("  RPC URL: %s (masked for security)\n", maskURL(network.RpcURL))
+		if requireRPC {
+			if network.RpcURL == "" {
+				logger.Error("Network is missing an RPC URL", zap.String("network", network.Name))
+				return fmt.Errorf("network '%s' is missing an RPC URL", network.Name)
+			}
+			fmt.Printf("  RPC URL: %s (masked for security)\n", maskURL(network.RpcURL))
 
-		if network.StartBlock == "" {
-			logger.Error("Network is missing a start block", zap.String("network", network.Name))
-			return fmt.Errorf("network '%s' is missing a start block", network.Name)
+			if network.StartBlock == "" {
+				logger.Error("Network is missing a start block", zap.String("network", network.Name))
+				return fmt.Errorf("network '%s' is missing a start block", network.Name)
+			}
+			fmt.Printf("  Start Block: %s\n", network.StartBlock)
 		}
-		fmt.Printf("  Start Block: %s\n", network.StartBlock)
 
 		logger.Debug("Network enabled status", zap.String("network", network.Name), zap.Bool("enabled", network.Enabled))
 	}

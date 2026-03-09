@@ -48,8 +48,6 @@ import (
 	"github.com/a-thomas-22/blob-indexer-api/internal/api"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
-	"github.com/a-thomas-22/blob-indexer-api/internal/ethereum"
-	"github.com/a-thomas-22/blob-indexer-api/internal/indexer"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
@@ -57,91 +55,47 @@ import (
 var version = "dev"
 
 func main() {
-	// Initialize logger
 	logger.Initialize()
 	defer func() { _ = logger.Sync() }()
 
-	logger.Info("Starting blob-indexer-api", zap.String("version", version))
+	logger.Info("Starting blob-indexer API server", zap.String("version", version))
 
-	// Load configuration
-	cfg, err := config.Load()
+	cfg, err := config.LoadForAPI()
 	if err != nil {
 		logger.Fatal("Failed to load configuration", zap.Error(err))
 	}
 
-	// Set up context with cancellation for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Initialize database connection
 	database, err := db.Connect(ctx, cfg.Database.URL)
 	if err != nil {
 		logger.Fatal("Failed to connect to database", zap.Error(err))
 	}
 	defer database.DB.Close()
 
-	// Run database migrations
 	if err := db.RunMigrations(cfg.Database.URL); err != nil {
 		logger.Fatal("Failed to run database migrations", zap.Error(err))
 	}
 
-	// Get enabled networks
-	enabledNetworks := cfg.GetEnabledNetworks()
-	if len(enabledNetworks) == 0 {
-		logger.Fatal("No enabled networks found in configuration")
-	}
-
-	// Create indexers for each enabled network
-	indexerProviders := make(map[int]api.IndexerProvider)
-	concreteIndexers := make([]*indexer.Indexer, 0, len(enabledNetworks))
-	for _, network := range enabledNetworks {
-		// Initialize Ethereum client for this network
-		ethClient, err := ethereum.NewClient(network.RpcURL)
-		if err != nil {
-			logger.Fatal("Failed to initialize Ethereum client",
-				zap.String("network", network.Name),
-				zap.Error(err))
-		}
-
-		// Create indexer for this network
-		idx := indexer.New(ctx, database, ethClient, cfg, network)
-		indexerProviders[network.ChainID] = idx
-		concreteIndexers = append(concreteIndexers, idx)
-
-		// Start indexing in background
-		go func(networkName string, idx *indexer.Indexer) {
-			logger.Info("Starting indexer", zap.String("network", networkName))
-			if err := idx.Start(); err != nil {
-				logger.Error("Indexer error",
-					zap.String("network", networkName),
-					zap.Error(err))
-				cancel() // Cancel context on indexer error
-			}
-		}(network.Name, idx)
-	}
-
-	// Initialize API server
-	router := api.NewRouter(database, indexerProviders, cfg)
+	router := api.NewRouter(database, cfg)
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Channel to listen for shutdown signals
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
 
-	// Start server in a goroutine
 	go func() {
 		logger.Info("API server listening", zap.Int("port", cfg.Server.Port))
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("Server error", zap.Error(err))
-			cancel() // Cancel context on server error
+			cancel()
 		}
 	}()
 
-	// Wait for shutdown signal or context cancellation
 	select {
 	case <-shutdown:
 		logger.Info("Shutdown signal received")
@@ -149,19 +103,12 @@ func main() {
 		logger.Info("Context canceled")
 	}
 
-	// Create a timeout context for graceful shutdown
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	// Stop all indexers
-	for _, idx := range concreteIndexers {
-		idx.Stop()
-	}
-
-	// Shutdown the server
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("Server shutdown error", zap.Error(err))
 	}
 
-	logger.Info("Server shutdown complete")
+	logger.Info("API server shutdown complete")
 }

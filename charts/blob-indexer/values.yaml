@@ -6,6 +6,18 @@ image:
   pullPolicy: IfNotPresent
   tag: "latest"
 
+# Per-component overrides (image, replicas, resources).
+# Falls back to top-level values when not set.
+api:
+  replicaCount: 1
+  image: {}
+  resources: {}
+
+indexer:
+  replicaCount: 1
+  image: {}
+  resources: {}
+
 service:
   type: ClusterIP
   port: 8080
