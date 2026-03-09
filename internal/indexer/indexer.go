@@ -43,6 +43,9 @@ const (
 
 	// maxGapScanRetries is the total failure count before a block is considered permanently failed
 	maxGapScanRetries = 10
+
+	// bytesPerBlobGasUnit converts blob gas units to approximate blob bytes.
+	bytesPerBlobGasUnit = 128
 )
 
 // errReorgDetected is returned when a chain reorganization is detected and handled
