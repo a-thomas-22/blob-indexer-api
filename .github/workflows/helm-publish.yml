@@ -1,0 +1,32 @@
+name: Helm Publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  helm:
+    # Only run for chart releases, not app releases
+    if: startsWith(github.event.release.tag_name, 'blob-indexer-chart-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#blob-indexer-chart-v}" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/setup-helm@v4
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Package chart
+        run: helm package charts/blob-indexer --version "${{ steps.version.outputs.version }}"
+
+      - name: Push chart to GHCR
+        run: helm push blob-indexer-${{ steps.version.outputs.version }}.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
