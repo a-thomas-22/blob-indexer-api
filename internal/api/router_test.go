@@ -145,7 +145,8 @@ func TestGetNetworkFromRequest_DefaultFirstNetwork(t *testing.T) {
 }
 
 func TestGetNetworkFromRequest_NoNetworks(t *testing.T) {
-	a := &API{networks: map[int]config.NetworkConfig{}}
+	a := newTestAPI()
+	a.networks = map[int]config.NetworkConfig{}
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	_, err := a.getNetworkFromRequest(req)
 	if !errors.Is(err, ErrNoNetworksAvailable) {
@@ -154,7 +155,8 @@ func TestGetNetworkFromRequest_NoNetworks(t *testing.T) {
 }
 
 func TestGetNetworkFromRequest_NotFound(t *testing.T) {
-	a := &API{networks: map[int]config.NetworkConfig{}}
+	a := newTestAPI()
+	a.networks = map[int]config.NetworkConfig{}
 	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
 	_, err := a.getNetworkFromRequest(req)
 	if !errors.Is(err, ErrNetworkNotFound) {
@@ -835,11 +837,8 @@ func TestDevQueries_ExcessiveLimit(t *testing.T) {
 }
 
 func TestGetBlobStats_BadNetwork(t *testing.T) {
-	a := &API{
-		db:       &mockDB{},
-		networks: map[int]config.NetworkConfig{},
-		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
-	}
+	a := newTestAPI()
+	a.networks = map[int]config.NetworkConfig{}
 	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetBlobStats(w, req)
@@ -850,11 +849,8 @@ func TestGetBlobStats_BadNetwork(t *testing.T) {
 }
 
 func TestGetIndexerStatus_BadNetwork(t *testing.T) {
-	a := &API{
-		db:       &mockDB{},
-		networks: map[int]config.NetworkConfig{},
-		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
-	}
+	a := newTestAPI()
+	a.networks = map[int]config.NetworkConfig{}
 	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetIndexerStatus(w, req)
@@ -892,11 +888,8 @@ func TestGetMempoolBlobs_ExcessiveLimit(t *testing.T) {
 }
 
 func TestGetMempoolBlobs_BadNetwork(t *testing.T) {
-	a := &API{
-		db:       &mockDB{},
-		networks: map[int]config.NetworkConfig{},
-		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
-	}
+	a := newTestAPI()
+	a.networks = map[int]config.NetworkConfig{}
 	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)
@@ -970,16 +963,7 @@ func TestDevIndexers_DBTimestampError(t *testing.T) {
 			return nil
 		},
 	}
-	a := &API{
-		db: db,
-		networks: map[int]config.NetworkConfig{
-			42: {Name: "testnet", ChainID: 42, Enabled: true},
-		},
-		config: &config.Config{
-			Server:  config.ServerConfig{Port: 8080, DevMode: true},
-			Indexer: config.IndexerConfig{Version: "test-v1"},
-		},
-	}
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevIndexers(w, req)
@@ -1044,11 +1028,8 @@ func TestDevLogs_NegativeLimit(t *testing.T) {
 }
 
 func TestGetBlobByTxHash_BadNetwork(t *testing.T) {
-	a := &API{
-		db:       &mockDB{},
-		networks: map[int]config.NetworkConfig{},
-		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
-	}
+	a := newTestAPI()
+	a.networks = map[int]config.NetworkConfig{}
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("txHash", validTestTxHash)
 	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
@@ -1326,11 +1307,8 @@ func TestGetBlobPricing_InvalidBlocks(t *testing.T) {
 }
 
 func TestGetBlobPricing_BadNetwork(t *testing.T) {
-	a := &API{
-		db:       &mockDB{},
-		networks: map[int]config.NetworkConfig{},
-		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
-	}
+	a := newTestAPI()
+	a.networks = map[int]config.NetworkConfig{}
 	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetBlobPricing(w, req)
