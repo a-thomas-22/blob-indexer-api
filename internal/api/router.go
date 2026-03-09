@@ -49,6 +49,7 @@ func NewRouter(db DBProvider, cfg *config.Config) http.Handler {
 	// Middleware
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(SecurityHeadersMiddleware)
 	r.Use(MaxBytesMiddleware)
 	r.Use(RateLimitMiddleware(rateLimiter))
 	r.Use(LoggerMiddleware)
