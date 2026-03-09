@@ -453,6 +453,20 @@ func TestGetBlobBaseFee_RPCBranches(t *testing.T) {
 		}
 	})
 
+	t.Run("too short value falls back to default", func(t *testing.T) {
+		ethSvc := &rpcEthService{latest: 10, blobBaseFee: "0"}
+		c := newRPCClient(t, ethSvc, &rpcTxpoolService{}, false)
+		defer c.Close()
+
+		fee, err := c.GetBlobBaseFee(context.Background(), 1)
+		if err != nil {
+			t.Fatalf("GetBlobBaseFee() error = %v", err)
+		}
+		if fee.Int64() != 1_000_000_000 {
+			t.Fatalf("expected default fee, got %d", fee.Int64())
+		}
+	})
+
 	t.Run("rpc error", func(t *testing.T) {
 		ethSvc := &rpcEthService{latest: 10, blobFeeErr: errors.New("blob fee failed")}
 		c := newRPCClient(t, ethSvc, &rpcTxpoolService{}, false)
