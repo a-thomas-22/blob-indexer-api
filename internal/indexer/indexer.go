@@ -1370,6 +1370,7 @@ func (i *Indexer) retryFailedBlocks() {
 				zap.String("network", i.network.Name),
 				zap.Uint64("block", block),
 				zap.Int("total_attempts", count))
+			delete(i.failedBlocks, block)
 		}
 	}
 	i.failedBlocksMu.Unlock()
