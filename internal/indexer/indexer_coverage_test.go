@@ -632,6 +632,7 @@ func TestReindex(t *testing.T) {
 		idx.db = idxDB
 		idx.blockTaskCh = make(chan BlockTask, 10)
 
+		mock.ExpectBegin()
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3")).
 			WithArgs(idx.network.ChainID, uint64(5), uint64(7)).
 			WillReturnResult(sqlmock.NewResult(0, 3))
@@ -641,6 +642,7 @@ func TestReindex(t *testing.T) {
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3")).
 			WithArgs(idx.network.ChainID, uint64(5), uint64(7)).
 			WillReturnResult(sqlmock.NewResult(0, 3))
+		mock.ExpectCommit()
 
 		if err := idx.Reindex(5, 7); err != nil {
 			t.Fatalf("Reindex() error = %v", err)
@@ -666,9 +668,11 @@ func TestReindex(t *testing.T) {
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
 
+		mock.ExpectBegin()
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3")).
 			WithArgs(idx.network.ChainID, uint64(5), uint64(7)).
 			WillReturnError(errors.New("delete blobs failed"))
+		mock.ExpectRollback()
 
 		err := idx.Reindex(5, 7)
 		if err == nil || !strings.Contains(err.Error(), "failed to delete existing blob records") {
@@ -681,6 +685,7 @@ func TestReindex(t *testing.T) {
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
 
+		mock.ExpectBegin()
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3")).
 			WithArgs(idx.network.ChainID, uint64(5), uint64(7)).
 			WillReturnResult(sqlmock.NewResult(0, 3))
@@ -690,6 +695,7 @@ func TestReindex(t *testing.T) {
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3")).
 			WithArgs(idx.network.ChainID, uint64(5), uint64(7)).
 			WillReturnError(errors.New("delete indexed failed"))
+		mock.ExpectRollback()
 
 		err := idx.Reindex(5, 7)
 		if err == nil || !strings.Contains(err.Error(), "failed to delete existing indexed block records") {
@@ -1116,6 +1122,7 @@ func TestCheckForReorg_DetectsMismatchAndRewinds(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2")).
 		WithArgs(idx.network.ChainID, uint64(4)).
 		WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(forkBlockHash.Hash().Hex()))
+	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2")).
 		WithArgs(idx.network.ChainID, int64(5)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -1128,6 +1135,7 @@ func TestCheckForReorg_DetectsMismatchAndRewinds(t *testing.T) {
 	mock.ExpectExec("INSERT INTO indexer_metadata").
 		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, "4").
 		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
 
 	err = idx.checkForReorg(5, block)
 	if err == nil || !errors.Is(err, errReorgDetected) {
@@ -1152,6 +1160,7 @@ func TestHandleReorg_SuccessAndError(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2")).
 			WithArgs(idx.network.ChainID, forkBlock).
 			WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(expectedHash))
+		mock.ExpectBegin()
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2")).
 			WithArgs(idx.network.ChainID, int64(forkBlock+1)).
 			WillReturnResult(sqlmock.NewResult(0, 2))
@@ -1164,6 +1173,7 @@ func TestHandleReorg_SuccessAndError(t *testing.T) {
 		mock.ExpectExec("INSERT INTO indexer_metadata").
 			WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(forkBlock, 10)).
 			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectCommit()
 
 		err = idx.handleReorg(5)
 		if err == nil || !errors.Is(err, errReorgDetected) {
@@ -1204,12 +1214,14 @@ func TestHandleReorg_SuccessAndError(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2")).
 			WithArgs(idx.network.ChainID, forkBlock).
 			WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(expectedHash))
+		mock.ExpectBegin()
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2")).
 			WithArgs(idx.network.ChainID, int64(forkBlock+1)).
 			WillReturnResult(sqlmock.NewResult(0, 2))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2")).
 			WithArgs(idx.network.ChainID, int64(forkBlock+1)).
 			WillReturnError(errors.New("metrics delete failed"))
+		mock.ExpectRollback()
 
 		err := idx.handleReorg(5)
 		if err == nil || !strings.Contains(err.Error(), "failed to delete reorged block metrics") {
