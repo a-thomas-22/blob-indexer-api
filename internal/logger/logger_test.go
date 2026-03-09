@@ -56,7 +56,7 @@ func TestLogFunctions(t *testing.T) {
 
 func TestWithContext_WithRequestID(t *testing.T) {
 	Initialize()
-	ctx := context.WithValue(context.Background(), "requestID", "test-123")
+	ctx := context.WithValue(context.Background(), RequestIDKey, "test-123")
 	l := WithContext(ctx)
 	if l == nil {
 		t.Fatal("expected non-nil logger")

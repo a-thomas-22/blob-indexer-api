@@ -42,6 +42,8 @@ import (
 	"syscall"
 	"time"
 
+	"go.uber.org/zap"
+
 	_ "github.com/a-thomas-22/blob-indexer-api/docs"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/api"
@@ -50,13 +52,14 @@ import (
 	"github.com/a-thomas-22/blob-indexer-api/internal/ethereum"
 	"github.com/a-thomas-22/blob-indexer-api/internal/indexer"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
-	"go.uber.org/zap"
 )
 
 func main() {
 	// Initialize logger
 	logger.Initialize()
-	defer logger.Sync()
+	defer func() {
+		_ = logger.Sync()
+	}()
 
 	// Load configuration
 	cfg, err := config.Load()
@@ -118,8 +121,9 @@ func main() {
 	// Initialize API server
 	router := api.NewRouter(database, indexerProviders, cfg)
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler: router,
+		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	// Channel to listen for shutdown signals
@@ -140,7 +144,7 @@ func main() {
 	case <-shutdown:
 		logger.Info("Shutdown signal received")
 	case <-ctx.Done():
-		logger.Info("Context cancelled")
+		logger.Info("Context canceled")
 	}
 
 	// Create a timeout context for graceful shutdown

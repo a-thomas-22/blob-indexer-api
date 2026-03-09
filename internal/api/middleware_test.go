@@ -5,13 +5,14 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
 
 func TestLoggerMiddleware_SetsRequestID(t *testing.T) {
 	var capturedID string
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id, ok := r.Context().Value("requestID").(string)
+		id, ok := r.Context().Value(logger.RequestIDKey).(string)
 		if !ok || id == "" {
 			t.Error("expected requestID in context")
 		}
