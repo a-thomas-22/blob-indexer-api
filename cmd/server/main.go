@@ -42,21 +42,26 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/a-thomas-22/blob-indexer-api/docs"
+	"go.uber.org/zap"
 
+	_ "github.com/a-thomas-22/blob-indexer-api/docs"
 	"github.com/a-thomas-22/blob-indexer-api/internal/api"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
 	"github.com/a-thomas-22/blob-indexer-api/internal/ethereum"
 	"github.com/a-thomas-22/blob-indexer-api/internal/indexer"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
-	"go.uber.org/zap"
 )
+
+// version is set at build time via -ldflags.
+var version = "dev"
 
 func main() {
 	// Initialize logger
 	logger.Initialize()
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
+
+	logger.Info("Starting blob-indexer-api", zap.String("version", version))
 
 	// Load configuration
 	cfg, err := config.Load()
@@ -87,7 +92,8 @@ func main() {
 	}
 
 	// Create indexers for each enabled network
-	indexers := make(map[int]*indexer.Indexer)
+	indexerProviders := make(map[int]api.IndexerProvider)
+	concreteIndexers := make([]*indexer.Indexer, 0, len(enabledNetworks))
 	for _, network := range enabledNetworks {
 		// Initialize Ethereum client for this network
 		ethClient, err := ethereum.NewClient(network.RpcURL)
@@ -99,7 +105,8 @@ func main() {
 
 		// Create indexer for this network
 		idx := indexer.New(ctx, database, ethClient, cfg, network)
-		indexers[network.ChainID] = idx
+		indexerProviders[network.ChainID] = idx
+		concreteIndexers = append(concreteIndexers, idx)
 
 		// Start indexing in background
 		go func(networkName string, idx *indexer.Indexer) {
@@ -114,10 +121,11 @@ func main() {
 	}
 
 	// Initialize API server
-	router := api.NewRouter(database, indexers, cfg)
+	router := api.NewRouter(database, indexerProviders, cfg)
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler: router,
+		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	// Channel to listen for shutdown signals
@@ -138,7 +146,7 @@ func main() {
 	case <-shutdown:
 		logger.Info("Shutdown signal received")
 	case <-ctx.Done():
-		logger.Info("Context cancelled")
+		logger.Info("Context canceled")
 	}
 
 	// Create a timeout context for graceful shutdown
@@ -146,7 +154,7 @@ func main() {
 	defer shutdownCancel()
 
 	// Stop all indexers
-	for _, idx := range indexers {
+	for _, idx := range concreteIndexers {
 		idx.Stop()
 	}
 

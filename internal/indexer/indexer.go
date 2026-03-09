@@ -13,15 +13,16 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"go.uber.org/zap"
+
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	"github.com/a-thomas-22/blob-indexer-api/internal/ethereum"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
-	"go.uber.org/zap"
 )
 
 const (
@@ -247,7 +248,10 @@ func (i *Indexer) getLastIndexedBlock() (uint64, error) {
 	value, err := i.db.GetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataLastIndexedBlock)
 	if err != nil {
 		// If the metadata doesn't exist, return 0
-		return 0, nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed to get last indexed block: %w", err)
 	}
 
 	// Parse the block number
@@ -317,7 +321,7 @@ func (i *Indexer) blockProcessingWorker(workerID int) {
 		zap.Int("worker_id", workerID))
 
 	for task := range i.blockTaskCh {
-		// Check if the context is cancelled
+		// Check if the context is canceled
 		select {
 		case <-i.ctx.Done():
 			logger.Info("Block processing worker stopped",
@@ -670,7 +674,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 	timestamp := i.ethClient.GetBlockTimestamp(block)
 
 	// Collect all blob records for this block
-	var blobs []models.Blob
+	blobs := make([]models.Blob, 0, len(block.Transactions()))
 	var attributedUsers []string
 
 	for txIndex, tx := range block.Transactions() {
@@ -762,7 +766,10 @@ func (i *Indexer) checkForReorg(blockNumber uint64, block *types.Block) error {
 	storedHash, err := i.db.GetIndexedBlockHash(i.ctx, i.network.ChainID, blockNumber-1)
 	if err != nil {
 		// Previous block not in our index — can't check (initial sync, gap, or first block)
-		return nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("failed to get indexed block hash for block %d: %w", blockNumber-1, err)
 	}
 
 	parentHash := block.ParentHash().Hex()
@@ -840,7 +847,7 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Insert blobs using a prepared statement within the transaction
 	if len(blobs) > 0 {
@@ -1091,7 +1098,7 @@ func (i *Indexer) insertPendingBlob(blob models.Blob) error {
 
 		// Use the next available blob_index
 		blob.BlobIndex = maxBlobIndex + 1
-	} else if err != sql.ErrNoRows {
+	} else if !errors.Is(err, sql.ErrNoRows) {
 		// If there was an error other than "no rows", return it
 		return fmt.Errorf("failed to check for existing blob: %w", err)
 	}
@@ -1292,14 +1299,6 @@ func (i *Indexer) GetBlobCounts(ctx context.Context) (confirmedCount, pendingCou
 }
 
 // GetTopBlobUsers gets the top blob users by number of blobs for this network
-func (i *Indexer) GetTopBlobUsers(ctx context.Context, limit int) ([]struct {
-	Address       string    `db:"from_address"`
-	Name          string    `db:"user_attribution"`
-	BlobCount     int       `db:"blob_count"`
-	TotalCostETH  string    `db:"total_cost_eth"`
-	LastTimestamp time.Time `db:"last_timestamp"`
-}, error) {
-	// This is a simplified implementation
-	// In a real implementation, you would filter by network ID
-	return i.attribution.GetTopBlobUsers(ctx, limit)
+func (i *Indexer) GetTopBlobUsers(ctx context.Context, limit, offset int) ([]models.BlobUserStats, error) {
+	return i.attribution.GetTopBlobUsers(ctx, limit, offset)
 }

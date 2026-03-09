@@ -2,198 +2,473 @@ package indexer
 
 import (
 	"context"
-	"sync/atomic"
+	"crypto/ecdsa"
+	"math/big"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
+	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
 
-func TestConstants(t *testing.T) {
-	if DefaultBatchSize != 100 {
-		t.Errorf("expected DefaultBatchSize 100, got %d", DefaultBatchSize)
+// newTestIndexer creates a minimal Indexer without connecting to any real services.
+func newTestIndexer() *Indexer {
+	cfg := &config.Config{
+		Indexer: config.IndexerConfig{
+			Version:                "test-v1",
+			BatchSize:              50,
+			PollingInterval:        10 * time.Second,
+			MempoolPollingInterval: 20 * time.Second,
+		},
 	}
-	if DefaultPollingInterval != 15*time.Second {
-		t.Errorf("expected DefaultPollingInterval 15s, got %s", DefaultPollingInterval)
+	network := config.NetworkConfig{
+		Name:       "testnet",
+		ChainID:    42,
+		StartBlock: "100",
+		Enabled:    true,
 	}
-	if DefaultMempoolPollingInterval != 30*time.Second {
-		t.Errorf("expected DefaultMempoolPollingInterval 30s, got %s", DefaultMempoolPollingInterval)
-	}
-	if DefaultWorkerCount != 4 {
-		t.Errorf("expected DefaultWorkerCount 4, got %d", DefaultWorkerCount)
-	}
-	if maxBlockRetries != 3 {
-		t.Errorf("expected maxBlockRetries 3, got %d", maxBlockRetries)
-	}
-	if maxGapScanRetries != 10 {
-		t.Errorf("expected maxGapScanRetries 10, got %d", maxGapScanRetries)
-	}
-	if gapScanInterval != 5*time.Minute {
-		t.Errorf("expected gapScanInterval 5m, got %s", gapScanInterval)
-	}
-	if maxReorgDepth != 64 {
-		t.Errorf("expected maxReorgDepth 64, got %d", maxReorgDepth)
-	}
-}
-
-func TestErrReorgDetected(t *testing.T) {
-	if errReorgDetected == nil {
-		t.Fatal("expected errReorgDetected to be non-nil")
-	}
-	if errReorgDetected.Error() != "chain reorganization detected" {
-		t.Errorf("expected 'chain reorganization detected', got %q", errReorgDetected.Error())
-	}
-}
-
-func TestBlockTask(t *testing.T) {
-	task := BlockTask{BlockNumber: 12345}
-	if task.BlockNumber != 12345 {
-		t.Errorf("expected BlockNumber 12345, got %d", task.BlockNumber)
+	ctx, cancel := context.WithCancel(context.Background())
+	attrSvc := attribution.NewService(nil)
+	attrSvc.SetNetworkID(network.ChainID)
+	return &Indexer{
+		attribution:            attrSvc,
+		config:                 cfg,
+		network:                network,
+		batchSize:              cfg.Indexer.BatchSize,
+		pollingInterval:        cfg.Indexer.PollingInterval,
+		mempoolPollingInterval: cfg.Indexer.MempoolPollingInterval,
+		workerCount:            DefaultWorkerCount,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		indexerVersion:         cfg.Indexer.Version,
+		blockTaskCh:            make(chan BlockTask, 1000),
+		failedBlocks:           make(map[uint64]int),
+		mu:                     sync.Mutex{},
+		failedBlocksMu:         sync.Mutex{},
 	}
 }
 
-func TestTrackFailedBlock(t *testing.T) {
-	idx := &Indexer{
-		failedBlocks: make(map[uint64]int),
+func TestNewTestIndexer(t *testing.T) {
+	idx := newTestIndexer()
+	if idx == nil {
+		t.Fatal("expected non-nil indexer")
 	}
-
-	idx.trackFailedBlock(100)
-	if idx.failedBlocks[100] != 1 {
-		t.Errorf("expected failed count 1, got %d", idx.failedBlocks[100])
+	if idx.batchSize != 50 {
+		t.Errorf("expected batchSize=50, got %d", idx.batchSize)
 	}
-
-	idx.trackFailedBlock(100)
-	if idx.failedBlocks[100] != 2 {
-		t.Errorf("expected failed count 2, got %d", idx.failedBlocks[100])
+	if idx.pollingInterval != 10*time.Second {
+		t.Errorf("expected pollingInterval=10s, got %s", idx.pollingInterval)
 	}
-
-	idx.trackFailedBlock(200)
-	if idx.failedBlocks[200] != 1 {
-		t.Errorf("expected failed count 1 for block 200, got %d", idx.failedBlocks[200])
+	if idx.mempoolPollingInterval != 20*time.Second {
+		t.Errorf("expected mempoolPollingInterval=20s, got %s", idx.mempoolPollingInterval)
+	}
+	if idx.indexerVersion != "test-v1" {
+		t.Errorf("expected indexerVersion='test-v1', got %q", idx.indexerVersion)
 	}
 }
 
 func TestGetLastIndexedBlock(t *testing.T) {
-	idx := &Indexer{}
+	idx := newTestIndexer()
+	// Initial value should be 0
 	if idx.GetLastIndexedBlock() != 0 {
 		t.Errorf("expected 0, got %d", idx.GetLastIndexedBlock())
 	}
 }
 
-func TestGetLastIndexedBlock_WithValue(t *testing.T) {
-	idx := &Indexer{}
-	atomic.StoreUint64(&idx.lastIndexedBlock, 42)
-	if idx.GetLastIndexedBlock() != 42 {
-		t.Errorf("expected 42, got %d", idx.GetLastIndexedBlock())
-	}
-}
-
 func TestGetNetworkInfo(t *testing.T) {
-	expected := config.NetworkConfig{
-		Name:       "sepolia",
-		ChainID:    11155111,
-		RpcURL:     "https://sepolia.example.com",
-		StartBlock: "LATEST-100",
-		Enabled:    true,
-	}
-
-	idx := &Indexer{
-		network: expected,
-	}
-
+	idx := newTestIndexer()
 	info := idx.GetNetworkInfo()
-	if info.Name != expected.Name {
-		t.Errorf("expected Name %q, got %q", expected.Name, info.Name)
+	if info.Name != "testnet" {
+		t.Errorf("expected 'testnet', got %q", info.Name)
 	}
-	if info.ChainID != expected.ChainID {
-		t.Errorf("expected ChainID %d, got %d", expected.ChainID, info.ChainID)
-	}
-	if info.RpcURL != expected.RpcURL {
-		t.Errorf("expected RpcURL %q, got %q", expected.RpcURL, info.RpcURL)
-	}
-	if info.StartBlock != expected.StartBlock {
-		t.Errorf("expected StartBlock %q, got %q", expected.StartBlock, info.StartBlock)
-	}
-	if info.Enabled != expected.Enabled {
-		t.Errorf("expected Enabled %v, got %v", expected.Enabled, info.Enabled)
-	}
-}
-
-func TestRetryFailedBlocks_EmptyMap(t *testing.T) {
-	idx := &Indexer{
-		failedBlocks: make(map[uint64]int),
-	}
-
-	// Should not panic and return early with empty map
-	idx.retryFailedBlocks()
-}
-
-func TestRetryFailedBlocks_WithFailedBlocks(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	idx := &Indexer{
-		failedBlocks: make(map[uint64]int),
-		blockTaskCh:  make(chan BlockTask, 10),
-		ctx:          ctx,
-	}
-
-	// Add some failed blocks within retry limit
-	idx.failedBlocks[100] = 1
-	idx.failedBlocks[200] = 5
-
-	idx.retryFailedBlocks()
-
-	// Should have re-queued 2 blocks
-	count := len(idx.blockTaskCh)
-	if count != 2 {
-		t.Errorf("expected 2 re-queued blocks, got %d", count)
-	}
-}
-
-func TestRetryFailedBlocks_ExceedsMaxRetries(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	idx := &Indexer{
-		failedBlocks: make(map[uint64]int),
-		blockTaskCh:  make(chan BlockTask, 10),
-		ctx:          ctx,
-	}
-
-	// Add a block that exceeded max retries
-	idx.failedBlocks[100] = maxGapScanRetries + 1
-	// And one within limit
-	idx.failedBlocks[200] = 1
-
-	idx.retryFailedBlocks()
-
-	// Should have re-queued only 1 block (the one within limit)
-	count := len(idx.blockTaskCh)
-	if count != 1 {
-		t.Errorf("expected 1 re-queued block, got %d", count)
+	if info.ChainID != 42 {
+		t.Errorf("expected chain ID 42, got %d", info.ChainID)
 	}
 }
 
 func TestStop(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	idx := &Indexer{
-		ctx:         ctx,
-		cancel:      cancel,
-		blockTaskCh: make(chan BlockTask, 10),
-		network: config.NetworkConfig{
-			Name: "test",
-		},
-	}
-
-	// Stop should not panic
+	idx := newTestIndexer()
+	// Stop should not panic even if Start wasn't called
 	idx.Stop()
-
-	// Context should be cancelled
+	// Context should be canceled
 	select {
-	case <-ctx.Done():
+	case <-idx.ctx.Done():
 		// expected
 	default:
-		t.Error("expected context to be cancelled after Stop")
+		t.Error("expected context to be canceled after Stop")
+	}
+}
+
+func TestTrackFailedBlock(t *testing.T) {
+	idx := newTestIndexer()
+	idx.trackFailedBlock(100)
+	idx.trackFailedBlock(100)
+	idx.trackFailedBlock(200)
+
+	idx.failedBlocksMu.Lock()
+	defer idx.failedBlocksMu.Unlock()
+
+	if idx.failedBlocks[100] != 2 {
+		t.Errorf("expected 2 failures for block 100, got %d", idx.failedBlocks[100])
+	}
+	if idx.failedBlocks[200] != 1 {
+		t.Errorf("expected 1 failure for block 200, got %d", idx.failedBlocks[200])
+	}
+}
+
+func TestConstants(t *testing.T) {
+	if DefaultBatchSize != 100 {
+		t.Errorf("expected DefaultBatchSize=100, got %d", DefaultBatchSize)
+	}
+	if DefaultPollingInterval != 15*time.Second {
+		t.Errorf("expected DefaultPollingInterval=15s, got %s", DefaultPollingInterval)
+	}
+	if DefaultMempoolPollingInterval != 30*time.Second {
+		t.Errorf("expected DefaultMempoolPollingInterval=30s, got %s", DefaultMempoolPollingInterval)
+	}
+	if DefaultWorkerCount != 4 {
+		t.Errorf("expected DefaultWorkerCount=4, got %d", DefaultWorkerCount)
+	}
+}
+
+func TestDetermineStartBlock_NumericBlock(t *testing.T) {
+	idx := newTestIndexer()
+	idx.network.StartBlock = "12345"
+	block, err := idx.determineStartBlock()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if block != 12345 {
+		t.Errorf("expected 12345, got %d", block)
+	}
+}
+
+func TestDetermineStartBlock_InvalidNumber(t *testing.T) {
+	idx := newTestIndexer()
+	idx.network.StartBlock = "not-a-number"
+	_, err := idx.determineStartBlock()
+	if err == nil {
+		t.Error("expected error for invalid block number")
+	}
+}
+
+func TestDetermineStartBlock_EmptyStartBlock_WithLastIndexed(t *testing.T) {
+	idx := newTestIndexer()
+	idx.network.StartBlock = ""
+	idx.lastIndexedBlock = 500
+	block, err := idx.determineStartBlock()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if block != 501 {
+		t.Errorf("expected 501, got %d", block)
+	}
+}
+
+func TestDetermineStartBlock_EmptyStartBlock_NoLastIndexed(t *testing.T) {
+	idx := newTestIndexer()
+	idx.network.StartBlock = ""
+	idx.lastIndexedBlock = 0
+	block, err := idx.determineStartBlock()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if block != 0 {
+		t.Errorf("expected 0, got %d", block)
+	}
+}
+
+func TestRetryFailedBlocks_NoFailedBlocks(t *testing.T) {
+	idx := newTestIndexer()
+	// Should not panic or block with no failed blocks
+	idx.retryFailedBlocks()
+}
+
+func TestRetryFailedBlocks_WithinRetryLimit(t *testing.T) {
+	idx := newTestIndexer()
+	idx.failedBlocks[100] = 3 // within maxGapScanRetries(10)
+
+	idx.retryFailedBlocks()
+
+	// Block should be re-queued into blockTaskCh
+	select {
+	case task := <-idx.blockTaskCh:
+		if task.BlockNumber != 100 {
+			t.Errorf("expected block 100, got %d", task.BlockNumber)
+		}
+	default:
+		t.Error("expected block task to be queued")
+	}
+}
+
+func TestRetryFailedBlocks_ExceedsRetryLimit(t *testing.T) {
+	idx := newTestIndexer()
+	idx.failedBlocks[100] = maxGapScanRetries + 1 // exceeds max
+
+	idx.retryFailedBlocks()
+
+	// Block should NOT be re-queued
+	select {
+	case task := <-idx.blockTaskCh:
+		t.Errorf("unexpected block task %d", task.BlockNumber)
+	default:
+		// expected - nothing queued
+	}
+}
+
+func TestRetryFailedBlocks_MixedBlocks(t *testing.T) {
+	idx := newTestIndexer()
+	idx.failedBlocks[100] = 2                     // should retry
+	idx.failedBlocks[200] = maxGapScanRetries + 5 // should not retry
+
+	idx.retryFailedBlocks()
+
+	// Only block 100 should be re-queued
+	retried := make(map[uint64]bool)
+	for {
+		select {
+		case task := <-idx.blockTaskCh:
+			retried[task.BlockNumber] = true
+		default:
+			goto done
+		}
+	}
+done:
+	if !retried[100] {
+		t.Error("expected block 100 to be retried")
+	}
+	if retried[200] {
+		t.Error("block 200 should not be retried")
+	}
+}
+
+func TestBlockTask(t *testing.T) {
+	task := BlockTask{BlockNumber: 42}
+	if task.BlockNumber != 42 {
+		t.Errorf("expected BlockNumber=42, got %d", task.BlockNumber)
+	}
+}
+
+func TestGetSender_Success(t *testing.T) {
+	idx := newTestIndexer()
+	idx.network.ChainID = 1
+
+	// Generate a key and sign a transaction
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	signer := types.LatestSignerForChainID(big.NewInt(1))
+	tx := types.MustSignNewTx(key, signer, &types.DynamicFeeTx{
+		ChainID:   big.NewInt(1),
+		Nonce:     0,
+		GasTipCap: big.NewInt(1),
+		GasFeeCap: big.NewInt(1),
+		Gas:       21000,
+		To:        &common.Address{},
+	})
+
+	addr, err := idx.getSender(tx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expectedAddr := crypto.PubkeyToAddress(key.PublicKey).Hex()
+	if addr != expectedAddr {
+		t.Errorf("expected %s, got %s", expectedAddr, addr)
+	}
+}
+
+func TestGetSender_WrongChainID(t *testing.T) {
+	idx := newTestIndexer()
+	idx.network.ChainID = 999 // different from tx chain ID
+
+	key, _ := crypto.GenerateKey()
+	signer := types.LatestSignerForChainID(big.NewInt(1))
+	tx := types.MustSignNewTx(key, signer, &types.DynamicFeeTx{
+		ChainID:   big.NewInt(1),
+		Nonce:     0,
+		GasTipCap: big.NewInt(1),
+		GasFeeCap: big.NewInt(1),
+		Gas:       21000,
+		To:        &common.Address{},
+	})
+
+	// Should still succeed by falling back to tx's chain ID
+	addr, err := idx.getSender(tx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expectedAddr := crypto.PubkeyToAddress(key.PublicKey).Hex()
+	if addr != expectedAddr {
+		t.Errorf("expected %s, got %s", expectedAddr, addr)
+	}
+}
+
+func TestGetSender_UnsignedTx(t *testing.T) {
+	idx := newTestIndexer()
+
+	// Unsigned transaction should fail
+	tx := types.NewTx(&types.DynamicFeeTx{
+		ChainID:   big.NewInt(1),
+		Nonce:     0,
+		GasTipCap: big.NewInt(1),
+		GasFeeCap: big.NewInt(1),
+		Gas:       21000,
+	})
+
+	_, err := idx.getSender(tx)
+	if err == nil {
+		t.Error("expected error for unsigned transaction")
+	}
+}
+
+// suppress unused import warning
+var _ *ecdsa.PrivateKey
+
+func TestProcessBlockRange_Success(t *testing.T) {
+	idx := newTestIndexer()
+	err := idx.processBlockRange(10, 14)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have queued 5 blocks (10, 11, 12, 13, 14)
+	var blocks []uint64
+	for {
+		select {
+		case task := <-idx.blockTaskCh:
+			blocks = append(blocks, task.BlockNumber)
+		default:
+			goto done
+		}
+	}
+done:
+	if len(blocks) != 5 {
+		t.Fatalf("expected 5 blocks queued, got %d", len(blocks))
+	}
+	for i, expected := range []uint64{10, 11, 12, 13, 14} {
+		if blocks[i] != expected {
+			t.Errorf("block[%d] = %d, want %d", i, blocks[i], expected)
+		}
+	}
+}
+
+func TestProcessBlockRange_CancelledContext(t *testing.T) {
+	idx := newTestIndexer()
+	// Use a tiny channel so it blocks quickly
+	idx.blockTaskCh = make(chan BlockTask, 1)
+	idx.cancel() // cancel immediately
+
+	err := idx.processBlockRange(1, 100)
+	if err == nil {
+		t.Error("expected error for canceled context")
+	}
+}
+
+func TestProcessBlockRange_SingleBlock(t *testing.T) {
+	idx := newTestIndexer()
+	err := idx.processBlockRange(42, 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case task := <-idx.blockTaskCh:
+		if task.BlockNumber != 42 {
+			t.Errorf("expected block 42, got %d", task.BlockNumber)
+		}
+	default:
+		t.Error("expected one block queued")
+	}
+}
+
+func TestErrReorgDetected(t *testing.T) {
+	if errReorgDetected.Error() != "chain reorganization detected" {
+		t.Errorf("unexpected error message: %s", errReorgDetected.Error())
+	}
+}
+
+func TestInternalConstants(t *testing.T) {
+	if maxBlockRetries != 3 {
+		t.Errorf("expected maxBlockRetries=3, got %d", maxBlockRetries)
+	}
+	if maxGapScanRetries != 10 {
+		t.Errorf("expected maxGapScanRetries=10, got %d", maxGapScanRetries)
+	}
+	if gapScanInterval != 5*time.Minute {
+		t.Errorf("expected gapScanInterval=5m, got %s", gapScanInterval)
+	}
+	if maxReorgDepth != 64 {
+		t.Errorf("expected maxReorgDepth=64, got %d", maxReorgDepth)
+	}
+}
+
+func TestRetryFailedBlocks_AllExceeded(t *testing.T) {
+	idx := newTestIndexer()
+	idx.failedBlocks[100] = maxGapScanRetries + 1
+	idx.failedBlocks[200] = maxGapScanRetries + 2
+
+	idx.retryFailedBlocks()
+
+	// toRetry is empty, hits early return
+	select {
+	case task := <-idx.blockTaskCh:
+		t.Errorf("unexpected block task %d", task.BlockNumber)
+	default:
+		// expected
+	}
+}
+
+func TestRetryFailedBlocks_CancelledContext(t *testing.T) {
+	idx := newTestIndexer()
+	idx.blockTaskCh = make(chan BlockTask) // zero-buffer channel
+	idx.failedBlocks[100] = 1
+	idx.failedBlocks[200] = 1
+
+	idx.cancel() // cancel immediately
+	idx.retryFailedBlocks()
+	// Should not hang
+}
+
+func TestProcessBlockRange_EmptyRange(t *testing.T) {
+	idx := newTestIndexer()
+	err := idx.processBlockRange(10, 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	select {
+	case task := <-idx.blockTaskCh:
+		t.Errorf("unexpected block task %d", task.BlockNumber)
+	default:
+		// expected - nothing queued for reversed range
+	}
+}
+
+func TestRunGapScanner_StopsOnCancel(t *testing.T) {
+	idx := newTestIndexer()
+
+	done := make(chan struct{})
+	go func() {
+		idx.runGapScanner()
+		close(done)
+	}()
+
+	// Cancel the context
+	idx.cancel()
+
+	select {
+	case <-done:
+		// expected - gap scanner stopped
+	case <-time.After(2 * time.Second):
+		t.Error("gap scanner did not stop after context cancellation")
 	}
 }

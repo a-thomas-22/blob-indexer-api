@@ -3,32 +3,36 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
-	"github.com/a-thomas-22/blob-indexer-api/internal/config"
-	"github.com/a-thomas-22/blob-indexer-api/internal/db"
-	"github.com/a-thomas-22/blob-indexer-api/internal/indexer"
-	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	httpSwagger "github.com/swaggo/http-swagger"
 	"go.uber.org/zap"
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
+	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
 // API holds the API dependencies
 type API struct {
-	db       *db.DB
-	indexers map[int]*indexer.Indexer
-	config   *config.Config
+	db             DBProvider
+	indexers       map[int]IndexerProvider
+	config         *config.Config
+	startTime      time.Time
+	totalRequests  int64 // accessed via sync/atomic
+	activeRequests int64 // accessed via sync/atomic
 }
 
 // NewRouter creates a new API router
-func NewRouter(db *db.DB, indexers map[int]*indexer.Indexer, cfg *config.Config) http.Handler {
+func NewRouter(db DBProvider, indexers map[int]IndexerProvider, cfg *config.Config) http.Handler {
 	api := &API{
-		db:       db,
-		indexers: indexers,
-		config:   cfg,
+		db:        db,
+		indexers:  indexers,
+		config:    cfg,
+		startTime: time.Now(),
 	}
 
 	r := chi.NewRouter()
@@ -41,8 +45,10 @@ func NewRouter(db *db.DB, indexers map[int]*indexer.Indexer, cfg *config.Config)
 	r.Use(middleware.RealIP)
 	r.Use(RateLimitMiddleware(rateLimiter))
 	r.Use(LoggerMiddleware)
+	r.Use(ContentTypeJSON)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
+	r.Use(api.requestCounterMiddleware)
 
 	// CORS — AllowCredentials is false since this is a public read API.
 	// Using wildcard origins with credentials enabled is a security risk.
@@ -134,7 +140,7 @@ func NewRouter(db *db.DB, indexers map[int]*indexer.Indexer, cfg *config.Config)
 
 // getNetworkFromRequest gets the network from the request query parameters
 // If no network is specified, it returns the first enabled network
-func (a *API) getNetworkFromRequest(r *http.Request) (*indexer.Indexer, error) {
+func (a *API) getNetworkFromRequest(r *http.Request) (IndexerProvider, error) {
 	// Check if network is specified in query parameters
 	networkParam := r.URL.Query().Get("network")
 	if networkParam != "" {
@@ -173,7 +179,7 @@ func (a *API) getNetworkFromRequest(r *http.Request) (*indexer.Indexer, error) {
 
 // GetNetworks returns the list of available networks
 func (a *API) GetNetworks(w http.ResponseWriter, r *http.Request) {
-	var networks []NetworkResponse
+	networks := make([]NetworkResponse, 0, len(a.indexers))
 	for _, idx := range a.indexers {
 		network := idx.GetNetworkInfo()
 		networks = append(networks, NetworkResponse{
@@ -261,4 +267,14 @@ func NewAPIError(message string, status int) APIError {
 		Message: message,
 		Status:  status,
 	}
+}
+
+// requestCounterMiddleware tracks total and active request counts using atomic counters.
+func (a *API) requestCounterMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&a.totalRequests, 1)
+		atomic.AddInt64(&a.activeRequests, 1)
+		defer atomic.AddInt64(&a.activeRequests, -1)
+		next.ServeHTTP(w, r)
+	})
 }
