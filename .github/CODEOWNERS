@@ -1,0 +1,3 @@
+# CI/CD workflows require approval from repository owner
+.github/workflows/ @a-thomas-22
+.github/CODEOWNERS @a-thomas-22

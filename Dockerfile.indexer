@@ -1,4 +1,4 @@
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 
@@ -12,13 +12,19 @@ COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags "-X main.version=${VERSION}" -o blob-indexer ./cmd/indexer
 
-FROM alpine:latest
+FROM alpine:3.21
 
 WORKDIR /app
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -S appgroup \
+    && adduser -S appuser -G appgroup
 
 COPY --from=builder /app/blob-indexer .
 COPY --from=builder /app/internal/db/migrations ./internal/db/migrations
+
+RUN chown -R appuser:appgroup /app
+
+USER appuser
 
 CMD ["./blob-indexer"]
