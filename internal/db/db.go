@@ -8,13 +8,14 @@ import (
 	"log"
 	"path/filepath"
 	"runtime"
-	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file" // file source driver for migrations
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq" // PostgreSQL driver
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 )
 
 // DB is a wrapper around sqlx.DB
@@ -38,17 +39,17 @@ func (db *DB) GetContext(ctx context.Context, dest interface{}, query string, ar
 }
 
 // Connect establishes a connection to the database with pool configuration
-func Connect(ctx context.Context, dbURL string) (*DB, error) {
-	db, err := sqlx.ConnectContext(ctx, "postgres", dbURL)
+func Connect(ctx context.Context, dbCfg config.DatabaseConfig) (*DB, error) {
+	db, err := sqlx.ConnectContext(ctx, "postgres", dbCfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	// Configure connection pool
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(10)
-	db.SetConnMaxLifetime(5 * time.Minute)
-	db.SetConnMaxIdleTime(1 * time.Minute)
+	// Configure connection pool from config (defaults match previous hardcoded values)
+	db.SetMaxOpenConns(dbCfg.MaxOpenConns)
+	db.SetMaxIdleConns(dbCfg.MaxIdleConns)
+	db.SetConnMaxLifetime(dbCfg.ConnMaxLifetime)
+	db.SetConnMaxIdleTime(dbCfg.ConnMaxIdleTime)
 
 	// Test the connection
 	if err := db.PingContext(ctx); err != nil {
