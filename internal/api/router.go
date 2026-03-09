@@ -95,20 +95,17 @@ func NewRouter(db DBProvider, indexers map[int]IndexerProvider, cfg *config.Conf
 		// Status endpoint
 		r.Get("/status", api.GetIndexerStatus)
 
-		// Development endpoints
+		// Development endpoints — all gated behind dev mode
 		r.Route("/dev", func(r chi.Router) {
-			// These endpoints are always available
+			r.Use(DevModeMiddleware(cfg.Server.DevMode))
+
 			r.Get("/metrics", api.DevMetrics)
 			r.Get("/indexers", api.DevIndexers)
 			r.Get("/database", api.DevDatabase)
 			r.Get("/logs", api.DevLogs)
 			r.Get("/queries", api.DevQueries)
 			r.Get("/dashboard", api.DevDashboard)
-
-			// Privileged endpoints that require dev mode
-			if cfg.Server.DevMode {
-				r.Post("/reindex", api.DevReindex)
-			}
+			r.Post("/reindex", api.DevReindex)
 		})
 	})
 

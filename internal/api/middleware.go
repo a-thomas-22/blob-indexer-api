@@ -15,6 +15,28 @@ import (
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
+// DevModeMiddleware returns a middleware that gates access behind dev mode.
+// When dev mode is disabled, all requests to the protected routes receive a
+// 404 Not Found response so that the existence of dev endpoints is not leaked.
+func DevModeMiddleware(devMode bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !devMode {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				if err := json.NewEncoder(w).Encode(Response{
+					Success: false,
+					Error:   "Not found",
+				}); err != nil {
+					logger.Warn("failed to encode dev mode not-found response", zap.Error(err))
+				}
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // MaxRequestBodySize is the maximum allowed request body size (1MB).
 const MaxRequestBodySize = 1 << 20 // 1 MB
 
