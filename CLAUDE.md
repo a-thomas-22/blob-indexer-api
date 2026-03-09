@@ -2,15 +2,18 @@
 
 ## Project Overview
 
-Blob Indexer API — a Go backend that indexes Ethereum blob transactions (EIP-4844) across multiple networks and serves them via REST APIs. Data is stored in PostgreSQL.
+Blob Indexer — a Go backend that indexes Ethereum blob transactions (EIP-4844) across multiple networks and serves them via REST APIs. The indexer and API are separate binaries sharing the same PostgreSQL database.
 
 ## Build & Run
 
 ```bash
-make build          # Build binary → ./blob-indexer-api
-make run            # Build and run
+make build          # Build both binaries → ./blob-indexer-api + ./blob-indexer
+make build-api      # Build API server only
+make build-indexer  # Build indexer only
+make run-api        # Build and run API server
+make run-indexer    # Build and run indexer
 make test           # Run all tests
-make docker-build   # Build Docker image
+make docker-build   # Build both Docker images
 make swagger        # Generate Swagger docs (swag init)
 make seed-data      # Seed test data via cmd/testdata
 make db-migrate     # Run database migrations
@@ -19,9 +22,11 @@ make db-rollback    # Rollback one migration
 
 ## Architecture
 
-Entry point: `cmd/server/main.go`
+Two separate binaries:
+- **API server** (`cmd/api/main.go`): HTTP server serving REST endpoints. Reads blob data and indexer status from PostgreSQL.
+- **Indexer** (`cmd/indexer/main.go`): Connects to Ethereum RPC nodes, indexes blob transactions, writes to PostgreSQL.
 
-Startup flow: load config → connect DB → run migrations → create Ethereum clients → start per-network indexers → start HTTP server → wait for shutdown signal.
+Both share the same database and run migrations on startup.
 
 ### Key Packages
 
@@ -60,6 +65,8 @@ Loaded via Viper: first reads `config.yaml` (or `CONFIG_PATH`), then environment
 
 Key env vars: `DB_URL`, `PORT`, `DEV_MODE`, `LOG_LEVEL`, `RPC_URL`/`ETH_RPC_URL`, `START_BLOCK`, `NETWORK_<NAME>_*`.
 
+The API uses `config.LoadForAPI()` (RPC URLs optional). The indexer uses `config.Load()` (RPC URLs required).
+
 ## Code Conventions
 
 - Go module: `github.com/a-thomas-22/blob-indexer-api`
@@ -78,11 +85,11 @@ Managed by **release-please** (`.github/workflows/release-please.yml`). The app 
 - On merge to `main`, release-please maintains a running release PR with changelog
 - Merging the release PR creates a GitHub Release + tag, which triggers Docker/Helm publish workflows
 - Config: `release-please-config.json`, `.release-please-manifest.json`
-- Docker images: `ghcr.io/<owner>/blob-indexer-api`
+- Docker images: `ghcr.io/<owner>/blob-indexer-api-api`, `ghcr.io/<owner>/blob-indexer-api-indexer`
 - Helm charts: `ghcr.io/<owner>/charts/blob-indexer` (OCI)
 
 ## Deployment
 
-- **Docker**: multi-stage build (Go 1.24 Alpine → Alpine runtime), exposes port 8080
-- **Kubernetes**: Helm chart in `charts/blob-indexer/` with PostgreSQL dependency (Bitnami)
+- **Docker**: Two images — `Dockerfile.api` (exposes port 8080) and `Dockerfile.indexer` (no exposed port)
+- **Kubernetes**: Helm chart in `charts/blob-indexer/` with separate API and indexer deployments, PostgreSQL dependency (Bitnami)
 - **Tilt**: local K8s dev with hot reload (`Tiltfile` + `tilt-config.yaml`)

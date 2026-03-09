@@ -80,11 +80,11 @@ type Indexer struct {
 }
 
 // New creates a new indexer
-func New(ctx context.Context, db *db.DB, ethClient *ethereum.Client, cfg *config.Config, network config.NetworkConfig) *Indexer {
+func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *config.Config, network config.NetworkConfig) *Indexer {
 	indexerCtx, cancel := context.WithCancel(ctx)
 
 	// Create attribution service and set network ID
-	attributionSvc := attribution.NewService(db)
+	attributionSvc := attribution.NewService(database)
 	attributionSvc.SetNetworkID(network.ChainID)
 
 	// Determine the number of workers: use config value, or fall back to CPU-based heuristic
@@ -100,7 +100,7 @@ func New(ctx context.Context, db *db.DB, ethClient *ethereum.Client, cfg *config
 	useWebsocket := ethClient.IsWebsocket()
 
 	return &Indexer{
-		db:                     db,
+		db:                     database,
 		ethClient:              ethClient,
 		attribution:            attributionSvc,
 		config:                 cfg,

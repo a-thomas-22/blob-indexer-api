@@ -25,9 +25,9 @@ jobs:
           go-version: "1.24"
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.11.2
           args: --timeout=5m
 
   test:
@@ -87,12 +87,19 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Build
+      - name: Build API
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-        run: go build -o blob-indexer-api-${{ matrix.goos }}-${{ matrix.goarch }} -v ./cmd/server
+        run: go build -o blob-indexer-api-${{ matrix.goos }}-${{ matrix.goarch }} -v ./cmd/api
+
+      - name: Build Indexer
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go build -o blob-indexer-${{ matrix.goos }}-${{ matrix.goarch }} -v ./cmd/indexer
 
   vet:
     name: Vet
@@ -134,8 +141,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build Docker image
-        run: docker build -t blob-indexer-api:test .
+      - name: Build Docker images
+        run: |
+          docker build -f Dockerfile.api -t blob-indexer-api:test .
+          docker build -f Dockerfile.indexer -t blob-indexer:test .
 
   mod-verify:
     name: Module Verification
