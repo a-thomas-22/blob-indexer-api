@@ -15,7 +15,7 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 - Support full and partial reindexing safely after version changes
 - Support multiple Ethereum networks simultaneously (e.g., mainnet, Sepolia)
 - Configuration-based RPC URLs (not stored in database for flexibility)
-- Rate limiting (100 req/s per IP with burst of 200)
+- In-process rate limiting (100 req/s per IP with burst of 200)
 - Chain reorganization detection via block hash tracking
 - Structured JSON logging with configurable levels
 - Swagger/OpenAPI documentation
@@ -227,6 +227,8 @@ helm install blob-indexer ./charts/blob-indexer \
   --set blobIndexer.ethRpcUrl="https://mainnet.infura.io/v3/your-api-key" \
   --set blobIndexer.startBlock="LATEST-1000"
 ```
+
+For multi-replica deployments, configure edge rate limiting on Ingress so limits are enforced across all pods. Set `ingress.annotations` in Helm values (for example with NGINX: `nginx.ingress.kubernetes.io/limit-rps` and `nginx.ingress.kubernetes.io/limit-burst-multiplier`).
 
 ## Releases
 

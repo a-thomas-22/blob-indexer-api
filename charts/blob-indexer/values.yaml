@@ -25,6 +25,7 @@ service:
 ingress:
   enabled: false
   className: "nginx"
+  annotations: {}
   hosts:
     - host: blob-indexer.localhost
       paths:
