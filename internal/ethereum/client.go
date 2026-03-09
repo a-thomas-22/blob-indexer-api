@@ -185,6 +185,12 @@ func (c *Client) GetLatestBlockNumber(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to get latest block header: %w", err)
 	}
+	if header == nil {
+		return 0, fmt.Errorf("latest block header is missing")
+	}
+	if header.Number == nil {
+		return 0, fmt.Errorf("latest block header number is missing")
+	}
 	return header.Number.Uint64(), nil
 }
 

@@ -20,6 +20,8 @@ import (
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
 
+const validTestTxHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 // mockDB implements DBProvider for testing.
 type mockDB struct {
 	selectFn func(ctx context.Context, dest interface{}, query string, args ...interface{}) error
@@ -172,7 +174,9 @@ func TestGetNetworks(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var resp Response
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if !resp.Success {
 		t.Error("expected Success=true")
 	}
@@ -411,7 +415,9 @@ func TestGetLatestBlobs_Success(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var resp Response
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if !resp.Success {
 		t.Error("expected Success=true")
 	}
@@ -518,7 +524,7 @@ func TestGetBlobByTxHash_Success(t *testing.T) {
 			*blob = models.Blob{
 				NetworkID:         42,
 				BlockNumber:       100,
-				TxHash:            "0xabc",
+				TxHash:            validTestTxHash,
 				FromAddress:       "0x123",
 				BlobSizeBytes:     131072,
 				BaseFeePerBlobGas: "1000",
@@ -535,7 +541,7 @@ func TestGetBlobByTxHash_Success(t *testing.T) {
 	r := chi.NewRouter()
 	r.Get("/blob/{txHash}", a.GetBlobByTxHash)
 
-	req := httptest.NewRequest(http.MethodGet, "/blob/0xabc", http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, "/blob/"+validTestTxHash, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -555,7 +561,7 @@ func TestGetBlobByTxHash_NotFound(t *testing.T) {
 	r := chi.NewRouter()
 	r.Get("/blob/{txHash}", a.GetBlobByTxHash)
 
-	req := httptest.NewRequest(http.MethodGet, "/blob/0xnotfound", http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, "/blob/"+validTestTxHash, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -766,7 +772,7 @@ func TestGetBlobByTxHash_DBError(t *testing.T) {
 	}
 	a := newTestAPIWithDB(db)
 	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("txHash", "0x1234")
+	rctx.URLParams.Add("txHash", validTestTxHash)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	w := httptest.NewRecorder()
@@ -809,7 +815,9 @@ func TestDevQueries_LimitTruncation(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var resp Response
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if !resp.Success {
 		t.Error("expected success=true")
 	}
@@ -988,7 +996,7 @@ func TestGetBlobByTxHash_WithBlobData(t *testing.T) {
 				NetworkID:         42,
 				BlockNumber:       100,
 				BlobIndex:         0,
-				TxHash:            "0xabc123",
+				TxHash:            validTestTxHash,
 				FromAddress:       "0xsender",
 				BlobSizeBytes:     131072,
 				BaseFeePerBlobGas: "1000000",
@@ -1002,7 +1010,7 @@ func TestGetBlobByTxHash_WithBlobData(t *testing.T) {
 	}
 	a := newTestAPIWithDB(db)
 	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("txHash", "0xabc123")
+	rctx.URLParams.Add("txHash", validTestTxHash)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	w := httptest.NewRecorder()
@@ -1042,7 +1050,7 @@ func TestGetBlobByTxHash_BadNetwork(t *testing.T) {
 		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
 	}
 	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("txHash", "0xabc")
+	rctx.URLParams.Add("txHash", validTestTxHash)
 	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	w := httptest.NewRecorder()
@@ -1050,6 +1058,46 @@ func TestGetBlobByTxHash_BadNetwork(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetBlobByTxHash_InvalidFormat(t *testing.T) {
+	testCases := []struct {
+		name   string
+		txHash string
+	}{
+		{
+			name:   "missing 0x prefix with 64 hex chars",
+			txHash: strings.Repeat("a", 64),
+		},
+		{
+			name:   "with 0x prefix but wrong length",
+			txHash: "0xabc",
+		},
+		{
+			name:   "with 0x prefix and non-hex characters",
+			txHash: "0xgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+		},
+		{
+			name:   "completely invalid string",
+			txHash: "invalid-hash",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestAPIWithDB(&mockDB{})
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("txHash", tc.txHash)
+			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+			w := httptest.NewRecorder()
+			a.GetBlobByTxHash(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for invalid hash format, got %d", w.Code)
+			}
+		})
 	}
 }
 
@@ -1061,7 +1109,9 @@ func TestRespondMaxBytesError(t *testing.T) {
 		t.Fatalf("expected 413, got %d", w.Code)
 	}
 	var resp Response
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if resp.Success {
 		t.Error("expected Success=false")
 	}
@@ -1199,7 +1249,9 @@ func TestGetBlobPricing_Success(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var resp Response
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if !resp.Success {
 		t.Error("expected Success=true")
 	}
@@ -1292,7 +1344,9 @@ func TestGetMempoolBlobs_WithData(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var resp Response
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if !resp.Success {
 		t.Error("expected success=true")
 	}

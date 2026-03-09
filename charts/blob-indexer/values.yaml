@@ -40,6 +40,27 @@ resources:
     cpu: 250m
     memory: 256Mi
 
+podSecurityContext:
+  # Enforce that containers do not run as root. When overriding images, ensure
+  # that the image uses a non-root UID, otherwise the pod will fail to start.
+  # If your image runs as a specific non-root user/group, you can explicitly
+  # set runAsUser/runAsGroup here, for example:
+  #
+  #   runAsUser: 1000
+  #   runAsGroup: 1000
+  #
+  # Adjust the above UID/GID to match your image if you choose to enable them.
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
 # ConfigMap creation toggle. Set to false when config is managed externally (e.g., Tilt).
 configMap:
   create: true
