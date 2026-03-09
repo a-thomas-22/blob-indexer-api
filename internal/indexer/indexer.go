@@ -1164,126 +1164,52 @@ func (i *Indexer) processPendingTransactions() error {
 
 // insertPendingBlob inserts a pending blob record into the database
 func (i *Indexer) insertPendingBlob(blob models.Blob) error {
-	// For pending transactions, we need to use a different approach
-
-	// First, check if any blob with the same network_id, block_number, and blob_index exists
-	// This handles the unique constraint "blobs_network_id_block_number_blob_index_key"
-	var existingID int
-	var existingTxHash string
-	checkUniqueQuery := `
-		SELECT id, tx_hash FROM blobs
-		WHERE network_id = $1 AND block_number = $2 AND blob_index = $3
-		LIMIT 1
+	query := `
+		WITH chosen_index AS (
+			SELECT COALESCE(
+				(
+					SELECT blob_index
+					FROM blobs
+					WHERE network_id = $1 AND tx_hash = $2 AND block_number < 0
+					LIMIT 1
+				),
+				(
+					SELECT COALESCE(MAX(blob_index), -1) + 1
+					FROM blobs
+					WHERE network_id = $1 AND block_number = $3
+				)
+			) AS blob_index
+		)
+		INSERT INTO blobs (
+			network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
+			timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
+		)
+		SELECT
+			$1, $3, chosen_index.blob_index, $2, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+		FROM chosen_index
+		ON CONFLICT (network_id, tx_hash) WHERE block_number < 0 DO UPDATE SET
+			blob_index = EXCLUDED.blob_index,
+			from_address = EXCLUDED.from_address,
+			user_attribution = EXCLUDED.user_attribution,
+			blob_size_bytes = EXCLUDED.blob_size_bytes,
+			base_fee_per_blob_gas = EXCLUDED.base_fee_per_blob_gas,
+			tip_per_blob_gas = EXCLUDED.tip_per_blob_gas,
+			total_cost_eth = EXCLUDED.total_cost_eth,
+			timestamp = EXCLUDED.timestamp,
+			confirmed = EXCLUDED.confirmed,
+			indexer_version = EXCLUDED.indexer_version,
+			max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
+			blob_gas_used = EXCLUDED.blob_gas_used
 	`
-	err := i.db.QueryRowContext(i.ctx, checkUniqueQuery,
-		blob.NetworkID, blob.BlockNumber, blob.BlobIndex).Scan(&existingID, &existingTxHash)
-
-	// If we found an existing record with the same network_id, block_number, and blob_index
-	if err == nil {
-		// If it's the same transaction, update it
-		if existingTxHash == blob.TxHash {
-			query := `
-				UPDATE blobs SET
-					from_address = $3,
-					user_attribution = $4,
-					blob_size_bytes = $5,
-					base_fee_per_blob_gas = $6,
-					tip_per_blob_gas = $7,
-					total_cost_eth = $8,
-					timestamp = $9,
-					confirmed = $10,
-					indexer_version = $11,
-					max_fee_per_blob_gas = $12,
-					blob_gas_used = $13
-				WHERE id = $1 AND tx_hash = $2
-			`
-			_, err = i.db.ExecContext(i.ctx, query,
-				existingID, blob.TxHash, blob.FromAddress, blob.UserAttribution,
-				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
-				blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
-				blob.MaxFeePerBlobGas, blob.BlobGasUsed,
-			)
-			return err
-		}
-
-		// If it's a different transaction, use a different blob_index
-		// Find the next available blob_index for this network and block
-		var maxBlobIndex int
-		blobIndexQuery := `
-			SELECT COALESCE(MAX(blob_index), -1) FROM blobs
-			WHERE network_id = $1 AND block_number = $2
-		`
-		err = i.db.QueryRowContext(i.ctx, blobIndexQuery,
-			blob.NetworkID, blob.BlockNumber).Scan(&maxBlobIndex)
-		if err != nil {
-			return fmt.Errorf("failed to get max blob index: %w", err)
-		}
-
-		// Use the next available blob_index
-		blob.BlobIndex = maxBlobIndex + 1
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		// If there was an error other than "no rows", return it
-		return fmt.Errorf("failed to check for existing blob: %w", err)
+	if _, err := i.db.ExecContext(i.ctx, query,
+		blob.NetworkID, blob.TxHash, blob.BlockNumber, blob.FromAddress, blob.UserAttribution,
+		blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
+		blob.Timestamp, blob.Confirmed, blob.IndexerVersion, blob.MaxFeePerBlobGas, blob.BlobGasUsed,
+	); err != nil {
+		return fmt.Errorf("failed to upsert pending blob: %w", err)
 	}
-
-	// Now check if this specific transaction already exists as a pending transaction
-	var existsPending bool
-	checkPendingQuery := `
-		SELECT EXISTS (
-			SELECT 1 FROM blobs
-			WHERE network_id = $1 AND tx_hash = $2 AND block_number < 0
-		)
-	`
-	err = i.db.QueryRowContext(i.ctx, checkPendingQuery,
-		blob.NetworkID, blob.TxHash).Scan(&existsPending)
-	if err != nil {
-		return fmt.Errorf("failed to check if pending blob exists: %w", err)
-	}
-
-	if existsPending {
-		// Update the existing pending transaction
-		query := `
-			UPDATE blobs SET
-				blob_index = $3,
-				from_address = $4,
-				user_attribution = $5,
-				blob_size_bytes = $6,
-				base_fee_per_blob_gas = $7,
-				tip_per_blob_gas = $8,
-				total_cost_eth = $9,
-				timestamp = $10,
-				confirmed = $11,
-				indexer_version = $12,
-				max_fee_per_blob_gas = $13,
-				blob_gas_used = $14
-			WHERE network_id = $1 AND tx_hash = $2 AND block_number < 0
-		`
-		_, err = i.db.ExecContext(i.ctx, query,
-			blob.NetworkID, blob.TxHash, blob.BlobIndex, blob.FromAddress, blob.UserAttribution,
-			blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
-			blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
-			blob.MaxFeePerBlobGas, blob.BlobGasUsed,
-		)
-	} else {
-		// Insert a new record
-		query := `
-			INSERT INTO blobs (
-				network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
-				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
-				timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
-			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
-			)
-		`
-		_, err = i.db.ExecContext(i.ctx, query,
-			blob.NetworkID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
-			blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
-			blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
-			blob.MaxFeePerBlobGas, blob.BlobGasUsed,
-		)
-	}
-
-	return err
+	return nil
 }
 
 // processBlockRange processes a range of blocks by queuing them for the worker pool
