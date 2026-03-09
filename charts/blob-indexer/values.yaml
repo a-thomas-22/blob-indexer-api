@@ -1,4 +1,4 @@
-# Default values for blob-indexer
+# Default values for blob-indexer (production defaults)
 replicaCount: 1
 
 image:
@@ -11,7 +11,7 @@ service:
   port: 8080
 
 ingress:
-  enabled: true
+  enabled: false
   className: "nginx"
   hosts:
     - host: blob-indexer.localhost
@@ -21,20 +21,44 @@ ingress:
 
 resources:
   limits:
-    cpu: 500m
-    memory: 512Mi
+    cpu: "1"
+    memory: 1Gi
   requests:
-    cpu: 100m
-    memory: 128Mi
+    cpu: 250m
+    memory: 256Mi
 
-# Blob indexer specific configuration
-blobIndexer:
-  ethRpcUrl: "https://mainnet.infura.io/v3/your-api-key"
-  startBlock: "LATEST-1000" # Start 1000 blocks before latest
-  indexerVersion: "dev"
-  devMode: true
+# ConfigMap creation toggle. Set to false when config is managed externally (e.g., Tilt).
+configMap:
+  create: true
 
-# PostgreSQL configuration
+# Application configuration -- rendered into a ConfigMap as YAML.
+# Maps directly to the Config struct in internal/config/config.go.
+appConfig:
+  database:
+    url: ""  # Set via externalDatabase.url or auto-constructed from postgresql.* values
+  server:
+    port: 8080
+    dev_mode: false
+  logging:
+    level: "info"
+    format: "json"
+  indexer:
+    version: "v1.0.0"
+    batch_size: 100
+    polling_interval: "15s"
+    mempool_polling_interval: "30s"
+  networks: []
+    # - name: "mainnet"
+    #   chain_id: 1
+    #   rpc_url: "https://mainnet.infura.io/v3/YOUR-KEY"
+    #   start_block: "LATEST-1000"
+    #   enabled: true
+
+# External database URL (used when postgresql.enabled is false)
+externalDatabase:
+  url: ""
+
+# PostgreSQL subchart configuration
 postgresql:
   enabled: true
   auth:
@@ -44,3 +68,15 @@ postgresql:
   primary:
     persistence:
       size: 1Gi
+
+# Health check configuration
+healthCheck:
+  path: /api/status
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+# Pod annotations
+podAnnotations: {}
+
+nameOverride: ""
+fullnameOverride: ""

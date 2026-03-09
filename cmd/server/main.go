@@ -11,7 +11,7 @@
 // @license.url https://opensource.org/licenses/MIT
 
 // @host localhost:8080
-// @BasePath /api
+// @BasePath /api/v1
 // @schemes http https
 
 // @tag.name networks
@@ -53,10 +53,15 @@ import (
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
+// version is set at build time via -ldflags.
+var version = "dev"
+
 func main() {
 	// Initialize logger
 	logger.Initialize()
 	defer func() { _ = logger.Sync() }()
+
+	logger.Info("Starting blob-indexer-api", zap.String("version", version))
 
 	// Load configuration
 	cfg, err := config.Load()
