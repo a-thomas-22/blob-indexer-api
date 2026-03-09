@@ -70,6 +70,17 @@ Key env vars: `DB_URL`, `PORT`, `DEV_MODE`, `LOG_LEVEL`, `RPC_URL`/`ETH_RPC_URL`
 - Config: Viper with mapstructure tags for struct binding
 - Errors: handlers use `respondJSON`/`respondError` helpers
 
+## Releases
+
+Managed by **release-please** (`.github/workflows/release-please.yml`). The app and Helm chart are versioned independently.
+
+- PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `chore:`, etc.) — enforced by CI
+- On merge to `main`, release-please maintains a running release PR with changelog
+- Merging the release PR creates a GitHub Release + tag, which triggers Docker/Helm publish workflows
+- Config: `release-please-config.json`, `.release-please-manifest.json`
+- Docker images: `ghcr.io/<owner>/blob-indexer-api`
+- Helm charts: `ghcr.io/<owner>/charts/blob-indexer` (OCI)
+
 ## Deployment
 
 - **Docker**: multi-stage build (Go 1.24 Alpine → Alpine runtime), exposes port 8080
