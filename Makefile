@@ -1,4 +1,4 @@
-.PHONY: build run test clean docker-build docker-run tilt-up seed-data
+.PHONY: build run test clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall
 
 # Go parameters
 GOCMD=go
@@ -53,15 +53,19 @@ swagger:
 helm-dep-update:
 	helm dependency update ./charts/blob-indexer
 
-helm-install:
+helm-install-dev:
 	helm install blob-indexer ./charts/blob-indexer \
-		--set blobIndexer.ethRpcUrl="https://mainnet.infura.io/v3/your-api-key" \
-		--set blobIndexer.startBlock="LATEST-1000"
+		-f ./charts/blob-indexer/values-dev.yaml
+
+helm-install-prod:
+	helm install blob-indexer ./charts/blob-indexer \
+		-f ./charts/blob-indexer/values-prod.yaml \
+		--set externalDatabase.url="$(DB_URL)" \
+		--set appConfig.networks[0].rpc_url="$(RPC_URL)"
 
 helm-upgrade:
 	helm upgrade blob-indexer ./charts/blob-indexer \
-		--set blobIndexer.ethRpcUrl="https://mainnet.infura.io/v3/your-api-key" \
-		--set blobIndexer.startBlock="LATEST-1000"
+		-f ./charts/blob-indexer/values-dev.yaml
 
 helm-uninstall:
 	helm uninstall blob-indexer

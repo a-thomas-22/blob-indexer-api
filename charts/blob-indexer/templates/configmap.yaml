@@ -1,0 +1,33 @@
+{{- if .Values.configMap.create }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "blob-indexer.fullname" . }}-config
+  labels:
+    {{- include "blob-indexer.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    database:
+      {{- if .Values.externalDatabase.url }}
+      url: {{ .Values.externalDatabase.url | quote }}
+      {{- else if .Values.postgresql.enabled }}
+      url: "postgres://{{ .Values.postgresql.auth.username }}:{{ .Values.postgresql.auth.password }}@{{ .Release.Name }}-postgresql:5432/{{ .Values.postgresql.auth.database }}?sslmode=disable"
+      {{- else }}
+      url: {{ .Values.appConfig.database.url | quote }}
+      {{- end }}
+    server:
+      port: {{ .Values.appConfig.server.port }}
+      dev_mode: {{ .Values.appConfig.server.dev_mode }}
+    logging:
+      level: {{ .Values.appConfig.logging.level | quote }}
+      format: {{ .Values.appConfig.logging.format | quote }}
+    indexer:
+      version: {{ .Values.appConfig.indexer.version | quote }}
+      batch_size: {{ .Values.appConfig.indexer.batch_size }}
+      polling_interval: {{ .Values.appConfig.indexer.polling_interval }}
+      mempool_polling_interval: {{ .Values.appConfig.indexer.mempool_polling_interval }}
+    {{- if .Values.appConfig.networks }}
+    networks:
+      {{- toYaml .Values.appConfig.networks | nindent 6 }}
+    {{- end }}
+{{- end }}
