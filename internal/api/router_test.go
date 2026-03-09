@@ -1297,3 +1297,28 @@ func TestGetMempoolBlobs_WithData(t *testing.T) {
 		t.Error("expected success=true")
 	}
 }
+
+func TestCalcNextExcessBlobGas(t *testing.T) {
+	tests := []struct {
+		name      string
+		excess    uint64
+		gasUsed   uint64
+		targetGas uint64
+		want      uint64
+	}{
+		{"below target returns zero", 0, 100000, 393216, 0},
+		{"at target returns excess", 100000, 393216, 393216, 100000},
+		{"above target", 100000, 500000, 393216, 206784},
+		{"zero excess zero used", 0, 0, 393216, 0},
+		{"large excess", 10000000, 786432, 393216, 10393216},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := calcNextExcessBlobGas(tt.excess, tt.gasUsed, tt.targetGas)
+			if got != tt.want {
+				t.Errorf("calcNextExcessBlobGas(%d, %d, %d) = %d, want %d",
+					tt.excess, tt.gasUsed, tt.targetGas, got, tt.want)
+			}
+		})
+	}
+}
