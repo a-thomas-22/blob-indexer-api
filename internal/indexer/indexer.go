@@ -902,26 +902,39 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 		zap.Uint64("fork_point", forkBlock),
 		zap.Uint64("invalidated_blocks", fromBlock-forkBlock-1))
 
-	// Delete invalidated data
-	if err := i.db.DeleteBlobsFromBlock(i.ctx, i.network.ChainID, int64(forkBlock+1)); err != nil {
+	tx, err := i.db.BeginTxx(i.ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin reorg transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Delete invalidated data atomically.
+	if _, err := tx.ExecContext(i.ctx, "DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2", i.network.ChainID, int64(forkBlock+1)); err != nil {
 		return fmt.Errorf("failed to delete reorged blobs: %w", err)
 	}
-	if err := i.db.DeleteBlockMetricsFromBlock(i.ctx, i.network.ChainID, int64(forkBlock+1)); err != nil {
+	if _, err := tx.ExecContext(i.ctx, "DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2", i.network.ChainID, int64(forkBlock+1)); err != nil {
 		return fmt.Errorf("failed to delete reorged block metrics: %w", err)
 	}
-	if err := i.db.DeleteIndexedBlocksFromBlock(i.ctx, i.network.ChainID, forkBlock+1); err != nil {
+	if _, err := tx.ExecContext(i.ctx, "DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2", i.network.ChainID, forkBlock+1); err != nil {
 		return fmt.Errorf("failed to delete reorged indexed blocks: %w", err)
 	}
 
 	// Reset lastIndexedBlock to the fork point
 	atomic.StoreUint64(&i.lastIndexedBlock, forkBlock)
 	i.mu.Lock()
-	if err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(forkBlock, 10)); err != nil {
+	if _, err := tx.ExecContext(i.ctx, `
+		INSERT INTO indexer_metadata (network_id, key, value)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (network_id, key) DO UPDATE SET value = $3
+	`, i.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(forkBlock, 10)); err != nil {
 		logger.Error("Failed to update last indexed block after reorg",
 			zap.String("network", i.network.Name),
 			zap.Error(err))
 	}
 	i.mu.Unlock()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit reorg transaction: %w", err)
+	}
 
 	// Signal the main indexer loop to reset its position
 	atomic.StoreUint32(&i.reorgDetected, 1)
@@ -1310,25 +1323,31 @@ func (i *Indexer) Reindex(startBlock, endBlock uint64) error {
 		zap.Uint64("start_block", startBlock),
 		zap.Uint64("end_block", endBlock))
 
+	tx, err := i.db.BeginTxx(i.ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin reindex transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// Delete existing blob records in the range
 	query := "DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3"
-	_, err := i.db.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock)
-	if err != nil {
+	if _, err := tx.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock); err != nil {
 		return fmt.Errorf("failed to delete existing blob records: %w", err)
 	}
 
 	// Delete existing block metrics in the range
 	query = "DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3"
-	_, err = i.db.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock)
-	if err != nil {
+	if _, err := tx.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock); err != nil {
 		return fmt.Errorf("failed to delete existing block metrics: %w", err)
 	}
 
 	// Delete existing indexed block records in the range
 	query = "DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3"
-	_, err = i.db.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock)
-	if err != nil {
+	if _, err := tx.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock); err != nil {
 		return fmt.Errorf("failed to delete existing indexed block records: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit reindex cleanup: %w", err)
 	}
 
 	// Process the block range
