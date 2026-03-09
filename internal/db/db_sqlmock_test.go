@@ -7,9 +7,12 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/jmoiron/sqlx"
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 )
 
 func newMockDB(t *testing.T) (*DB, sqlmock.Sqlmock) {
@@ -248,7 +251,14 @@ func TestDeleteFromBlockMethods(t *testing.T) {
 
 func TestConnectAndMigrations_InvalidURL(t *testing.T) {
 	ctx := context.Background()
-	_, err := Connect(ctx, "postgres://invalid:invalid@127.0.0.1:1/invalid?sslmode=disable&connect_timeout=1")
+	dbCfg := config.DatabaseConfig{
+		URL:             "postgres://invalid:invalid@127.0.0.1:1/invalid?sslmode=disable&connect_timeout=1",
+		MaxOpenConns:    25,
+		MaxIdleConns:    10,
+		ConnMaxLifetime: 5 * time.Minute,
+		ConnMaxIdleTime: time.Minute,
+	}
+	_, err := Connect(ctx, dbCfg)
 	if err == nil {
 		t.Fatal("expected Connect() to fail")
 	}

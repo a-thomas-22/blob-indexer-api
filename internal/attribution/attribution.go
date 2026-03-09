@@ -23,9 +23,9 @@ type Service struct {
 }
 
 // NewService creates a new attribution service
-func NewService(db *db.DB) *Service {
+func NewService(database *db.DB) *Service {
 	return &Service{
-		db:         db,
+		db:         database,
 		knownUsers: make(map[string]string),
 		networkID:  1, // Default to mainnet
 	}

@@ -169,6 +169,8 @@ func main() {
 
 	// Step 3: Close database connection (safe now that all queries have finished).
 	logger.Info("Closing database connection...")
-	database.DB.Close()
+	if err := database.Close(); err != nil {
+		logger.Warn("Database close returned error", zap.Error(err))
+	}
 	logger.Info("Shutdown complete")
 }

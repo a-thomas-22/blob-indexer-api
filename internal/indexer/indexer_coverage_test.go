@@ -1195,7 +1195,6 @@ func TestSubscriptionHandlers(t *testing.T) {
 		hashCh <- common.HexToHash("0x1")
 		time.Sleep(10 * time.Millisecond)
 
-		idx.ethClient = &ethereum.Client{} // force resubscribe failure
 		errCh <- errors.New("subscription dropped")
 
 		select {
