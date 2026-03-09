@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,6 +26,19 @@ type API struct {
 	startTime      time.Time
 	totalRequests  int64 // accessed via sync/atomic
 	activeRequests int64 // accessed via sync/atomic
+	cacheMu        sync.RWMutex
+	statsCache     map[int]statsCacheEntry
+	topUsersCache  map[string]topUsersCacheEntry
+}
+
+type statsCacheEntry struct {
+	response  StatsResponse
+	expiresAt time.Time
+}
+
+type topUsersCacheEntry struct {
+	response  []UserResponse
+	expiresAt time.Time
 }
 
 // NewRouter creates a new API router
@@ -35,10 +49,12 @@ func NewRouter(db DBProvider, cfg *config.Config) http.Handler {
 	}
 
 	api := &API{
-		db:        db,
-		networks:  networks,
-		config:    cfg,
-		startTime: time.Now(),
+		db:            db,
+		networks:      networks,
+		config:        cfg,
+		startTime:     time.Now(),
+		statsCache:    make(map[int]statsCacheEntry),
+		topUsersCache: make(map[string]topUsersCacheEntry),
 	}
 
 	r := chi.NewRouter()
@@ -272,8 +288,7 @@ func (a *API) requestCounterMiddleware(next http.Handler) http.Handler {
 // getLastIndexedBlockFromDB reads the last indexed block from the indexer_metadata table.
 func (a *API) getLastIndexedBlockFromDB(ctx context.Context, networkID int) uint64 {
 	var value string
-	query := "SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = 'last_indexed_block'"
-	if err := a.db.GetContext(ctx, &value, query, networkID); err != nil {
+	if err := a.db.GetContext(ctx, &value, queryLastIndexedBlock, networkID); err != nil {
 		return 0
 	}
 	block, err := strconv.ParseUint(value, 10, 64)

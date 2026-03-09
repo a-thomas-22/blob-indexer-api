@@ -76,7 +76,9 @@ func newTestAPIWithDB(db DBProvider) *API {
 			Server:  config.ServerConfig{Port: 8080, DevMode: true},
 			Indexer: config.IndexerConfig{Version: "test-v1"},
 		},
-		startTime: time.Now(),
+		startTime:     time.Now(),
+		statsCache:    make(map[int]statsCacheEntry),
+		topUsersCache: make(map[string]topUsersCacheEntry),
 	}
 }
 
@@ -986,6 +988,49 @@ func TestGetTopBlobUsers_ExcessiveLimit(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetTopBlobUsers_CacheHit(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(_ context.Context, _ interface{}, _ string, _ ...interface{}) error {
+			t.Fatal("DB should not be called on cache hit")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	cacheKey := fmt.Sprintf("%d:%d:%d", 42, 10, 0)
+	a.topUsersCache[cacheKey] = topUsersCacheEntry{
+		response:  []UserResponse{{Address: "0xcached"}},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetBlobStats_CacheHit(t *testing.T) {
+	db := &mockDB{
+		getFn: func(_ context.Context, _ interface{}, _ string, _ ...interface{}) error {
+			t.Fatal("DB should not be called on cache hit")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	a.statsCache[42] = statsCacheEntry{
+		response:  StatsResponse{NetworkID: 42, TotalBlobs: 5},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobStats(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
