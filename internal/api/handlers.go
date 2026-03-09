@@ -24,15 +24,50 @@ const MaxQueryLimit = 100
 // MaxQueryOffset is the maximum offset to prevent abuse of deep pagination
 const MaxQueryOffset = 10000
 
+const blobSelectColumns = `
+	id,
+	network_id,
+	block_number,
+	blob_index,
+	tx_hash,
+	from_address,
+	user_attribution,
+	blob_size_bytes,
+	base_fee_per_blob_gas,
+	tip_per_blob_gas,
+	total_cost_eth,
+	timestamp,
+	confirmed,
+	indexer_version,
+	max_fee_per_blob_gas,
+	blob_gas_used
+`
+
+const blockMetricsSelectColumns = `
+	network_id,
+	block_number,
+	block_timestamp,
+	blob_count,
+	blob_gas_used,
+	blob_gas_target,
+	blob_gas_limit,
+	excess_blob_gas,
+	blob_base_fee,
+	utilization_ratio,
+	blob_params_target,
+	blob_params_max,
+	update_fraction
+`
+
 const (
 	queryLatestBlobs = `
-		SELECT * FROM blobs
+		SELECT ` + blobSelectColumns + ` FROM blobs
 		WHERE confirmed = true AND network_id = $1
 		ORDER BY block_number DESC, blob_index ASC
 		LIMIT $2 OFFSET $3
 	`
 	queryMempoolBlobs = `
-		SELECT * FROM blobs
+		SELECT ` + blobSelectColumns + ` FROM blobs
 		WHERE confirmed = false AND network_id = $1
 		ORDER BY timestamp DESC
 		LIMIT $2 OFFSET $3
@@ -63,7 +98,7 @@ const (
 		WHERE network_id = $1
 	`
 	queryBlockMetrics = `
-		SELECT * FROM block_metrics
+		SELECT ` + blockMetricsSelectColumns + ` FROM block_metrics
 		WHERE network_id = $1
 		ORDER BY block_number DESC
 		LIMIT $2
@@ -405,7 +440,7 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 
 	// Get the blob
 	var blob models.Blob
-	query := "SELECT * FROM blobs WHERE tx_hash = $1 AND network_id = $2"
+	query := "SELECT " + blobSelectColumns + " FROM blobs WHERE tx_hash = $1 AND network_id = $2"
 	if err := a.db.GetContext(r.Context(), &blob, query, txHash, network.ChainID); err != nil {
 		logger.Warn("Blob not found",
 			zap.String("network", network.Name),
