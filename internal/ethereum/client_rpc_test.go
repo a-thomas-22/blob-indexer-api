@@ -382,38 +382,22 @@ func TestGetLatestBlockNumber_MissingNumber(t *testing.T) {
 	}
 }
 
-func TestGetPendingTransactions_TxpoolAndFallback(t *testing.T) {
-	tx := signedTx(t)
-
-	t.Run("txpool success", func(t *testing.T) {
+func TestGetPendingTransactions_FromPendingBlock(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
 		ethSvc := &rpcEthService{latest: 10}
-		c := newRPCClient(t, ethSvc, &rpcTxpoolService{result: map[string]*types.Transaction{tx.Hash().Hex(): tx}}, false)
+		c := newRPCClient(t, ethSvc, nil, false)
 		defer c.Close()
 
 		pending, err := c.GetPendingTransactions(context.Background())
 		if err != nil {
 			t.Fatalf("GetPendingTransactions() error = %v", err)
 		}
-		if len(pending) != 1 {
-			t.Fatalf("expected 1 tx, got %d", len(pending))
-		}
-	})
-
-	t.Run("fallback to pending block", func(t *testing.T) {
-		ethSvc := &rpcEthService{latest: 10}
-		c := newRPCClient(t, ethSvc, nil, false) // no txpool service => fallback branch
-		defer c.Close()
-
-		pending, err := c.GetPendingTransactions(context.Background())
-		if err != nil {
-			t.Fatalf("GetPendingTransactions() fallback error = %v", err)
-		}
 		if len(pending) != 0 {
 			t.Fatalf("expected empty pending map, got %d entries", len(pending))
 		}
 	})
 
-	t.Run("fallback error", func(t *testing.T) {
+	t.Run("error", func(t *testing.T) {
 		ethSvc := &rpcEthService{latest: 10, failBlock: true}
 		c := newRPCClient(t, ethSvc, nil, false)
 		defer c.Close()

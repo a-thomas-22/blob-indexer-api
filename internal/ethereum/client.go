@@ -205,15 +205,9 @@ func (c *Client) GetBlockByNumber(ctx context.Context, number uint64) (*types.Bl
 
 // GetPendingTransactions gets pending transactions from the mempool
 func (c *Client) GetPendingTransactions(ctx context.Context) (map[string]*types.Transaction, error) {
-	// Try to get pending transactions using txpool_content
-	var txpoolResult map[string]*types.Transaction
-	err := c.rpcClient.CallContext(ctx, &txpoolResult, "txpool_content")
-	if err == nil && txpoolResult != nil {
-		return txpoolResult, nil
-	}
-
-	// If txpool_content is not available, try to get the pending block
-	pendingBlock, err := c.ethClient.BlockByNumber(ctx, nil)
+	// Prefer eth_getBlockByNumber("pending", true) over txpool_content.
+	// txpool_content can return unbounded payloads on untrusted nodes.
+	pendingBlock, err := c.ethClient.BlockByNumber(ctx, big.NewInt(int64(rpc.PendingBlockNumber)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pending block: %w", err)
 	}
