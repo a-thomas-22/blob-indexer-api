@@ -78,7 +78,6 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to connect to database", zap.Error(err))
 	}
-	defer database.DB.Close()
 
 	// Run database migrations
 	if err := db.RunMigrations(cfg.Database.URL); err != nil {
@@ -150,18 +149,26 @@ func main() {
 	}
 
 	// Create a timeout context for graceful shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer shutdownCancel()
 
-	// Stop all indexers
-	for _, idx := range concreteIndexers {
-		idx.Stop()
-	}
-
-	// Shutdown the server
+	// Step 1: Stop HTTP server (stop accepting new requests, drain in-flight).
+	logger.Info("Shutting down HTTP server...")
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("Server shutdown error", zap.Error(err))
 	}
+	logger.Info("HTTP server shutdown complete")
 
-	logger.Info("Server shutdown complete")
+	// Step 2: Cancel context and stop all indexers.
+	cancel()
+	logger.Info("Stopping indexers...")
+	for _, idx := range concreteIndexers {
+		idx.Stop()
+	}
+	logger.Info("All indexers stopped")
+
+	// Step 3: Close database connection (safe now that all queries have finished).
+	logger.Info("Closing database connection...")
+	database.DB.Close()
+	logger.Info("Shutdown complete")
 }
