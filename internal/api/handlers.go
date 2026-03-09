@@ -24,6 +24,59 @@ const MaxQueryLimit = 100
 // MaxQueryOffset is the maximum offset to prevent abuse of deep pagination
 const MaxQueryOffset = 10000
 
+const (
+	queryLatestBlobs = `
+		SELECT * FROM blobs
+		WHERE confirmed = true AND network_id = $1
+		ORDER BY block_number DESC, blob_index ASC
+		LIMIT $2 OFFSET $3
+	`
+	queryMempoolBlobs = `
+		SELECT * FROM blobs
+		WHERE confirmed = false AND network_id = $1
+		ORDER BY timestamp DESC
+		LIMIT $2 OFFSET $3
+	`
+	queryTopBlobUsers = `
+		SELECT
+			from_address,
+			user_attribution,
+			COUNT(*) as blob_count,
+			SUM(total_cost_eth::numeric) as total_cost_eth,
+			MAX(timestamp) as last_timestamp
+		FROM blobs
+		WHERE network_id = $1
+		GROUP BY from_address, user_attribution
+		ORDER BY blob_count DESC
+		LIMIT $2 OFFSET $3
+	`
+	queryBlobStats = `
+		SELECT
+			COUNT(*) as total_blobs,
+			COALESCE(SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END), 0) as total_confirmed_blobs,
+			COALESCE(SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END), 0) as total_pending_blobs,
+			COALESCE(AVG(base_fee_per_blob_gas::numeric), '0'::numeric) as average_base_fee,
+			COALESCE(AVG(tip_per_blob_gas::numeric), '0'::numeric) as average_tip,
+			COALESCE(AVG(total_cost_eth::numeric), '0'::numeric) as average_total_cost,
+			COALESCE(MAX(timestamp), '1970-01-01'::timestamp) as last_indexed_time
+		FROM blobs
+		WHERE network_id = $1
+	`
+	queryBlockMetrics = `
+		SELECT * FROM block_metrics
+		WHERE network_id = $1
+		ORDER BY block_number DESC
+		LIMIT $2
+	`
+	queryDevIndexerCounts = `
+			SELECT
+				COALESCE(SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END), 0) as confirmed_count,
+				COALESCE(SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END), 0) as pending_count
+			FROM blobs WHERE network_id = $1
+		`
+	queryDevIndexerLastIndexedTime = "SELECT COALESCE(MAX(timestamp), '1970-01-01'::timestamp) FROM blobs WHERE confirmed = true AND network_id = $1"
+)
+
 // Response is a generic API response
 type Response struct {
 	Success bool        `json:"success"`
@@ -219,13 +272,7 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 
 	// Get the latest blobs
 	var blobs []models.Blob
-	query := `
-		SELECT * FROM blobs
-		WHERE confirmed = true AND network_id = $1
-		ORDER BY block_number DESC, blob_index ASC
-		LIMIT $2 OFFSET $3
-	`
-	if err := a.db.SelectContext(r.Context(), &blobs, query, network.ChainID, limit, offset); err != nil {
+	if err := a.db.SelectContext(r.Context(), &blobs, queryLatestBlobs, network.ChainID, limit, offset); err != nil {
 		logger.Error("Failed to get latest blobs",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -302,13 +349,7 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 
 	// Get the pending blobs
 	var blobs []models.Blob
-	query := `
-		SELECT * FROM blobs
-		WHERE confirmed = false AND network_id = $1
-		ORDER BY timestamp DESC
-		LIMIT $2 OFFSET $3
-	`
-	if err := a.db.SelectContext(r.Context(), &blobs, query, network.ChainID, limit, offset); err != nil {
+	if err := a.db.SelectContext(r.Context(), &blobs, queryMempoolBlobs, network.ChainID, limit, offset); err != nil {
 		logger.Error("Failed to get pending blobs",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -433,20 +474,7 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 		zap.Int("offset", offset))
 
 	var users []models.BlobUserStats
-	query := `
-		SELECT
-			from_address,
-			user_attribution,
-			COUNT(*) as blob_count,
-			SUM(total_cost_eth::numeric) as total_cost_eth,
-			MAX(timestamp) as last_timestamp
-		FROM blobs
-		WHERE network_id = $1
-		GROUP BY from_address, user_attribution
-		ORDER BY blob_count DESC
-		LIMIT $2 OFFSET $3
-	`
-	if err := a.db.SelectContext(r.Context(), &users, query, network.ChainID, limit, offset); err != nil {
+	if err := a.db.SelectContext(r.Context(), &users, queryTopBlobUsers, network.ChainID, limit, offset); err != nil {
 		logger.Error("Failed to get top blob users",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -505,19 +533,7 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 		LastIndexedTime     time.Time `db:"last_indexed_time"`
 	}
 
-	query := `
-		SELECT
-			COUNT(*) as total_blobs,
-			SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END) as total_confirmed_blobs,
-			SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END) as total_pending_blobs,
-			AVG(base_fee_per_blob_gas::numeric) as average_base_fee,
-			AVG(tip_per_blob_gas::numeric) as average_tip,
-			AVG(total_cost_eth::numeric) as average_total_cost,
-			MAX(timestamp) as last_indexed_time
-		FROM blobs
-		WHERE network_id = $1
-	`
-	if err := a.db.GetContext(r.Context(), &stats, query, network.ChainID); err != nil {
+	if err := a.db.GetContext(r.Context(), &stats, queryBlobStats, network.ChainID); err != nil {
 		logger.Error("Failed to get blob statistics",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -579,13 +595,7 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 
 	// Query recent block metrics
 	var metrics []models.BlockMetrics
-	query := `
-		SELECT * FROM block_metrics
-		WHERE network_id = $1
-		ORDER BY block_number DESC
-		LIMIT $2
-	`
-	if err := a.db.SelectContext(r.Context(), &metrics, query, network.ChainID, blocks); err != nil {
+	if err := a.db.SelectContext(r.Context(), &metrics, queryBlockMetrics, network.ChainID, blocks); err != nil {
 		logger.Error("Failed to get block metrics",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -840,21 +850,14 @@ func (a *API) DevIndexers(w http.ResponseWriter, r *http.Request) {
 			Confirmed int `db:"confirmed_count"`
 			Pending   int `db:"pending_count"`
 		}
-		countQuery := `
-			SELECT
-				SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END) as confirmed_count,
-				SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END) as pending_count
-			FROM blobs WHERE network_id = $1
-		`
-		if err := a.db.GetContext(r.Context(), &counts, countQuery, network.ChainID); err != nil {
+		if err := a.db.GetContext(r.Context(), &counts, queryDevIndexerCounts, network.ChainID); err != nil {
 			logger.Error("Failed to get blob counts",
 				zap.String("network", network.Name),
 				zap.Error(err))
 		}
 
 		var lastIndexedTime time.Time
-		timeQuery := "SELECT COALESCE(MAX(timestamp), '1970-01-01'::timestamp) FROM blobs WHERE confirmed = true AND network_id = $1"
-		if err := a.db.GetContext(r.Context(), &lastIndexedTime, timeQuery, network.ChainID); err != nil {
+		if err := a.db.GetContext(r.Context(), &lastIndexedTime, queryDevIndexerLastIndexedTime, network.ChainID); err != nil {
 			logger.Error("Failed to get last indexed time",
 				zap.String("network", network.Name),
 				zap.Error(err))
