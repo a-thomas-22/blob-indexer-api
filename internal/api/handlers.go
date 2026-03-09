@@ -290,6 +290,14 @@ func (a *API) parsePagination(r *http.Request, defaultLimit int) (limit, offset 
 	return limit, offset, nil
 }
 
+// respondSuccess writes a successful JSON response with status 200.
+func (a *API) respondSuccess(w http.ResponseWriter, data interface{}) {
+	a.respondJSON(w, http.StatusOK, Response{
+		Success: true,
+		Data:    data,
+	})
+}
+
 // GetLatestBlobs godoc
 // @Summary Get latest confirmed blobs
 // @Description Retrieve the latest confirmed blob transactions from the blockchain
@@ -340,10 +348,7 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Returning latest blobs",
 		zap.String("network", network.Name),
 		zap.Int("count", len(response)))
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    response,
-	})
+	a.respondSuccess(w, response)
 }
 
 // GetMempoolBlobs godoc
@@ -396,10 +401,7 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Returning mempool blobs",
 		zap.String("network", network.Name),
 		zap.Int("count", len(response)))
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    response,
-	})
+	a.respondSuccess(w, response)
 }
 
 // GetBlobByTxHash godoc
@@ -450,10 +452,7 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert to response format
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    toBlobResponse(blob, network.Name),
-	})
+	a.respondSuccess(w, toBlobResponse(blob, network.Name))
 }
 
 // GetTopBlobUsers godoc
@@ -512,10 +511,7 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Returning top blob users",
 		zap.String("network", network.Name),
 		zap.Int("count", len(response)))
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    response,
-	})
+	a.respondSuccess(w, response)
 }
 
 // GetBlobStats godoc
@@ -560,10 +556,7 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 		LastIndexedTime:     stats.LastIndexedTime,
 	}
 
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    response,
-	})
+	a.respondSuccess(w, response)
 }
 
 // GetBlobPricing godoc
@@ -663,10 +656,7 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 		resp.PredictedNextFee = eip4844.CalcBlobFee(cfg, nextHeader).String()
 	}
 
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    resp,
-	})
+	a.respondSuccess(w, resp)
 }
 
 // calcNextExcessBlobGas estimates the next block's excess blob gas using the EIP-4844 formula.
@@ -718,10 +708,7 @@ func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
 		LastIndexedTime:  lastIndexedTime,
 	}
 
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    response,
-	})
+	a.respondSuccess(w, response)
 }
 
 // SystemMetrics represents system-wide metrics
@@ -822,10 +809,7 @@ func (a *API) DevMetrics(w http.ResponseWriter, r *http.Request) {
 		Architecture:    runtime.GOARCH,
 	}
 
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    metrics,
-	})
+	a.respondSuccess(w, metrics)
 }
 
 // getMemoryUsage returns the current memory usage as a string
@@ -877,10 +861,7 @@ func (a *API) DevIndexers(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    metrics,
-	})
+	a.respondSuccess(w, metrics)
 }
 
 // allowedTables is a whitelist of table names that can be queried in the DevDatabase handler.
@@ -991,10 +972,7 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 		LastMigrationTime:  time.Now().Add(-7 * 24 * time.Hour), // Placeholder
 	}
 
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    dbStats,
-	})
+	a.respondSuccess(w, dbStats)
 }
 
 // formatBytes formats a byte count as a human-readable string
@@ -1097,10 +1075,7 @@ func (a *API) DevLogs(w http.ResponseWriter, r *http.Request) {
 		logs = logs[:limit]
 	}
 
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    logs,
-	})
+	a.respondSuccess(w, logs)
 }
 
 // DevQueries godoc
@@ -1168,10 +1143,7 @@ func (a *API) DevQueries(w http.ResponseWriter, r *http.Request) {
 		queries = queries[:limit]
 	}
 
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    queries,
-	})
+	a.respondSuccess(w, queries)
 }
 
 // DevDashboard godoc
@@ -1187,8 +1159,5 @@ func (a *API) DevDashboard(w http.ResponseWriter, r *http.Request) {
 
 	// This is a placeholder for a development dashboard
 	// In a real implementation, you would render an HTML page with charts and stats
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    "Development dashboard",
-	})
+	a.respondSuccess(w, "Development dashboard")
 }

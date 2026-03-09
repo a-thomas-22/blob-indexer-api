@@ -191,10 +191,7 @@ func (a *API) GetNetworks(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    networks,
-	})
+	a.respondSuccess(w, networks)
 }
 
 // GetNetworkStatus returns the status of a specific network
@@ -219,10 +216,7 @@ func (a *API) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 		IndexerVersion:   a.config.Indexer.Version,
 	}
 
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    response,
-	})
+	a.respondSuccess(w, response)
 }
 
 // NetworkResponse is a response containing network information
