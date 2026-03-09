@@ -84,6 +84,28 @@ func TestRespondError(t *testing.T) {
 	}
 }
 
+func TestRespondSuccess(t *testing.T) {
+	api := &API{}
+	w := httptest.NewRecorder()
+
+	api.respondSuccess(w, "test-data")
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
+	}
+
+	var resp Response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	if !resp.Success {
+		t.Error("expected Success=true")
+	}
+	if resp.Data != "test-data" {
+		t.Errorf("expected Data=%q, got %v", "test-data", resp.Data)
+	}
+}
+
 func TestAPIError(t *testing.T) {
 	err := NewAPIError("not found", http.StatusNotFound)
 	if err.Error() != "not found" {
