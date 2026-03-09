@@ -23,7 +23,7 @@ jobs:
             dockerfile: Dockerfile.indexer
             image_suffix: "-indexer"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Extract version from tag
         id: version
