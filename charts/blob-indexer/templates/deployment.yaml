@@ -1,18 +1,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "blob-indexer.fullname" . }}
+  name: {{ include "blob-indexer.fullname" . }}-api
   labels:
     {{- include "blob-indexer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ .Values.api.replicaCount | default .Values.replicaCount }}
   selector:
     matchLabels:
       {{- include "blob-indexer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
   template:
     metadata:
       labels:
         {{- include "blob-indexer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
       annotations:
         {{- if .Values.configMap.create }}
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
@@ -22,8 +25,8 @@ spec:
         {{- end }}
     spec:
       containers:
-        - name: {{ .Chart.Name }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        - name: {{ .Chart.Name }}-api
+          image: "{{ .Values.api.image.repository | default .Values.image.repository }}:{{ .Values.api.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
@@ -48,7 +51,50 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            {{- toYaml (.Values.api.resources | default .Values.resources) | nindent 12 }}
+      volumes:
+        - name: config-volume
+          configMap:
+            name: {{ include "blob-indexer.fullname" . }}-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "blob-indexer.fullname" . }}-indexer
+  labels:
+    {{- include "blob-indexer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: indexer
+spec:
+  replicas: {{ .Values.indexer.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "blob-indexer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: indexer
+  template:
+    metadata:
+      labels:
+        {{- include "blob-indexer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: indexer
+      annotations:
+        {{- if .Values.configMap.create }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}-indexer
+          image: "{{ .Values.indexer.image.repository | default .Values.image.repository }}:{{ .Values.indexer.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: CONFIG_PATH
+              value: /etc/config/config.yaml
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/config
+          resources:
+            {{- toYaml (.Values.indexer.resources | default .Values.resources) | nindent 12 }}
       volumes:
         - name: config-volume
           configMap:

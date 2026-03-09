@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"mime"
 	"net/http"
 	"time"
@@ -48,14 +47,6 @@ func MaxBytesMiddleware(next http.Handler) http.Handler {
 		r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodySize)
 		next.ServeHTTP(w, r)
 	})
-}
-
-// isMaxBytesError checks whether err (or any error in its chain) is a
-// *http.MaxBytesError, which is produced when http.MaxBytesReader's
-// limit is exceeded.
-func isMaxBytesError(err error) bool {
-	var maxBytesErr *http.MaxBytesError
-	return errors.As(err, &maxBytesErr)
 }
 
 // RespondMaxBytesError writes a 413 JSON error response. Handlers that
