@@ -8,9 +8,12 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/blobparams"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
@@ -43,6 +46,46 @@ type BlobResponse struct {
 	TotalCostETH      string    `json:"total_cost_eth"`
 	Timestamp         time.Time `json:"timestamp"`
 	Confirmed         bool      `json:"confirmed"`
+	MaxFeePerBlobGas  *string   `json:"max_fee_per_blob_gas,omitempty"`
+	BlobGasUsed       *int64    `json:"blob_gas_used,omitempty"`
+}
+
+// BlockPricingResponse represents block-level blob pricing data
+type BlockPricingResponse struct {
+	BlockNumber      int64  `json:"block_number"`
+	BlockTimestamp   string `json:"block_timestamp"`
+	BlobCount        int    `json:"blob_count"`
+	BlobGasUsed      int64  `json:"blob_gas_used"`
+	BlobGasTarget    int64  `json:"blob_gas_target"`
+	BlobGasLimit     int64  `json:"blob_gas_limit"`
+	ExcessBlobGas    int64  `json:"excess_blob_gas"`
+	BlobBaseFee      string `json:"blob_base_fee"`
+	UtilizationRatio string `json:"utilization_ratio"`
+	BlobParamsTarget int    `json:"blob_params_target"`
+	BlobParamsMax    int    `json:"blob_params_max"`
+	UpdateFraction   int64  `json:"update_fraction"`
+}
+
+// BlobParamsResponse holds the current fork's blob parameters
+type BlobParamsResponse struct {
+	Target         int    `json:"target"`
+	Max            int    `json:"max"`
+	UpdateFraction uint64 `json:"update_fraction"`
+	TargetGas      uint64 `json:"target_gas"`
+	MaxGas         uint64 `json:"max_gas"`
+}
+
+// PricingResponse is the top-level pricing API response
+type PricingResponse struct {
+	NetworkID          int                    `json:"network_id"`
+	NetworkName        string                 `json:"network_name"`
+	CurrentBaseFee     string                 `json:"current_base_fee"`
+	CurrentExcessGas   int64                  `json:"current_excess_gas"`
+	CurrentUtilization string                 `json:"current_utilization"`
+	PredictedNextFee   string                 `json:"predicted_next_fee"`
+	ForkStage          string                 `json:"fork_stage"`
+	BlobParams         BlobParamsResponse     `json:"blob_params"`
+	RecentBlocks       []BlockPricingResponse `json:"recent_blocks"`
 }
 
 // UserResponse is a response containing user data
@@ -78,6 +121,27 @@ type StatusResponse struct {
 	IndexerVersion   string    `json:"indexer_version"`
 	Uptime           string    `json:"uptime"`
 	LastIndexedTime  time.Time `json:"last_indexed_time"`
+}
+
+// toBlobResponse converts a models.Blob to a BlobResponse.
+func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
+	return BlobResponse{
+		NetworkID:         blob.NetworkID,
+		NetworkName:       networkName,
+		BlockNumber:       blob.BlockNumber,
+		BlobIndex:         blob.BlobIndex,
+		TxHash:            blob.TxHash,
+		FromAddress:       blob.FromAddress,
+		UserAttribution:   blob.UserAttribution,
+		BlobSizeBytes:     blob.BlobSizeBytes,
+		BaseFeePerBlobGas: blob.BaseFeePerBlobGas,
+		TipPerBlobGas:     blob.TipPerBlobGas,
+		TotalCostETH:      blob.TotalCostETH,
+		Timestamp:         blob.Timestamp,
+		Confirmed:         blob.Confirmed,
+		MaxFeePerBlobGas:  blob.MaxFeePerBlobGas,
+		BlobGasUsed:       blob.BlobGasUsed,
+	}
 }
 
 // respondJSON responds with JSON
@@ -172,21 +236,7 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 	// Convert to response format
 	response := make([]BlobResponse, 0, len(blobs))
 	for _, blob := range blobs {
-		response = append(response, BlobResponse{
-			NetworkID:         blob.NetworkID,
-			NetworkName:       network.Name,
-			BlockNumber:       blob.BlockNumber,
-			BlobIndex:         blob.BlobIndex,
-			TxHash:            blob.TxHash,
-			FromAddress:       blob.FromAddress,
-			UserAttribution:   blob.UserAttribution,
-			BlobSizeBytes:     blob.BlobSizeBytes,
-			BaseFeePerBlobGas: blob.BaseFeePerBlobGas,
-			TipPerBlobGas:     blob.TipPerBlobGas,
-			TotalCostETH:      blob.TotalCostETH,
-			Timestamp:         blob.Timestamp,
-			Confirmed:         blob.Confirmed,
-		})
+		response = append(response, toBlobResponse(blob, network.Name))
 	}
 
 	logger.Debug("Returning latest blobs",
@@ -269,21 +319,7 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 	// Convert to response format
 	response := make([]BlobResponse, 0, len(blobs))
 	for _, blob := range blobs {
-		response = append(response, BlobResponse{
-			NetworkID:         blob.NetworkID,
-			NetworkName:       network.Name,
-			BlockNumber:       blob.BlockNumber,
-			BlobIndex:         blob.BlobIndex,
-			TxHash:            blob.TxHash,
-			FromAddress:       blob.FromAddress,
-			UserAttribution:   blob.UserAttribution,
-			BlobSizeBytes:     blob.BlobSizeBytes,
-			BaseFeePerBlobGas: blob.BaseFeePerBlobGas,
-			TipPerBlobGas:     blob.TipPerBlobGas,
-			TotalCostETH:      blob.TotalCostETH,
-			Timestamp:         blob.Timestamp,
-			Confirmed:         blob.Confirmed,
-		})
+		response = append(response, toBlobResponse(blob, network.Name))
 	}
 
 	logger.Debug("Returning mempool blobs",
@@ -339,25 +375,9 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert to response format
-	response := BlobResponse{
-		NetworkID:         blob.NetworkID,
-		NetworkName:       network.Name,
-		BlockNumber:       blob.BlockNumber,
-		BlobIndex:         blob.BlobIndex,
-		TxHash:            blob.TxHash,
-		FromAddress:       blob.FromAddress,
-		UserAttribution:   blob.UserAttribution,
-		BlobSizeBytes:     blob.BlobSizeBytes,
-		BaseFeePerBlobGas: blob.BaseFeePerBlobGas,
-		TipPerBlobGas:     blob.TipPerBlobGas,
-		TotalCostETH:      blob.TotalCostETH,
-		Timestamp:         blob.Timestamp,
-		Confirmed:         blob.Confirmed,
-	}
-
 	a.respondJSON(w, http.StatusOK, Response{
 		Success: true,
-		Data:    response,
+		Data:    toBlobResponse(blob, network.Name),
 	})
 }
 
@@ -522,6 +542,124 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 		Success: true,
 		Data:    response,
 	})
+}
+
+// GetBlobPricing godoc
+// @Summary Get blob pricing data
+// @Description Retrieve current and historical blob pricing with utilization metrics and fork parameters
+// @Tags blobs
+// @Accept json
+// @Produce json
+// @Param network query string false "Network name or chain ID (default: first enabled network)"
+// @Param blocks query int false "Number of recent blocks to include (default: 20, max: 100)"
+// @Success 200 {object} Response{data=PricingResponse}
+// @Failure 400 {object} Response "Bad request"
+// @Failure 500 {object} Response "Internal server error"
+// @Router /blob/pricing [get]
+func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
+	network, err := a.getNetworkFromRequest(r)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Parse blocks parameter
+	blocks := 20
+	if blocksStr := r.URL.Query().Get("blocks"); blocksStr != "" {
+		b, err := strconv.Atoi(blocksStr)
+		if err != nil || b < 1 {
+			a.respondError(w, http.StatusBadRequest, "Invalid blocks parameter")
+			return
+		}
+		if b > MaxQueryLimit {
+			b = MaxQueryLimit
+		}
+		blocks = b
+	}
+
+	// Query recent block metrics
+	var metrics []models.BlockMetrics
+	query := `
+		SELECT * FROM block_metrics
+		WHERE network_id = $1
+		ORDER BY block_number DESC
+		LIMIT $2
+	`
+	if err := a.db.SelectContext(r.Context(), &metrics, query, network.ChainID, blocks); err != nil {
+		logger.Error("Failed to get block metrics",
+			zap.String("network", network.Name),
+			zap.Error(err))
+		a.respondError(w, http.StatusInternalServerError, "Failed to get pricing data")
+		return
+	}
+
+	// Build response
+	recentBlocks := make([]BlockPricingResponse, 0, len(metrics))
+	for _, m := range metrics {
+		recentBlocks = append(recentBlocks, BlockPricingResponse{
+			BlockNumber:      m.BlockNumber,
+			BlockTimestamp:   m.BlockTimestamp.UTC().Format(time.RFC3339),
+			BlobCount:        m.BlobCount,
+			BlobGasUsed:      m.BlobGasUsed,
+			BlobGasTarget:    m.BlobGasTarget,
+			BlobGasLimit:     m.BlobGasLimit,
+			ExcessBlobGas:    m.ExcessBlobGas,
+			BlobBaseFee:      m.BlobBaseFee,
+			UtilizationRatio: m.UtilizationRatio,
+			BlobParamsTarget: m.BlobParamsTarget,
+			BlobParamsMax:    m.BlobParamsMax,
+			UpdateFraction:   m.UpdateFraction,
+		})
+	}
+
+	// Use the most recent block for current state
+	resp := PricingResponse{
+		NetworkID:    network.ChainID,
+		NetworkName:  network.Name,
+		RecentBlocks: recentBlocks,
+	}
+
+	if len(metrics) > 0 {
+		latest := metrics[0]
+		resp.CurrentBaseFee = latest.BlobBaseFee
+		resp.CurrentExcessGas = latest.ExcessBlobGas
+		resp.CurrentUtilization = latest.UtilizationRatio
+		resp.ForkStage = blobparams.ForkName(
+			blobparams.ChainConfigForID(network.ChainID),
+			uint64(latest.BlockTimestamp.Unix()),
+		)
+		resp.BlobParams = BlobParamsResponse{
+			Target:         latest.BlobParamsTarget,
+			Max:            latest.BlobParamsMax,
+			UpdateFraction: uint64(latest.UpdateFraction),
+			TargetGas:      uint64(latest.BlobParamsTarget) * 131072,
+			MaxGas:         uint64(latest.BlobParamsMax) * 131072,
+		}
+
+		// Predict next base fee
+		cfg := blobparams.ChainConfigForID(network.ChainID)
+		bp := blobparams.GetBlobParams(cfg, uint64(latest.BlockTimestamp.Unix()))
+		nextExcess := calcNextExcessBlobGas(uint64(latest.ExcessBlobGas), uint64(latest.BlobGasUsed), bp.TargetGas)
+		nextHeader := &types.Header{
+			Time:          uint64(latest.BlockTimestamp.Unix()) + 12,
+			ExcessBlobGas: &nextExcess,
+		}
+		resp.PredictedNextFee = eip4844.CalcBlobFee(cfg, nextHeader).String()
+	}
+
+	a.respondJSON(w, http.StatusOK, Response{
+		Success: true,
+		Data:    resp,
+	})
+}
+
+// calcNextExcessBlobGas estimates the next block's excess blob gas using the EIP-4844 formula.
+func calcNextExcessBlobGas(excessBlobGas, blobGasUsed, targetGas uint64) uint64 {
+	total := excessBlobGas + blobGasUsed
+	if total < targetGas {
+		return 0
+	}
+	return total - targetGas
 }
 
 // GetIndexerStatus godoc

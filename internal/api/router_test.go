@@ -1164,6 +1164,105 @@ func TestContentTypeJSON_SkipsGET(t *testing.T) {
 	}
 }
 
+// --- GetBlobPricing ---
+
+func TestGetBlobPricing_Success(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			metrics := dest.(*[]models.BlockMetrics)
+			*metrics = []models.BlockMetrics{
+				{
+					NetworkID:        42,
+					BlockNumber:      100,
+					BlockTimestamp:   time.Now(),
+					BlobCount:        3,
+					BlobGasUsed:      393216,
+					BlobGasTarget:    393216,
+					BlobGasLimit:     786432,
+					ExcessBlobGas:    100000,
+					BlobBaseFee:      "1",
+					UtilizationRatio: "1.000000",
+					BlobParamsTarget: 3,
+					BlobParamsMax:    6,
+					UpdateFraction:   3338477,
+				},
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?blocks=5", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobPricing(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp Response
+	json.NewDecoder(w.Body).Decode(&resp)
+	if !resp.Success {
+		t.Error("expected Success=true")
+	}
+}
+
+func TestGetBlobPricing_EmptyMetrics(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobPricing(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetBlobPricing_InvalidBlocks(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?blocks=-1", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobPricing(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetBlobPricing_BadNetwork(t *testing.T) {
+	a := &API{
+		db:       &mockDB{},
+		networks: map[int]config.NetworkConfig{},
+		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobPricing(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetBlobPricing_DBError(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return fmt.Errorf("db error")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobPricing(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
 func TestGetMempoolBlobs_WithData(t *testing.T) {
 	db := &mockDB{
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
@@ -1196,5 +1295,30 @@ func TestGetMempoolBlobs_WithData(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&resp)
 	if !resp.Success {
 		t.Error("expected success=true")
+	}
+}
+
+func TestCalcNextExcessBlobGas(t *testing.T) {
+	tests := []struct {
+		name      string
+		excess    uint64
+		gasUsed   uint64
+		targetGas uint64
+		want      uint64
+	}{
+		{"below target returns zero", 0, 100000, 393216, 0},
+		{"at target returns excess", 100000, 393216, 393216, 100000},
+		{"above target", 100000, 500000, 393216, 206784},
+		{"zero excess zero used", 0, 0, 393216, 0},
+		{"large excess", 10000000, 786432, 393216, 10393216},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := calcNextExcessBlobGas(tt.excess, tt.gasUsed, tt.targetGas)
+			if got != tt.want {
+				t.Errorf("calcNextExcessBlobGas(%d, %d, %d) = %d, want %d",
+					tt.excess, tt.gasUsed, tt.targetGas, got, tt.want)
+			}
+		})
 	}
 }
