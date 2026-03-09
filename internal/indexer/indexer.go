@@ -43,6 +43,9 @@ const (
 
 	// maxGapScanRetries is the total failure count before a block is considered permanently failed
 	maxGapScanRetries = 10
+
+	// bytesPerBlobGasUnit converts blob gas units to approximate blob bytes.
+	bytesPerBlobGasUnit = 128
 )
 
 // errReorgDetected is returned when a chain reorganization is detected and handled
@@ -79,7 +82,7 @@ func calculateBlobMetrics(tx *types.Transaction, blobBaseFee *big.Int) blobMetri
 	blobGasUsedInt := int64(blobGasUsed)
 
 	return blobMetrics{
-		blobSizeBytes:     int64(blobGasUsed * 128), // Approximate size
+		blobSizeBytes:     int64(blobGasUsed * bytesPerBlobGasUnit), // Approximate size
 		baseFeePerBlobGas: blobBaseFee.String(),
 		tipPerBlobGas:     tipPerBlobGas.String(),
 		totalCostETH:      totalCost.String(),
