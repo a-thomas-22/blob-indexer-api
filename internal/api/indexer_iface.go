@@ -14,6 +14,6 @@ type IndexerProvider interface {
 	GetLastIndexedBlock() uint64
 	GetCurrentBlock(ctx context.Context) (uint64, error)
 	GetBlobCounts(ctx context.Context) (confirmedCount, pendingCount int, err error)
-	GetTopBlobUsers(ctx context.Context, limit int) ([]models.BlobUserStats, error)
+	GetTopBlobUsers(ctx context.Context, limit, offset int) ([]models.BlobUserStats, error)
 	Reindex(startBlock, endBlock uint64) error
 }
