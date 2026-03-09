@@ -236,12 +236,15 @@ func TestRateLimitedTransport_ContextCancellation(t *testing.T) {
 	defer cancel()
 
 	req, _ := http.NewRequestWithContext(ctx, "POST", srv.URL, strings.NewReader(`{}`))
-	_, err := transport.RoundTrip(req)
+	resp, err := transport.RoundTrip(req)
+	if resp != nil {
+		resp.Body.Close()
+	}
 	if err == nil {
 		t.Fatal("expected context error, got nil")
 	}
 	if ctx.Err() == nil {
-		t.Fatal("expected context to be cancelled")
+		t.Fatal("expected context to be canceled")
 	}
 }
 
@@ -372,7 +375,7 @@ func TestRateLimitedTransport_NilBody(t *testing.T) {
 		InitialBackoff: 10 * time.Millisecond,
 	})
 
-	req, _ := http.NewRequest("GET", srv.URL, nil)
+	req, _ := http.NewRequest("GET", srv.URL, http.NoBody)
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
