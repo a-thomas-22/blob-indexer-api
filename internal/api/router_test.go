@@ -108,59 +108,79 @@ var _ = fmt.Sprintf
 
 // --- getNetworkFromRequest tests ---
 
-func TestGetNetworkFromRequest_ByChainID(t *testing.T) {
-	a := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?network=42", http.NoBody)
-	network, err := a.getNetworkFromRequest(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestGetNetworkFromRequest(t *testing.T) {
+	tests := []struct {
+		name       string
+		url        string
+		setup      func(a *API)
+		wantName   string
+		wantChain  int
+		wantErr    error
+		wantNonNil bool
+	}{
+		{
+			name:      "by chain id",
+			url:       "/?network=42",
+			wantChain: 42,
+		},
+		{
+			name:     "by name",
+			url:      "/?network=testnet",
+			wantName: "testnet",
+		},
+		{
+			name:       "default first network",
+			url:        "/",
+			wantNonNil: true,
+		},
+		{
+			name:    "no networks",
+			url:     "/",
+			wantErr: ErrNoNetworksAvailable,
+			setup: func(a *API) {
+				a.networks = map[int]config.NetworkConfig{}
+			},
+		},
+		{
+			name:    "network not found",
+			url:     "/?network=999",
+			wantErr: ErrNetworkNotFound,
+			setup: func(a *API) {
+				a.networks = map[int]config.NetworkConfig{}
+			},
+		},
 	}
-	if network.ChainID != 42 {
-		t.Errorf("expected chain ID 42, got %d", network.ChainID)
-	}
-}
 
-func TestGetNetworkFromRequest_ByName(t *testing.T) {
-	a := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?network=testnet", http.NoBody)
-	network, err := a.getNetworkFromRequest(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if network.Name != "testnet" {
-		t.Errorf("expected 'testnet', got %q", network.Name)
-	}
-}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestAPI()
+			if tc.setup != nil {
+				tc.setup(a)
+			}
+			req := httptest.NewRequest(http.MethodGet, tc.url, http.NoBody)
+			network, err := a.getNetworkFromRequest(req)
 
-func TestGetNetworkFromRequest_DefaultFirstNetwork(t *testing.T) {
-	a := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	network, err := a.getNetworkFromRequest(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if network.ChainID == 0 {
-		t.Fatal("expected non-zero chain ID")
-	}
-}
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("expected error %v, got %v", tc.wantErr, err)
+				}
+				return
+			}
 
-func TestGetNetworkFromRequest_NoNetworks(t *testing.T) {
-	a := newTestAPI()
-	a.networks = map[int]config.NetworkConfig{}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	_, err := a.getNetworkFromRequest(req)
-	if !errors.Is(err, ErrNoNetworksAvailable) {
-		t.Errorf("expected ErrNoNetworksAvailable, got %v", err)
-	}
-}
-
-func TestGetNetworkFromRequest_NotFound(t *testing.T) {
-	a := newTestAPI()
-	a.networks = map[int]config.NetworkConfig{}
-	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
-	_, err := a.getNetworkFromRequest(req)
-	if !errors.Is(err, ErrNetworkNotFound) {
-		t.Errorf("expected ErrNetworkNotFound, got %v", err)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantChain != 0 && network.ChainID != tc.wantChain {
+				t.Fatalf("expected chain ID %d, got %d", tc.wantChain, network.ChainID)
+			}
+			if tc.wantName != "" && network.Name != tc.wantName {
+				t.Fatalf("expected network name %q, got %q", tc.wantName, network.Name)
+			}
+			if tc.wantNonNil && network.ChainID == 0 {
+				t.Fatal("expected non-zero chain ID")
+			}
+		})
 	}
 }
 
