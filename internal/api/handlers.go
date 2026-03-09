@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -199,12 +200,17 @@ func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
 
 // respondJSON responds with JSON
 func (a *API) respondJSON(w http.ResponseWriter, status int, data interface{}) {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(data); err != nil {
+		logger.Error("Failed to encode JSON response", zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"internal server error"}`))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(data); err != nil {
-		logger.Error("Failed to encode JSON response", zap.Error(err))
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
+	_, _ = w.Write(buf.Bytes())
 }
 
 // respondError responds with an error
@@ -994,18 +1000,18 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// formatBytes formats bytes as a human-readable string
-func formatBytes(bytes int64) string {
+// formatBytes formats a byte count as a human-readable string
+func formatBytes(numBytes int64) string {
 	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
+	if numBytes < unit {
+		return fmt.Sprintf("%d B", numBytes)
 	}
 	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
+	for n := numBytes / unit; n >= unit; n /= unit {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+	return fmt.Sprintf("%.2f %cB", float64(numBytes)/float64(div), "KMGTPE"[exp])
 }
 
 // DevLogs godoc
