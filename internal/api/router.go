@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,6 +26,19 @@ type API struct {
 	startTime      time.Time
 	totalRequests  int64 // accessed via sync/atomic
 	activeRequests int64 // accessed via sync/atomic
+	cacheMu        sync.RWMutex
+	statsCache     map[int]statsCacheEntry
+	topUsersCache  map[string]topUsersCacheEntry
+}
+
+type statsCacheEntry struct {
+	response  StatsResponse
+	expiresAt time.Time
+}
+
+type topUsersCacheEntry struct {
+	response  []UserResponse
+	expiresAt time.Time
 }
 
 // NewRouter creates a new API router
@@ -35,10 +49,12 @@ func NewRouter(db DBProvider, cfg *config.Config) http.Handler {
 	}
 
 	api := &API{
-		db:        db,
-		networks:  networks,
-		config:    cfg,
-		startTime: time.Now(),
+		db:            db,
+		networks:      networks,
+		config:        cfg,
+		startTime:     time.Now(),
+		statsCache:    make(map[int]statsCacheEntry),
+		topUsersCache: make(map[string]topUsersCacheEntry),
 	}
 
 	r := chi.NewRouter()

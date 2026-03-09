@@ -76,7 +76,9 @@ func newTestAPIWithDB(db DBProvider) *API {
 			Server:  config.ServerConfig{Port: 8080, DevMode: true},
 			Indexer: config.IndexerConfig{Version: "test-v1"},
 		},
-		startTime: time.Now(),
+		startTime:     time.Now(),
+		statsCache:    make(map[int]statsCacheEntry),
+		topUsersCache: make(map[string]topUsersCacheEntry),
 	}
 }
 

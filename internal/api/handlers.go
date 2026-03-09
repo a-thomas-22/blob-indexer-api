@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -61,6 +62,9 @@ const blockMetricsSelectColumns = `
 	blob_params_max,
 	update_fraction
 `
+
+const aggregateCacheTTL = 30 * time.Second
+const aggregateQueryTimeout = 5 * time.Second
 
 const (
 	queryLatestBlobs = `
@@ -486,8 +490,22 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 		zap.Int("limit", limit),
 		zap.Int("offset", offset))
 
+	cacheKey := fmt.Sprintf("%d:%d:%d", network.ChainID, limit, offset)
+	a.cacheMu.RLock()
+	if cached, ok := a.topUsersCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+		a.cacheMu.RUnlock()
+		a.respondJSON(w, http.StatusOK, Response{
+			Success: true,
+			Data:    cached.response,
+		})
+		return
+	}
+	a.cacheMu.RUnlock()
+
 	var users []models.BlobUserStats
-	if err := a.db.SelectContext(r.Context(), &users, queryTopBlobUsers, network.ChainID, limit, offset); err != nil {
+	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
+	defer cancel()
+	if err := a.db.SelectContext(queryCtx, &users, queryTopBlobUsers, network.ChainID, limit, offset); err != nil {
 		logger.Error("Failed to get top blob users",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -511,6 +529,12 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Returning top blob users",
 		zap.String("network", network.Name),
 		zap.Int("count", len(response)))
+	a.cacheMu.Lock()
+	a.topUsersCache[cacheKey] = topUsersCacheEntry{
+		response:  response,
+		expiresAt: time.Now().Add(aggregateCacheTTL),
+	}
+	a.cacheMu.Unlock()
 	a.respondSuccess(w, response)
 }
 
@@ -533,9 +557,30 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 
 	logger.Debug("Getting blob statistics", zap.String("network", network.Name))
 
-	var stats models.BlobStatsAggregate
+	a.cacheMu.RLock()
+	if cached, ok := a.statsCache[network.ChainID]; ok && time.Now().Before(cached.expiresAt) {
+		a.cacheMu.RUnlock()
+		a.respondJSON(w, http.StatusOK, Response{
+			Success: true,
+			Data:    cached.response,
+		})
+		return
+	}
+	a.cacheMu.RUnlock()
 
-	if err := a.db.GetContext(r.Context(), &stats, queryBlobStats, network.ChainID); err != nil {
+	var stats struct {
+		TotalBlobs          int       `db:"total_blobs"`
+		TotalConfirmedBlobs int       `db:"total_confirmed_blobs"`
+		TotalPendingBlobs   int       `db:"total_pending_blobs"`
+		AverageBaseFee      string    `db:"average_base_fee"`
+		AverageTip          string    `db:"average_tip"`
+		AverageTotalCost    string    `db:"average_total_cost"`
+		LastIndexedTime     time.Time `db:"last_indexed_time"`
+	}
+
+	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
+	defer cancel()
+	if err := a.db.GetContext(queryCtx, &stats, queryBlobStats, network.ChainID); err != nil {
 		logger.Error("Failed to get blob statistics",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -556,6 +601,12 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 		LastIndexedTime:     stats.LastIndexedTime,
 	}
 
+	a.cacheMu.Lock()
+	a.statsCache[network.ChainID] = statsCacheEntry{
+		response:  response,
+		expiresAt: time.Now().Add(aggregateCacheTTL),
+	}
+	a.cacheMu.Unlock()
 	a.respondSuccess(w, response)
 }
 
