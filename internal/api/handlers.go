@@ -166,12 +166,12 @@ func (a *API) respondError(w http.ResponseWriter, status int, message string) {
 }
 
 // parsePagination parses limit/offset query params with clamping.
-func (a *API) parsePagination(r *http.Request, defaultLimit int) (int, int, error) {
-	limit := defaultLimit
+func (a *API) parsePagination(r *http.Request, defaultLimit int) (limit, offset int, err error) {
+	limit = defaultLimit
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		parsed, err := strconv.Atoi(limitStr)
-		if err != nil || parsed <= 0 {
-			return 0, 0, fmt.Errorf("Invalid limit parameter")
+		parsed, parseErr := strconv.Atoi(limitStr)
+		if parseErr != nil || parsed <= 0 {
+			return 0, 0, fmt.Errorf("invalid limit parameter")
 		}
 		limit = parsed
 	}
@@ -179,11 +179,11 @@ func (a *API) parsePagination(r *http.Request, defaultLimit int) (int, int, erro
 		limit = MaxQueryLimit
 	}
 
-	offset := 0
+	offset = 0
 	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
-		parsed, err := strconv.Atoi(offsetStr)
-		if err != nil || parsed < 0 {
-			return 0, 0, fmt.Errorf("Invalid offset parameter")
+		parsed, parseErr := strconv.Atoi(offsetStr)
+		if parseErr != nil || parsed < 0 {
+			return 0, 0, fmt.Errorf("invalid offset parameter")
 		}
 		offset = parsed
 	}
