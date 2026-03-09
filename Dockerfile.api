@@ -1,0 +1,27 @@
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /app
+
+RUN apk add --no-cache git
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags "-X main.version=${VERSION}" -o blob-indexer-api ./cmd/api
+
+FROM alpine:latest
+
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates tzdata
+
+COPY --from=builder /app/blob-indexer-api .
+COPY --from=builder /app/internal/db/migrations ./internal/db/migrations
+COPY --from=builder /app/railway-config.yaml ./
+
+EXPOSE 8080
+
+CMD ["./blob-indexer-api"]

@@ -20,35 +20,6 @@ import (
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
 
-// mockIndexer implements IndexerProvider for testing.
-type mockIndexer struct {
-	network          config.NetworkConfig
-	lastIndexedBlock uint64
-	currentBlock     uint64
-	currentBlockErr  error
-	confirmedCount   int
-	pendingCount     int
-	blobCountsErr    error
-	topUsers         []models.BlobUserStats
-	topUsersErr      error
-	reindexErr       error
-}
-
-func (m *mockIndexer) GetNetworkInfo() config.NetworkConfig { return m.network }
-func (m *mockIndexer) GetLastIndexedBlock() uint64          { return m.lastIndexedBlock }
-func (m *mockIndexer) GetCurrentBlock(ctx context.Context) (uint64, error) {
-	return m.currentBlock, m.currentBlockErr
-}
-func (m *mockIndexer) GetBlobCounts(ctx context.Context) (confirmedCount, pendingCount int, err error) {
-	return m.confirmedCount, m.pendingCount, m.blobCountsErr
-}
-func (m *mockIndexer) GetTopBlobUsers(ctx context.Context, limit, offset int) ([]models.BlobUserStats, error) {
-	return m.topUsers, m.topUsersErr
-}
-func (m *mockIndexer) Reindex(startBlock, endBlock uint64) error {
-	return m.reindexErr
-}
-
 // mockDB implements DBProvider for testing.
 type mockDB struct {
 	selectFn func(ctx context.Context, dest interface{}, query string, args ...interface{}) error
@@ -86,32 +57,25 @@ func (m *mockDB) Stats() sql.DBStats {
 	}
 }
 
-func newTestAPI() (*API, *mockIndexer) {
+func newTestAPI() *API {
 	return newTestAPIWithDB(nil)
 }
 
-func newTestAPIWithDB(db DBProvider) (*API, *mockIndexer) {
-	mock := &mockIndexer{
-		network: config.NetworkConfig{
-			Name:    "testnet",
-			ChainID: 42,
-			Enabled: true,
-		},
-		lastIndexedBlock: 1000,
-		currentBlock:     1050,
-	}
+func newTestAPIWithDB(db DBProvider) *API {
 	if db == nil {
 		db = &mockDB{}
 	}
-	a := &API{
-		db:       db,
-		indexers: map[int]IndexerProvider{42: mock},
+	return &API{
+		db: db,
+		networks: map[int]config.NetworkConfig{
+			42: {Name: "testnet", ChainID: 42, Enabled: true},
+		},
 		config: &config.Config{
 			Server:  config.ServerConfig{Port: 8080, DevMode: true},
 			Indexer: config.IndexerConfig{Version: "test-v1"},
 		},
+		startTime: time.Now(),
 	}
-	return a, mock
 }
 
 // setSliceResult is a helper to assign mock data to a dest pointer via reflection.
@@ -143,43 +107,43 @@ var _ = fmt.Sprintf
 // --- getNetworkFromRequest tests ---
 
 func TestGetNetworkFromRequest_ByChainID(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?network=42", http.NoBody)
-	idx, err := a.getNetworkFromRequest(req)
+	network, err := a.getNetworkFromRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if idx.GetNetworkInfo().ChainID != 42 {
-		t.Errorf("expected chain ID 42, got %d", idx.GetNetworkInfo().ChainID)
+	if network.ChainID != 42 {
+		t.Errorf("expected chain ID 42, got %d", network.ChainID)
 	}
 }
 
 func TestGetNetworkFromRequest_ByName(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?network=testnet", http.NoBody)
-	idx, err := a.getNetworkFromRequest(req)
+	network, err := a.getNetworkFromRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if idx.GetNetworkInfo().Name != "testnet" {
-		t.Errorf("expected 'testnet', got %q", idx.GetNetworkInfo().Name)
+	if network.Name != "testnet" {
+		t.Errorf("expected 'testnet', got %q", network.Name)
 	}
 }
 
 func TestGetNetworkFromRequest_DefaultFirstNetwork(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	idx, err := a.getNetworkFromRequest(req)
+	network, err := a.getNetworkFromRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if idx == nil {
-		t.Fatal("expected non-nil indexer")
+	if network.ChainID == 0 {
+		t.Fatal("expected non-zero chain ID")
 	}
 }
 
-func TestGetNetworkFromRequest_NoIndexers(t *testing.T) {
-	a := &API{indexers: map[int]IndexerProvider{}}
+func TestGetNetworkFromRequest_NoNetworks(t *testing.T) {
+	a := &API{networks: map[int]config.NetworkConfig{}}
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	_, err := a.getNetworkFromRequest(req)
 	if !errors.Is(err, ErrNoNetworksAvailable) {
@@ -188,7 +152,7 @@ func TestGetNetworkFromRequest_NoIndexers(t *testing.T) {
 }
 
 func TestGetNetworkFromRequest_NotFound(t *testing.T) {
-	a := &API{indexers: map[int]IndexerProvider{}}
+	a := &API{networks: map[int]config.NetworkConfig{}}
 	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
 	_, err := a.getNetworkFromRequest(req)
 	if !errors.Is(err, ErrNetworkNotFound) {
@@ -199,7 +163,7 @@ func TestGetNetworkFromRequest_NotFound(t *testing.T) {
 // --- GetNetworks ---
 
 func TestGetNetworks(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/api/networks", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetNetworks(w, req)
@@ -217,7 +181,7 @@ func TestGetNetworks(t *testing.T) {
 // --- GetNetworkStatus ---
 
 func TestGetNetworkStatus_Valid(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 
 	r := chi.NewRouter()
 	r.Get("/api/networks/{chainId}", a.GetNetworkStatus)
@@ -232,7 +196,7 @@ func TestGetNetworkStatus_Valid(t *testing.T) {
 }
 
 func TestGetNetworkStatus_InvalidChainID(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 
 	r := chi.NewRouter()
 	r.Get("/api/networks/{chainId}", a.GetNetworkStatus)
@@ -247,7 +211,7 @@ func TestGetNetworkStatus_InvalidChainID(t *testing.T) {
 }
 
 func TestGetNetworkStatus_NotFound(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 
 	r := chi.NewRouter()
 	r.Get("/api/networks/{chainId}", a.GetNetworkStatus)
@@ -264,11 +228,16 @@ func TestGetNetworkStatus_NotFound(t *testing.T) {
 // --- GetTopBlobUsers ---
 
 func TestGetTopBlobUsers_Success(t *testing.T) {
-	a, mock := newTestAPI()
-	mock.topUsers = []models.BlobUserStats{
-		{Address: "0xabc", Name: "Alice", BlobCount: 10, TotalCostETH: "1.5", LastTimestamp: time.Now()},
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			users := dest.(*[]models.BlobUserStats)
+			*users = []models.BlobUserStats{
+				{Address: "0xabc", Name: "Alice", BlobCount: 10, TotalCostETH: "1.5", LastTimestamp: time.Now()},
+			}
+			return nil
+		},
 	}
-
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/?limit=5", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
@@ -279,7 +248,7 @@ func TestGetTopBlobUsers_Success(t *testing.T) {
 }
 
 func TestGetTopBlobUsers_InvalidLimit(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=-1", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
@@ -290,7 +259,7 @@ func TestGetTopBlobUsers_InvalidLimit(t *testing.T) {
 }
 
 func TestGetTopBlobUsers_BadNetwork(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?network=missing", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
@@ -303,7 +272,7 @@ func TestGetTopBlobUsers_BadNetwork(t *testing.T) {
 // --- DevMetrics ---
 
 func TestDevMetrics(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/api/dev/metrics", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevMetrics(w, req)
@@ -316,7 +285,7 @@ func TestDevMetrics(t *testing.T) {
 // --- DevLogs ---
 
 func TestDevLogs_Default(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/api/dev/logs", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
@@ -327,7 +296,7 @@ func TestDevLogs_Default(t *testing.T) {
 }
 
 func TestDevLogs_FilterByLevel(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/api/dev/logs?level=error", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
@@ -338,7 +307,7 @@ func TestDevLogs_FilterByLevel(t *testing.T) {
 }
 
 func TestDevLogs_InvalidLimit(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/api/dev/logs?limit=abc", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
@@ -351,7 +320,7 @@ func TestDevLogs_InvalidLimit(t *testing.T) {
 // --- DevQueries ---
 
 func TestDevQueries_Default(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/api/dev/queries", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevQueries(w, req)
@@ -362,7 +331,7 @@ func TestDevQueries_Default(t *testing.T) {
 }
 
 func TestDevQueries_InvalidLimit(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/api/dev/queries?limit=0", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevQueries(w, req)
@@ -375,62 +344,13 @@ func TestDevQueries_InvalidLimit(t *testing.T) {
 // --- DevDashboard ---
 
 func TestDevDashboard(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/api/dev/dashboard", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevDashboard(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
-	}
-}
-
-// --- DevReindex ---
-
-func TestDevReindex_Success(t *testing.T) {
-	a, _ := newTestAPI()
-	body := `{"network_id":42,"start_block":100,"end_block":200}`
-	req := httptest.NewRequest(http.MethodPost, "/api/dev/reindex", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	a.DevReindex(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-}
-
-func TestDevReindex_InvalidBody(t *testing.T) {
-	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodPost, "/api/dev/reindex", strings.NewReader("invalid"))
-	w := httptest.NewRecorder()
-	a.DevReindex(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", w.Code)
-	}
-}
-
-func TestDevReindex_StartGreaterThanEnd(t *testing.T) {
-	a, _ := newTestAPI()
-	body := `{"network_id":42,"start_block":300,"end_block":100}`
-	req := httptest.NewRequest(http.MethodPost, "/api/dev/reindex", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	a.DevReindex(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", w.Code)
-	}
-}
-
-func TestDevReindex_InvalidNetwork(t *testing.T) {
-	a, _ := newTestAPI()
-	body := `{"network_id":999,"start_block":100,"end_block":200}`
-	req := httptest.NewRequest(http.MethodPost, "/api/dev/reindex", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	a.DevReindex(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
 
@@ -441,7 +361,7 @@ func TestNewRouter_ReturnsHandler(t *testing.T) {
 		Server:  config.ServerConfig{Port: 8080, DevMode: true},
 		Indexer: config.IndexerConfig{Version: "test"},
 	}
-	handler := NewRouter(nil, nil, cfg)
+	handler := NewRouter(nil, cfg)
 	if handler == nil {
 		t.Fatal("expected non-nil handler")
 	}
@@ -452,7 +372,7 @@ func TestNewRouter_DevModeDisabled(t *testing.T) {
 		Server:  config.ServerConfig{Port: 8080, DevMode: false},
 		Indexer: config.IndexerConfig{Version: "test"},
 	}
-	handler := NewRouter(nil, nil, cfg)
+	handler := NewRouter(nil, cfg)
 	if handler == nil {
 		t.Fatal("expected non-nil handler")
 	}
@@ -482,7 +402,7 @@ func TestGetLatestBlobs_Success(t *testing.T) {
 			return nil
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
@@ -498,7 +418,7 @@ func TestGetLatestBlobs_Success(t *testing.T) {
 }
 
 func TestGetLatestBlobs_InvalidLimit(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=abc", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
@@ -509,7 +429,7 @@ func TestGetLatestBlobs_InvalidLimit(t *testing.T) {
 }
 
 func TestGetLatestBlobs_NegativeLimit(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=-5", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
@@ -525,7 +445,7 @@ func TestGetLatestBlobs_DBError(t *testing.T) {
 			return fmt.Errorf("db error")
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
@@ -536,7 +456,7 @@ func TestGetLatestBlobs_DBError(t *testing.T) {
 }
 
 func TestGetLatestBlobs_BadNetwork(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?network=unknown", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
@@ -554,7 +474,7 @@ func TestGetMempoolBlobs_Success(t *testing.T) {
 			return nil
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)
@@ -565,7 +485,7 @@ func TestGetMempoolBlobs_Success(t *testing.T) {
 }
 
 func TestGetMempoolBlobs_InvalidLimit(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=0", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)
@@ -581,7 +501,7 @@ func TestGetMempoolBlobs_DBError(t *testing.T) {
 			return fmt.Errorf("db error")
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)
@@ -610,7 +530,7 @@ func TestGetBlobByTxHash_Success(t *testing.T) {
 			return nil
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 
 	r := chi.NewRouter()
 	r.Get("/blob/{txHash}", a.GetBlobByTxHash)
@@ -630,7 +550,7 @@ func TestGetBlobByTxHash_NotFound(t *testing.T) {
 			return sql.ErrNoRows
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 
 	r := chi.NewRouter()
 	r.Get("/blob/{txHash}", a.GetBlobByTxHash)
@@ -645,7 +565,7 @@ func TestGetBlobByTxHash_NotFound(t *testing.T) {
 }
 
 func TestGetBlobByTxHash_EmptyHash(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 
 	r := chi.NewRouter()
 	r.Get("/blob/{txHash}", a.GetBlobByTxHash)
@@ -664,11 +584,10 @@ func TestGetBlobByTxHash_EmptyHash(t *testing.T) {
 func TestGetBlobStats_Success(t *testing.T) {
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			// The stats query returns an anonymous struct - just leave defaults (zero values)
 			return nil
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetBlobStats(w, req)
@@ -684,7 +603,7 @@ func TestGetBlobStats_DBError(t *testing.T) {
 			return fmt.Errorf("db error")
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetBlobStats(w, req)
@@ -700,7 +619,7 @@ func TestGetIndexerStatus_Success(t *testing.T) {
 			return nil
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetIndexerStatus(w, req)
@@ -716,7 +635,7 @@ func TestGetIndexerStatus_DBError(t *testing.T) {
 			return fmt.Errorf("db error")
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetIndexerStatus(w, req)
@@ -732,7 +651,7 @@ func TestDevIndexers_Success(t *testing.T) {
 			return nil
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevIndexers(w, req)
@@ -750,67 +669,10 @@ func TestDevDatabase_Success(t *testing.T) {
 			return nil
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevDatabase(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-}
-
-func TestDevIndexers_CurrentBlockError(t *testing.T) {
-	db := &mockDB{
-		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			return nil
-		},
-	}
-	mock := &mockIndexer{
-		network:          config.NetworkConfig{Name: "testnet", ChainID: 42, Enabled: true},
-		lastIndexedBlock: 1000,
-		currentBlockErr:  fmt.Errorf("node unavailable"),
-	}
-	a := &API{
-		db:       db,
-		indexers: map[int]IndexerProvider{42: mock},
-		config: &config.Config{
-			Server:  config.ServerConfig{Port: 8080, DevMode: true},
-			Indexer: config.IndexerConfig{Version: "test-v1"},
-		},
-	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	w := httptest.NewRecorder()
-	a.DevIndexers(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 (fallback), got %d", w.Code)
-	}
-}
-
-func TestDevIndexers_BlobCountsError(t *testing.T) {
-	db := &mockDB{
-		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			return nil
-		},
-	}
-	mock := &mockIndexer{
-		network:          config.NetworkConfig{Name: "testnet", ChainID: 42, Enabled: true},
-		lastIndexedBlock: 1000,
-		currentBlock:     1050,
-		blobCountsErr:    fmt.Errorf("db error"),
-	}
-	a := &API{
-		db:       db,
-		indexers: map[int]IndexerProvider{42: mock},
-		config: &config.Config{
-			Server:  config.ServerConfig{Port: 8080, DevMode: true},
-			Indexer: config.IndexerConfig{Version: "test-v1"},
-		},
-	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	w := httptest.NewRecorder()
-	a.DevIndexers(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -823,7 +685,7 @@ func TestDevDatabase_DBError(t *testing.T) {
 			return fmt.Errorf("db error")
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevDatabase(w, req)
@@ -834,17 +696,12 @@ func TestDevDatabase_DBError(t *testing.T) {
 }
 
 func TestGetTopBlobUsers_DBError(t *testing.T) {
-	mock := &mockIndexer{
-		network:     config.NetworkConfig{Name: "testnet", ChainID: 42, Enabled: true},
-		topUsersErr: fmt.Errorf("db error"),
-	}
-	a := &API{
-		db:       &mockDB{},
-		indexers: map[int]IndexerProvider{42: mock},
-		config: &config.Config{
-			Server: config.ServerConfig{Port: 8080, DevMode: true},
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return fmt.Errorf("db error")
 		},
 	}
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/?network=42", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
@@ -855,19 +712,16 @@ func TestGetTopBlobUsers_DBError(t *testing.T) {
 }
 
 func TestGetTopBlobUsers_CustomLimit(t *testing.T) {
-	mock := &mockIndexer{
-		network: config.NetworkConfig{Name: "testnet", ChainID: 42, Enabled: true},
-		topUsers: []models.BlobUserStats{
-			{Address: "0xabc", Name: "User1", BlobCount: 10},
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			users := dest.(*[]models.BlobUserStats)
+			*users = []models.BlobUserStats{
+				{Address: "0xabc", Name: "User1", BlobCount: 10},
+			}
+			return nil
 		},
 	}
-	a := &API{
-		db:       &mockDB{},
-		indexers: map[int]IndexerProvider{42: mock},
-		config: &config.Config{
-			Server: config.ServerConfig{Port: 8080, DevMode: true},
-		},
-	}
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/?network=42&limit=5", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
@@ -877,47 +731,24 @@ func TestGetTopBlobUsers_CustomLimit(t *testing.T) {
 	}
 }
 
-func TestDevReindex_ReindexError(t *testing.T) {
-	mock := &mockIndexer{
-		network:    config.NetworkConfig{Name: "testnet", ChainID: 42, Enabled: true},
-		reindexErr: fmt.Errorf("reindex failed"),
-	}
-	a := &API{
-		db:       &mockDB{},
-		indexers: map[int]IndexerProvider{42: mock},
-		config: &config.Config{
-			Server: config.ServerConfig{Port: 8080, DevMode: true},
-		},
-	}
-	body := strings.NewReader(`{"network_id": 42, "start_block": 100, "end_block": 200}`)
-	req := httptest.NewRequest(http.MethodPost, "/", body)
-	w := httptest.NewRecorder()
-	a.DevReindex(w, req)
-
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500, got %d", w.Code)
-	}
-}
-
 func TestGetLatestBlobs_ExcessiveLimit(t *testing.T) {
 	db := &mockDB{
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
 			return nil
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
 
-	// Should succeed but cap at MaxQueryLimit
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 }
 
 func TestGetMempoolBlobs_NegativeLimit(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=-1", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)
@@ -933,7 +764,7 @@ func TestGetBlobByTxHash_DBError(t *testing.T) {
 			return fmt.Errorf("db error")
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("txHash", "0x1234")
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
@@ -941,14 +772,13 @@ func TestGetBlobByTxHash_DBError(t *testing.T) {
 	w := httptest.NewRecorder()
 	a.GetBlobByTxHash(w, req)
 
-	// GetBlobByTxHash treats all DB errors as "not found"
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
 	}
 }
 
 func TestDevLogs_CustomLimit(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=50", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
@@ -959,7 +789,7 @@ func TestDevLogs_CustomLimit(t *testing.T) {
 }
 
 func TestDevQueries_CustomLimit(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=50", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevQueries(w, req)
@@ -970,8 +800,7 @@ func TestDevQueries_CustomLimit(t *testing.T) {
 }
 
 func TestDevQueries_LimitTruncation(t *testing.T) {
-	a, _ := newTestAPI()
-	// limit=2 should truncate the placeholder query list
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=2", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevQueries(w, req)
@@ -987,7 +816,7 @@ func TestDevQueries_LimitTruncation(t *testing.T) {
 }
 
 func TestDevQueries_ExcessiveLimit(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevQueries(w, req)
@@ -1000,7 +829,7 @@ func TestDevQueries_ExcessiveLimit(t *testing.T) {
 func TestGetBlobStats_BadNetwork(t *testing.T) {
 	a := &API{
 		db:       &mockDB{},
-		indexers: map[int]IndexerProvider{},
+		networks: map[int]config.NetworkConfig{},
 		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
 	}
 	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
@@ -1015,7 +844,7 @@ func TestGetBlobStats_BadNetwork(t *testing.T) {
 func TestGetIndexerStatus_BadNetwork(t *testing.T) {
 	a := &API{
 		db:       &mockDB{},
-		indexers: map[int]IndexerProvider{},
+		networks: map[int]config.NetworkConfig{},
 		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
 	}
 	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
@@ -1028,7 +857,7 @@ func TestGetIndexerStatus_BadNetwork(t *testing.T) {
 }
 
 func TestDevLogs_ExcessiveLimit(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
@@ -1044,7 +873,7 @@ func TestGetMempoolBlobs_ExcessiveLimit(t *testing.T) {
 			return nil
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)
@@ -1057,7 +886,7 @@ func TestGetMempoolBlobs_ExcessiveLimit(t *testing.T) {
 func TestGetMempoolBlobs_BadNetwork(t *testing.T) {
 	a := &API{
 		db:       &mockDB{},
-		indexers: map[int]IndexerProvider{},
+		networks: map[int]config.NetworkConfig{},
 		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
 	}
 	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
@@ -1075,8 +904,7 @@ func TestGetLatestBlobs_LargeLimit(t *testing.T) {
 			return nil
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
-	// Test that limit > MaxQueryLimit gets capped
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/?limit=10000", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
@@ -1087,15 +915,14 @@ func TestGetLatestBlobs_LargeLimit(t *testing.T) {
 }
 
 func TestGetTopBlobUsers_ExcessiveLimit(t *testing.T) {
-	mock := &mockIndexer{
-		network:  config.NetworkConfig{Name: "testnet", ChainID: 42, Enabled: true},
-		topUsers: []models.BlobUserStats{},
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			users := dest.(*[]models.BlobUserStats)
+			*users = []models.BlobUserStats{}
+			return nil
+		},
 	}
-	a := &API{
-		db:       &mockDB{},
-		indexers: map[int]IndexerProvider{42: mock},
-		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
-	}
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
@@ -1106,11 +933,8 @@ func TestGetTopBlobUsers_ExcessiveLimit(t *testing.T) {
 }
 
 func TestDevDatabase_PartialErrors(t *testing.T) {
-	// Mock that returns error for pg_total_relation_size queries but success for COUNT
-	callCount := 0
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			callCount++
 			if strings.Contains(query, "pg_total_relation_size") ||
 				strings.Contains(query, "pg_indexes") ||
 				strings.Contains(query, "pg_database_size") {
@@ -1119,7 +943,7 @@ func TestDevDatabase_PartialErrors(t *testing.T) {
 			return nil
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevDatabase(w, req)
@@ -1132,20 +956,17 @@ func TestDevDatabase_PartialErrors(t *testing.T) {
 func TestDevIndexers_DBTimestampError(t *testing.T) {
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			if strings.Contains(query, "MAX(timestamp)") {
+			if strings.Contains(query, "MAX(timestamp)") || strings.Contains(query, "COALESCE") {
 				return fmt.Errorf("db error")
 			}
 			return nil
 		},
 	}
-	mock := &mockIndexer{
-		network:          config.NetworkConfig{Name: "testnet", ChainID: 42, Enabled: true},
-		lastIndexedBlock: 1000,
-		currentBlock:     1050,
-	}
 	a := &API{
-		db:       db,
-		indexers: map[int]IndexerProvider{42: mock},
+		db: db,
+		networks: map[int]config.NetworkConfig{
+			42: {Name: "testnet", ChainID: 42, Enabled: true},
+		},
 		config: &config.Config{
 			Server:  config.ServerConfig{Port: 8080, DevMode: true},
 			Indexer: config.IndexerConfig{Version: "test-v1"},
@@ -1179,7 +1000,7 @@ func TestGetBlobByTxHash_WithBlobData(t *testing.T) {
 			return nil
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("txHash", "0xabc123")
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
@@ -1193,8 +1014,7 @@ func TestGetBlobByTxHash_WithBlobData(t *testing.T) {
 }
 
 func TestDevLogs_SmallLimit(t *testing.T) {
-	a, _ := newTestAPI()
-	// limit=2 should truncate placeholder logs (5 entries)
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=2", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
@@ -1205,7 +1025,7 @@ func TestDevLogs_SmallLimit(t *testing.T) {
 }
 
 func TestDevLogs_NegativeLimit(t *testing.T) {
-	a, _ := newTestAPI()
+	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=-5", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
@@ -1218,7 +1038,7 @@ func TestDevLogs_NegativeLimit(t *testing.T) {
 func TestGetBlobByTxHash_BadNetwork(t *testing.T) {
 	a := &API{
 		db:       &mockDB{},
-		indexers: map[int]IndexerProvider{},
+		networks: map[int]config.NetworkConfig{},
 		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
 	}
 	rctx := chi.NewRouteContext()
@@ -1230,6 +1050,117 @@ func TestGetBlobByTxHash_BadNetwork(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestRespondMaxBytesError(t *testing.T) {
+	w := httptest.NewRecorder()
+	RespondMaxBytesError(w)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", w.Code)
+	}
+	var resp Response
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Success {
+		t.Error("expected Success=false")
+	}
+}
+
+func TestDevModeMiddleware_Disabled(t *testing.T) {
+	handler := DevModeMiddleware(false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when dev mode disabled, got %d", w.Code)
+	}
+}
+
+func TestDevModeMiddleware_Enabled(t *testing.T) {
+	handler := DevModeMiddleware(true)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 when dev mode enabled, got %d", w.Code)
+	}
+}
+
+func TestGetLastIndexedBlockFromDB_ValidValue(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			v := dest.(*string)
+			*v = "12345"
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	block := a.getLastIndexedBlockFromDB(context.Background(), 42)
+	if block != 12345 {
+		t.Fatalf("expected 12345, got %d", block)
+	}
+}
+
+func TestGetLastIndexedBlockFromDB_DBError(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return fmt.Errorf("db error")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	block := a.getLastIndexedBlockFromDB(context.Background(), 42)
+	if block != 0 {
+		t.Fatalf("expected 0, got %d", block)
+	}
+}
+
+func TestContentTypeJSON_RejectsNonJSON(t *testing.T) {
+	handler := ContentTypeJSON(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("data"))
+	req.Header.Set("Content-Type", "text/plain")
+	req.ContentLength = 4
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected 415, got %d", w.Code)
+	}
+}
+
+func TestContentTypeJSON_AllowsJSON(t *testing.T) {
+	handler := ContentTypeJSON(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = 2
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestContentTypeJSON_SkipsGET(t *testing.T) {
+	handler := ContentTypeJSON(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 }
 
@@ -1253,7 +1184,7 @@ func TestGetMempoolBlobs_WithData(t *testing.T) {
 			return nil
 		},
 	}
-	a, _ := newTestAPIWithDB(db)
+	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/?limit=10", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)

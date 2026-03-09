@@ -80,13 +80,6 @@ type StatusResponse struct {
 	LastIndexedTime  time.Time `json:"last_indexed_time"`
 }
 
-// ReindexRequest is a request to reindex blocks
-type ReindexRequest struct {
-	NetworkID  int    `json:"network_id"`
-	StartBlock uint64 `json:"start_block"`
-	EndBlock   uint64 `json:"end_block"`
-}
-
 // respondJSON responds with JSON
 func (a *API) respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -122,15 +115,11 @@ func (a *API) respondError(w http.ResponseWriter, status int, message string) {
 // @Failure 500 {object} Response "Internal server error"
 // @Router /blob/latest [get]
 func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
-	// Get the network from the request
-	idx, err := a.getNetworkFromRequest(r)
+	network, err := a.getNetworkFromRequest(r)
 	if err != nil {
 		a.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	// Get network info
-	network := idx.GetNetworkInfo()
 
 	// Get query parameters
 	limit := 10
@@ -223,15 +212,11 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} Response "Internal server error"
 // @Router /blob/mempool [get]
 func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
-	// Get the network from the request
-	idx, err := a.getNetworkFromRequest(r)
+	network, err := a.getNetworkFromRequest(r)
 	if err != nil {
 		a.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	// Get network info
-	network := idx.GetNetworkInfo()
 
 	// Get query parameters
 	limit := 10
@@ -324,15 +309,11 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} Response "Internal server error"
 // @Router /blob/{txHash} [get]
 func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
-	// Get the network from the request
-	idx, err := a.getNetworkFromRequest(r)
+	network, err := a.getNetworkFromRequest(r)
 	if err != nil {
 		a.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	// Get network info
-	network := idx.GetNetworkInfo()
 
 	// Get the transaction hash from the URL
 	txHash := chi.URLParam(r, "txHash")
@@ -394,17 +375,12 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} Response "Internal server error"
 // @Router /users [get]
 func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
-	// Get the network from the request
-	idx, err := a.getNetworkFromRequest(r)
+	network, err := a.getNetworkFromRequest(r)
 	if err != nil {
 		a.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Get network info
-	network := idx.GetNetworkInfo()
-
-	// Get query parameters
 	limit := 10
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		var err error
@@ -436,9 +412,21 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 		zap.Int("limit", limit),
 		zap.Int("offset", offset))
 
-	// Get the top blob users
-	users, err := idx.GetTopBlobUsers(r.Context(), limit, offset)
-	if err != nil {
+	var users []models.BlobUserStats
+	query := `
+		SELECT
+			from_address,
+			user_attribution,
+			COUNT(*) as blob_count,
+			SUM(total_cost_eth::numeric) as total_cost_eth,
+			MAX(timestamp) as last_timestamp
+		FROM blobs
+		WHERE network_id = $1
+		GROUP BY from_address, user_attribution
+		ORDER BY blob_count DESC
+		LIMIT $2 OFFSET $3
+	`
+	if err := a.db.SelectContext(r.Context(), &users, query, network.ChainID, limit, offset); err != nil {
 		logger.Error("Failed to get top blob users",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -446,7 +434,6 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert to response format
 	response := make([]UserResponse, 0, len(users))
 	for _, user := range users {
 		response = append(response, UserResponse{
@@ -480,19 +467,14 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} Response "Internal server error"
 // @Router /stats [get]
 func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
-	// Get the network from the request
-	idx, err := a.getNetworkFromRequest(r)
+	network, err := a.getNetworkFromRequest(r)
 	if err != nil {
 		a.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Get network info
-	network := idx.GetNetworkInfo()
-
 	logger.Debug("Getting blob statistics", zap.String("network", network.Name))
 
-	// Get blob statistics
 	var stats struct {
 		TotalBlobs          int       `db:"total_blobs"`
 		TotalConfirmedBlobs int       `db:"total_confirmed_blobs"`
@@ -523,10 +505,6 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get the last indexed block
-	lastIndexedBlock := idx.GetLastIndexedBlock()
-
-	// Create the response
 	response := StatsResponse{
 		NetworkID:           network.ChainID,
 		NetworkName:         network.Name,
@@ -536,7 +514,7 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 		AverageBaseFee:      stats.AverageBaseFee,
 		AverageTip:          stats.AverageTip,
 		AverageTotalCost:    stats.AverageTotalCost,
-		LastIndexedBlock:    lastIndexedBlock,
+		LastIndexedBlock:    a.getLastIndexedBlockFromDB(r.Context(), network.ChainID),
 		LastIndexedTime:     stats.LastIndexedTime,
 	}
 
@@ -557,25 +535,14 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} Response "Internal server error"
 // @Router /status [get]
 func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
-	// Get the network from the request
-	idx, err := a.getNetworkFromRequest(r)
+	network, err := a.getNetworkFromRequest(r)
 	if err != nil {
 		a.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Get network info
-	network := idx.GetNetworkInfo()
-
 	logger.Debug("Getting indexer status", zap.String("network", network.Name))
 
-	// Get the last indexed block
-	lastIndexedBlock := idx.GetLastIndexedBlock()
-
-	// Get the indexer version
-	indexerVersion := a.config.Indexer.Version
-
-	// Get the last indexed time
 	var lastIndexedTime time.Time
 	query := "SELECT MAX(timestamp) FROM blobs WHERE confirmed = true AND network_id = $1"
 	if err := a.db.GetContext(r.Context(), &lastIndexedTime, query, network.ChainID); err != nil {
@@ -586,15 +553,13 @@ func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Calculate uptime (placeholder)
-	uptime := "1h 30m"
+	uptime := time.Since(a.startTime).Truncate(time.Second).String()
 
-	// Create the response
 	response := StatusResponse{
 		NetworkID:        network.ChainID,
 		NetworkName:      network.Name,
-		LastIndexedBlock: lastIndexedBlock,
-		IndexerVersion:   indexerVersion,
+		LastIndexedBlock: a.getLastIndexedBlockFromDB(r.Context(), network.ChainID),
+		IndexerVersion:   a.config.Indexer.Version,
 		Uptime:           uptime,
 		LastIndexedTime:  lastIndexedTime,
 	}
@@ -624,14 +589,7 @@ type SystemMetrics struct {
 type IndexerMetrics struct {
 	NetworkID           int       `json:"network_id"`
 	NetworkName         string    `json:"network_name"`
-	Status              string    `json:"status"`
 	LastIndexedBlock    uint64    `json:"last_indexed_block"`
-	CurrentBlock        uint64    `json:"current_block"`
-	BlocksBehind        uint64    `json:"blocks_behind"`
-	IndexingRate        float64   `json:"indexing_rate"`
-	ErrorCount          int       `json:"error_count"`
-	LastError           string    `json:"last_error,omitempty"`
-	LastErrorTime       time.Time `json:"last_error_time,omitempty"`
 	LastIndexedTime     time.Time `json:"last_indexed_time"`
 	TotalBlobsIndexed   int       `json:"total_blobs_indexed"`
 	PendingBlobsCount   int       `json:"pending_blobs_count"`
@@ -735,64 +693,43 @@ func getMemoryUsage() string {
 func (a *API) DevIndexers(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting indexer metrics")
 
-	metrics := make([]IndexerMetrics, 0, len(a.indexers))
+	metrics := make([]IndexerMetrics, 0, len(a.networks))
 
-	// Get metrics for each indexer
-	for _, idx := range a.indexers {
-		network := idx.GetNetworkInfo()
-		lastIndexedBlock := idx.GetLastIndexedBlock()
+	for _, network := range a.networks {
+		lastIndexedBlock := a.getLastIndexedBlockFromDB(r.Context(), network.ChainID)
 
-		// Get the current block
-		currentBlock, err := idx.GetCurrentBlock(r.Context())
-		if err != nil {
-			logger.Error("Failed to get current block",
-				zap.String("network", network.Name),
-				zap.Error(err))
-			currentBlock = lastIndexedBlock // Fallback
+		var counts struct {
+			Confirmed int `db:"confirmed_count"`
+			Pending   int `db:"pending_count"`
 		}
-
-		// Calculate blocks behind
-		var blocksBehind uint64
-		if currentBlock > lastIndexedBlock {
-			blocksBehind = currentBlock - lastIndexedBlock
-		}
-
-		// Get blob counts
-		confirmedCount, pendingCount, err := idx.GetBlobCounts(r.Context())
-		if err != nil {
+		countQuery := `
+			SELECT
+				SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END) as confirmed_count,
+				SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END) as pending_count
+			FROM blobs WHERE network_id = $1
+		`
+		if err := a.db.GetContext(r.Context(), &counts, countQuery, network.ChainID); err != nil {
 			logger.Error("Failed to get blob counts",
 				zap.String("network", network.Name),
 				zap.Error(err))
 		}
 
-		// Get last indexed time
 		var lastIndexedTime time.Time
-		query := "SELECT MAX(timestamp) FROM blobs WHERE confirmed = true AND network_id = $1"
-		if err := a.db.GetContext(r.Context(), &lastIndexedTime, query, network.ChainID); err != nil {
+		timeQuery := "SELECT COALESCE(MAX(timestamp), '1970-01-01'::timestamp) FROM blobs WHERE confirmed = true AND network_id = $1"
+		if err := a.db.GetContext(r.Context(), &lastIndexedTime, timeQuery, network.ChainID); err != nil {
 			logger.Error("Failed to get last indexed time",
 				zap.String("network", network.Name),
 				zap.Error(err))
-			lastIndexedTime = time.Now() // Fallback
 		}
-
-		// Calculate indexing rate (blocks per minute)
-		indexingRate := 0.0
-		// This is a placeholder calculation
-		// In a real implementation, you would track the indexing rate over time
 
 		metrics = append(metrics, IndexerMetrics{
 			NetworkID:           network.ChainID,
 			NetworkName:         network.Name,
-			Status:              "running", // Placeholder
 			LastIndexedBlock:    lastIndexedBlock,
-			CurrentBlock:        currentBlock,
-			BlocksBehind:        blocksBehind,
-			IndexingRate:        indexingRate,
-			ErrorCount:          0, // Placeholder
 			LastIndexedTime:     lastIndexedTime,
-			TotalBlobsIndexed:   confirmedCount + pendingCount,
-			PendingBlobsCount:   pendingCount,
-			ConfirmedBlobsCount: confirmedCount,
+			TotalBlobsIndexed:   counts.Confirmed + counts.Pending,
+			PendingBlobsCount:   counts.Pending,
+			ConfirmedBlobsCount: counts.Confirmed,
 		})
 	}
 
@@ -1125,73 +1062,5 @@ func (a *API) DevDashboard(w http.ResponseWriter, r *http.Request) {
 	a.respondJSON(w, http.StatusOK, Response{
 		Success: true,
 		Data:    "Development dashboard",
-	})
-}
-
-// DevReindex godoc
-// @Summary Trigger a reindex of blocks
-// @Description Reindex a range of blocks (only available in dev mode)
-// @Tags dev
-// @Accept json
-// @Produce json
-// @Param request body ReindexRequest true "Reindex request"
-// @Success 200 {object} Response{data=string} "Success"
-// @Failure 400 {object} Response "Bad request"
-// @Failure 500 {object} Response "Internal server error"
-// @Router /dev/reindex [post]
-func (a *API) DevReindex(w http.ResponseWriter, r *http.Request) {
-	// Parse the request body
-	var req ReindexRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if isMaxBytesError(err) {
-			logger.Warn("Reindex request body too large", zap.Error(err))
-			RespondMaxBytesError(w)
-			return
-		}
-		logger.Warn("Invalid reindex request body", zap.Error(err))
-		a.respondError(w, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-
-	// Validate the request
-	if req.StartBlock > req.EndBlock {
-		a.respondError(w, http.StatusBadRequest, "Start block must be less than or equal to end block")
-		return
-	}
-
-	// Get the indexer for this network
-	idx, ok := a.indexers[req.NetworkID]
-	if !ok {
-		a.respondError(w, http.StatusBadRequest, "Invalid network ID")
-		return
-	}
-
-	// Get network info
-	network := idx.GetNetworkInfo()
-
-	logger.Info("Triggering reindex",
-		zap.String("network", network.Name),
-		zap.Uint64("start_block", req.StartBlock),
-		zap.Uint64("end_block", req.EndBlock))
-
-	// Trigger the reindex
-	if err := idx.Reindex(req.StartBlock, req.EndBlock); err != nil {
-		logger.Error("Failed to reindex blocks",
-			zap.String("network", network.Name),
-			zap.Uint64("start_block", req.StartBlock),
-			zap.Uint64("end_block", req.EndBlock),
-			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, "Failed to reindex blocks")
-		return
-	}
-
-	logger.Info("Reindex triggered successfully",
-		zap.String("network", network.Name),
-		zap.Uint64("start_block", req.StartBlock),
-		zap.Uint64("end_block", req.EndBlock))
-
-	a.respondJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    "Reindex triggered",
 	})
 }

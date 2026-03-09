@@ -1,4 +1,4 @@
-.PHONY: build run test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall
+.PHONY: build build-api build-indexer run-api run-indexer test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall
 
 # Go parameters
 GOCMD=go
@@ -6,7 +6,8 @@ GOBUILD=$(GOCMD) build
 GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
-BINARY_NAME=blob-indexer-api
+API_BINARY=blob-indexer-api
+INDEXER_BINARY=blob-indexer
 COVERAGE_THRESHOLD ?= 50
 COVERAGE_DIR=coverage
 COVERAGE_FILE=$(COVERAGE_DIR)/coverage.out
@@ -14,12 +15,19 @@ COVERAGE_HTML=$(COVERAGE_DIR)/coverage.html
 
 all: test build
 
-build:
-	$(GOBUILD) -o $(BINARY_NAME) -v ./cmd/server
+build: build-api build-indexer
 
-run:
-	$(GOBUILD) -o $(BINARY_NAME) -v ./cmd/server
-	./$(BINARY_NAME)
+build-api:
+	$(GOBUILD) -o $(API_BINARY) -v ./cmd/api
+
+build-indexer:
+	$(GOBUILD) -o $(INDEXER_BINARY) -v ./cmd/indexer
+
+run-api: build-api
+	./$(API_BINARY)
+
+run-indexer: build-indexer
+	./$(INDEXER_BINARY)
 
 test:
 	$(GOTEST) -v ./...
@@ -54,8 +62,10 @@ fmt:
 	goimports -w -local github.com/a-thomas-22/blob-indexer-api .
 
 clean:
-	rm -f $(BINARY_NAME)
-	rm -f $(BINARY_NAME).exe
+	rm -f $(API_BINARY)
+	rm -f $(INDEXER_BINARY)
+	rm -f $(API_BINARY).exe
+	rm -f $(INDEXER_BINARY).exe
 	rm -rf $(COVERAGE_DIR)
 
 deps:
@@ -63,15 +73,14 @@ deps:
 	$(GOMOD) tidy
 
 docker-build:
-	docker build -t $(BINARY_NAME) .
+	docker build -f Dockerfile.api -t $(API_BINARY) .
+	docker build -f Dockerfile.indexer -t $(INDEXER_BINARY) .
 
 docker-run:
 	docker run -p 8080:8080 \
 		-e DB_URL="postgres://postgres:postgres@postgres:5432/blobindexer?sslmode=disable" \
-		-e RPC_URL="https://mainnet.infura.io/v3/your-api-key" \
-		-e START_BLOCK="LATEST-1000" \
 		-e LOG_LEVEL="info" \
-		$(BINARY_NAME)
+		$(API_BINARY)
 
 tilt-up:
 	tilt up
@@ -81,7 +90,7 @@ seed-data:
 
 # Swagger documentation
 swagger:
-	swag init -g cmd/server/main.go -o docs
+	swag init -g cmd/api/main.go -o docs
 
 # Helm commands
 helm-dep-update:
