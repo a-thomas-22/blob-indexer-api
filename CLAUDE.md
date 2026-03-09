@@ -67,6 +67,28 @@ Key env vars: `DB_URL`, `PORT`, `DEV_MODE`, `LOG_LEVEL`, `RPC_URL`/`ETH_RPC_URL`
 
 The API uses `config.LoadForAPI()` (RPC URLs optional). The indexer uses `config.Load()` (RPC URLs required).
 
+## Local Checks (run before pushing)
+
+Run `make ci` to execute all checks locally. GHA CI is a backstop — catch issues here first.
+
+`make ci` runs these in order:
+1. **Format** (`make fmt`): `gofmt -s` + `goimports` (auto-fixes in place)
+2. **Vet** (`make vet`): `go vet ./...`
+3. **Lint** (`make lint`): `golangci-lint run ./...` (config in `.golangci.yml`)
+4. **Staticcheck** (`make staticcheck`): `staticcheck ./...`
+5. **Test + Coverage** (`make test-coverage`): tests with 90% coverage threshold enforced
+6. **Build** (`make build`): compiles both binaries
+7. **Module verify**: `go mod verify`
+
+Individual checks you can run:
+- `make test` — quick test run (no coverage threshold)
+- `make test-race` — tests with `-race` flag
+- `make lint-fix` — lint with auto-fix
+
+After any code change, at minimum run: `make fmt && make lint && make test`
+
+PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, `style:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`, `chore:`, `revert:`.
+
 ## Code Conventions
 
 - Go module: `github.com/a-thomas-22/blob-indexer-api`
