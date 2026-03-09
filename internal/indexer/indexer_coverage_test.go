@@ -936,6 +936,61 @@ func TestInsertBlockData(t *testing.T) {
 			t.Fatal("expected commit error")
 		}
 	})
+
+	t.Run("with block metrics success", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		metrics := &models.BlockMetrics{
+			NetworkID:        42,
+			BlockNumber:      10,
+			BlockTimestamp:   time.Now(),
+			BlobCount:        3,
+			BlobGasUsed:      393216,
+			BlobGasTarget:    393216,
+			BlobGasLimit:     786432,
+			ExcessBlobGas:    100000,
+			BlobBaseFee:      "1",
+			UtilizationRatio: "1.000000",
+			BlobParamsTarget: 3,
+			BlobParamsMax:    6,
+			UpdateFraction:   3338477,
+		}
+
+		mock.ExpectBegin()
+		mock.ExpectExec("INSERT INTO block_metrics").
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec("INSERT INTO indexed_blocks").
+			WithArgs(indexedBlock.NetworkID, indexedBlock.BlockNumber, indexedBlock.BlockHash, indexedBlock.ParentHash).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectCommit()
+
+		if err := idx.insertBlockData(nil, indexedBlock, metrics); err != nil {
+			t.Fatalf("insertBlockData() error = %v", err)
+		}
+	})
+
+	t.Run("block metrics insert error", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		metrics := &models.BlockMetrics{
+			NetworkID:   42,
+			BlockNumber: 10,
+		}
+
+		mock.ExpectBegin()
+		mock.ExpectExec("INSERT INTO block_metrics").
+			WillReturnError(errors.New("metrics insert failed"))
+		mock.ExpectRollback()
+
+		err := idx.insertBlockData(nil, indexedBlock, metrics)
+		if err == nil || !strings.Contains(err.Error(), "failed to insert block metrics") {
+			t.Fatalf("expected block metrics error, got %v", err)
+		}
+	})
 }
 
 func TestProcessBlock_NoBlobTransactions(t *testing.T) {
@@ -1133,6 +1188,32 @@ func TestHandleReorg_SuccessAndError(t *testing.T) {
 		err := idx.handleReorg(5)
 		if err == nil || !strings.Contains(err.Error(), "failed to get block") {
 			t.Fatalf("expected block lookup error, got %v", err)
+		}
+	})
+
+	t.Run("delete block metrics error", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+		idx.ethClient, _ = newMockEthClient(t, 10)
+
+		forkBlock := uint64(4)
+		block, _ := idx.ethClient.GetBlockByNumber(context.Background(), forkBlock)
+		expectedHash := block.Hash().Hex()
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2")).
+			WithArgs(idx.network.ChainID, forkBlock).
+			WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(expectedHash))
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2")).
+			WithArgs(idx.network.ChainID, int64(forkBlock+1)).
+			WillReturnResult(sqlmock.NewResult(0, 2))
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2")).
+			WithArgs(idx.network.ChainID, int64(forkBlock+1)).
+			WillReturnError(errors.New("metrics delete failed"))
+
+		err := idx.handleReorg(5)
+		if err == nil || !strings.Contains(err.Error(), "failed to delete reorged block metrics") {
+			t.Fatalf("expected block metrics delete error, got %v", err)
 		}
 	})
 }
