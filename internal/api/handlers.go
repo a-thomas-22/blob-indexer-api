@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/go-chi/chi/v5"
@@ -355,6 +356,10 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 	txHash := chi.URLParam(r, "txHash")
 	if txHash == "" {
 		a.respondError(w, http.StatusBadRequest, "Transaction hash is required")
+		return
+	}
+	if !common.IsHexHash(txHash) {
+		a.respondError(w, http.StatusBadRequest, "Invalid transaction hash format")
 		return
 	}
 
