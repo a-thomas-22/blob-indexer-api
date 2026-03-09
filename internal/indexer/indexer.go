@@ -326,66 +326,79 @@ func (i *Indexer) blockProcessingWorker(workerID int) {
 		zap.Int("worker_id", workerID))
 
 	for task := range i.blockTaskCh {
-		// Check if the context is canceled
-		select {
-		case <-i.ctx.Done():
-			logger.Info("Block processing worker stopped",
-				zap.String("network", i.network.Name),
-				zap.Int("worker_id", workerID))
-			return
-		default:
-		}
+		func(task BlockTask) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					logger.Error("Recovered panic in block processing worker",
+						zap.String("network", i.network.Name),
+						zap.Int("worker_id", workerID),
+						zap.Uint64("block", task.BlockNumber),
+						zap.Any("panic", recovered))
+					i.trackFailedBlock(task.BlockNumber)
+				}
+			}()
 
-		// Process the block with inline retries and exponential backoff
-		var lastErr error
-		for attempt := 0; attempt <= i.maxBlockRetries; attempt++ {
-			if attempt > 0 {
-				delay := time.Duration(1<<uint(attempt-1)) * time.Second
-				select {
-				case <-time.After(delay):
-				case <-i.ctx.Done():
-					return
+			// Check if the context is canceled
+			select {
+			case <-i.ctx.Done():
+				logger.Info("Block processing worker stopped",
+					zap.String("network", i.network.Name),
+					zap.Int("worker_id", workerID))
+				return
+			default:
+			}
+
+			// Process the block with inline retries and exponential backoff
+			var lastErr error
+			for attempt := 0; attempt <= i.maxBlockRetries; attempt++ {
+				if attempt > 0 {
+					delay := time.Duration(1<<uint(attempt-1)) * time.Second
+					select {
+					case <-time.After(delay):
+					case <-i.ctx.Done():
+						return
+					}
+				}
+
+				lastErr = i.processBlock(task.BlockNumber)
+				if lastErr == nil {
+					break
+				}
+
+				// Reorg was detected and handled — don't retry, the main loop will re-queue
+				if errors.Is(lastErr, errReorgDetected) {
+					lastErr = nil
+					break
+				}
+
+				if attempt < i.maxBlockRetries {
+					logger.Warn("Block processing failed, retrying",
+						zap.String("network", i.network.Name),
+						zap.Uint64("block", task.BlockNumber),
+						zap.Int("attempt", attempt+1),
+						zap.Int("max_retries", i.maxBlockRetries),
+						zap.Error(lastErr))
 				}
 			}
 
-			lastErr = i.processBlock(task.BlockNumber)
-			if lastErr == nil {
-				break
-			}
-
-			// Reorg was detected and handled — don't retry, the main loop will re-queue
-			if errors.Is(lastErr, errReorgDetected) {
-				lastErr = nil
-				break
-			}
-
-			if attempt < i.maxBlockRetries {
-				logger.Warn("Block processing failed, retrying",
+			if lastErr != nil {
+				logger.Error("Block processing failed after all retries",
 					zap.String("network", i.network.Name),
 					zap.Uint64("block", task.BlockNumber),
-					zap.Int("attempt", attempt+1),
-					zap.Int("max_retries", i.maxBlockRetries),
+					zap.Int("retries", i.maxBlockRetries),
 					zap.Error(lastErr))
+				i.trackFailedBlock(task.BlockNumber)
+				return
 			}
-		}
 
-		if lastErr != nil {
-			logger.Error("Block processing failed after all retries",
-				zap.String("network", i.network.Name),
-				zap.Uint64("block", task.BlockNumber),
-				zap.Int("retries", i.maxBlockRetries),
-				zap.Error(lastErr))
-			i.trackFailedBlock(task.BlockNumber)
-			continue
-		}
+			// Clear from failed blocks tracking on success
+			i.failedBlocksMu.Lock()
+			delete(i.failedBlocks, task.BlockNumber)
+			i.failedBlocksMu.Unlock()
 
-		// Clear from failed blocks tracking on success
-		i.failedBlocksMu.Lock()
-		delete(i.failedBlocks, task.BlockNumber)
-		i.failedBlocksMu.Unlock()
-
-		// Update the last indexed block
-		i.updateLastIndexedBlock(task.BlockNumber)
+			// Update the last indexed block
+			i.updateLastIndexedBlock(task.BlockNumber)
+		}(task)
 	}
 
 	logger.Info("Block processing worker exited",
