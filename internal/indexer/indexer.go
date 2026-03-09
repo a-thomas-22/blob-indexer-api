@@ -1299,14 +1299,6 @@ func (i *Indexer) GetBlobCounts(ctx context.Context) (confirmedCount, pendingCou
 }
 
 // GetTopBlobUsers gets the top blob users by number of blobs for this network
-func (i *Indexer) GetTopBlobUsers(ctx context.Context, limit int) ([]struct {
-	Address       string    `db:"from_address"`
-	Name          string    `db:"user_attribution"`
-	BlobCount     int       `db:"blob_count"`
-	TotalCostETH  string    `db:"total_cost_eth"`
-	LastTimestamp time.Time `db:"last_timestamp"`
-}, error) {
-	// This is a simplified implementation
-	// In a real implementation, you would filter by network ID
+func (i *Indexer) GetTopBlobUsers(ctx context.Context, limit int) ([]models.BlobUserStats, error) {
 	return i.attribution.GetTopBlobUsers(ctx, limit)
 }

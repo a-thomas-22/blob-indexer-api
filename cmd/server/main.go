@@ -44,7 +44,6 @@ import (
 	"go.uber.org/zap"
 
 	_ "github.com/a-thomas-22/blob-indexer-api/docs"
-
 	"github.com/a-thomas-22/blob-indexer-api/internal/api"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
@@ -56,9 +55,7 @@ import (
 func main() {
 	// Initialize logger
 	logger.Initialize()
-	defer func() {
-		_ = logger.Sync()
-	}()
+	defer func() { _ = logger.Sync() }()
 
 	// Load configuration
 	cfg, err := config.Load()
@@ -88,7 +85,8 @@ func main() {
 	}
 
 	// Create indexers for each enabled network
-	indexers := make(map[int]*indexer.Indexer)
+	indexerProviders := make(map[int]api.IndexerProvider)
+	concreteIndexers := make([]*indexer.Indexer, 0, len(enabledNetworks))
 	for _, network := range enabledNetworks {
 		// Initialize Ethereum client for this network
 		ethClient, err := ethereum.NewClient(network.RpcURL)
@@ -100,7 +98,8 @@ func main() {
 
 		// Create indexer for this network
 		idx := indexer.New(ctx, database, ethClient, cfg, network)
-		indexers[network.ChainID] = idx
+		indexerProviders[network.ChainID] = idx
+		concreteIndexers = append(concreteIndexers, idx)
 
 		// Start indexing in background
 		go func(networkName string, idx *indexer.Indexer) {
@@ -115,11 +114,11 @@ func main() {
 	}
 
 	// Initialize API server
-	router := api.NewRouter(database, indexers, cfg)
+	router := api.NewRouter(database, indexerProviders, cfg)
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:           router,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	// Channel to listen for shutdown signals
@@ -147,8 +146,12 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer shutdownCancel()
 
-	// Step 1: Stop HTTP server (stop accepting new requests, drain in-flight)
-	logger.Info("Shutting down HTTP server...")
+	// Stop all indexers
+	for _, idx := range concreteIndexers {
+		idx.Stop()
+	}
+
+	// Shutdown the server
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("Server shutdown error", zap.Error(err))
 	}
