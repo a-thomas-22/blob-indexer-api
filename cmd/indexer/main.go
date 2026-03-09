@@ -77,7 +77,6 @@ func main() {
 				logger.Error("Indexer error",
 					zap.String("network", networkName),
 					zap.Error(err))
-				cancel()
 			}
 		}(network.Name, idx)
 	}
