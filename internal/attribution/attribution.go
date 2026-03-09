@@ -5,11 +5,11 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
-	"github.com/lib/pq"
-	"go.uber.org/zap"
 )
 
 // Service handles attribution of blob transactions to known users
@@ -195,26 +195,14 @@ func (s *Service) GetKnownUsers(ctx context.Context) ([]models.BlobUser, error) 
 }
 
 // GetTopBlobUsers gets the top blob users by number of blobs
-func (s *Service) GetTopBlobUsers(ctx context.Context, limit int) ([]struct {
-	Address       string    `db:"from_address"`
-	Name          string    `db:"user_attribution"`
-	BlobCount     int       `db:"blob_count"`
-	TotalCostETH  string    `db:"total_cost_eth"`
-	LastTimestamp time.Time `db:"last_timestamp"`
-}, error) {
-	var result []struct {
-		Address       string    `db:"from_address"`
-		Name          string    `db:"user_attribution"`
-		BlobCount     int       `db:"blob_count"`
-		TotalCostETH  string    `db:"total_cost_eth"`
-		LastTimestamp time.Time `db:"last_timestamp"`
-	}
+func (s *Service) GetTopBlobUsers(ctx context.Context, limit int) ([]models.BlobUserStats, error) {
+	var result []models.BlobUserStats
 
 	query := `
-		SELECT 
-			from_address, 
-			user_attribution, 
-			COUNT(*) as blob_count, 
+		SELECT
+			from_address,
+			user_attribution,
+			COUNT(*) as blob_count,
 			SUM(total_cost_eth::numeric) as total_cost_eth,
 			MAX(timestamp) as last_timestamp
 		FROM blobs
