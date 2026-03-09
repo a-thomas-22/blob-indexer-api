@@ -954,6 +954,49 @@ func TestGetTopBlobUsers_ExcessiveLimit(t *testing.T) {
 	}
 }
 
+func TestGetTopBlobUsers_CacheHit(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(_ context.Context, _ interface{}, _ string, _ ...interface{}) error {
+			t.Fatal("DB should not be called on cache hit")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	cacheKey := fmt.Sprintf("%d:%d:%d", 42, 10, 0)
+	a.topUsersCache[cacheKey] = topUsersCacheEntry{
+		response:  []UserResponse{{Address: "0xcached"}},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetBlobStats_CacheHit(t *testing.T) {
+	db := &mockDB{
+		getFn: func(_ context.Context, _ interface{}, _ string, _ ...interface{}) error {
+			t.Fatal("DB should not be called on cache hit")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	a.statsCache[42] = statsCacheEntry{
+		response:  StatsResponse{NetworkID: 42, TotalBlobs: 5},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobStats(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
 func TestDevDatabase_PartialErrors(t *testing.T) {
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
