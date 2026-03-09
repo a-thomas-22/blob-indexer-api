@@ -68,11 +68,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	database, err := db.Connect(ctx, cfg.Database.URL)
+	database, err := db.Connect(ctx, cfg.Database)
 	if err != nil {
 		logger.Fatal("Failed to connect to database", zap.Error(err))
 	}
-	defer database.DB.Close()
 
 	if err := db.RunMigrations(cfg.Database.URL); err != nil {
 		logger.Fatal("Failed to run database migrations", zap.Error(err))
@@ -103,12 +102,14 @@ func main() {
 		logger.Info("Context canceled")
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer shutdownCancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("Server shutdown error", zap.Error(err))
 	}
+	logger.Info("HTTP server shutdown complete")
 
+	database.DB.Close()
 	logger.Info("API server shutdown complete")
 }

@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/alecthomas/blob-indexer-api/internal/config"
-	"github.com/alecthomas/blob-indexer-api/internal/db"
-	"github.com/alecthomas/blob-indexer-api/internal/db/models"
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
+	"github.com/a-thomas-22/blob-indexer-api/internal/db"
+	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 )
 
 // Known rollups and their addresses
@@ -48,21 +48,24 @@ var knownRollups = []struct {
 
 func main() {
 	// Load configuration
-	cfg := &config.Config{
-		DatabaseURL:    os.Getenv("DB_URL"),
-		IndexerVersion: "test-data-generator",
+	dbURL := os.Getenv("DB_URL")
+	if dbURL == "" {
+		dbURL = "postgres://postgres:postgres@localhost:5432/blobindexer?sslmode=disable"
 	}
 
-	// Use default database URL if not provided
-	if cfg.DatabaseURL == "" {
-		cfg.DatabaseURL = "postgres://postgres:postgres@localhost:5432/blobindexer?sslmode=disable"
+	dbCfg := config.DatabaseConfig{
+		URL:             dbURL,
+		MaxOpenConns:    25,
+		MaxIdleConns:    10,
+		ConnMaxLifetime: 5 * time.Minute,
+		ConnMaxIdleTime: 1 * time.Minute,
 	}
 
 	// Create context
 	ctx := context.Background()
 
 	// Connect to database
-	database, err := db.Connect(ctx, cfg.DatabaseURL)
+	database, err := db.Connect(ctx, dbCfg)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}

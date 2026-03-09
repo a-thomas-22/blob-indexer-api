@@ -38,17 +38,8 @@ const (
 	// DefaultWorkerCount is the default number of workers for parallel processing
 	DefaultWorkerCount = 4
 
-	// maxBlockRetries is the number of inline retries per block before tracking as failed
-	maxBlockRetries = 3
-
 	// maxGapScanRetries is the total failure count before a block is considered permanently failed
 	maxGapScanRetries = 10
-
-	// gapScanInterval is how often the gap scanner re-queues failed blocks
-	gapScanInterval = 5 * time.Minute
-
-	// maxReorgDepth is the maximum number of blocks to walk back during reorg detection
-	maxReorgDepth = 64
 )
 
 // errReorgDetected is returned when a chain reorganization is detected and handled
@@ -70,6 +61,9 @@ type Indexer struct {
 	pollingInterval        time.Duration
 	mempoolPollingInterval time.Duration
 	workerCount            int
+	maxBlockRetries        int
+	gapScanInterval        time.Duration
+	maxReorgDepth          int
 	ctx                    context.Context
 	cancel                 context.CancelFunc
 	wg                     sync.WaitGroup
@@ -93,9 +87,12 @@ func New(ctx context.Context, db *db.DB, ethClient *ethereum.Client, cfg *config
 	attributionSvc := attribution.NewService(db)
 	attributionSvc.SetNetworkID(network.ChainID)
 
-	// Determine the number of workers based on CPU cores
-	workerCount := DefaultWorkerCount
-	if runtime.NumCPU() > 2 {
+	// Determine the number of workers: use config value, or fall back to CPU-based heuristic
+	workerCount := cfg.Indexer.WorkerCount
+	if workerCount <= 0 {
+		workerCount = DefaultWorkerCount
+	}
+	if runtime.NumCPU() > 2 && cfg.Indexer.WorkerCount == DefaultWorkerCount {
 		workerCount = runtime.NumCPU() - 1 // Leave one core free
 	}
 
@@ -112,6 +109,9 @@ func New(ctx context.Context, db *db.DB, ethClient *ethereum.Client, cfg *config
 		pollingInterval:        cfg.Indexer.PollingInterval,
 		mempoolPollingInterval: cfg.Indexer.MempoolPollingInterval,
 		workerCount:            workerCount,
+		maxBlockRetries:        cfg.Indexer.MaxBlockRetries,
+		gapScanInterval:        cfg.Indexer.GapScanInterval,
+		maxReorgDepth:          cfg.Indexer.MaxReorgDepth,
 		ctx:                    indexerCtx,
 		cancel:                 cancel,
 		indexerVersion:         cfg.Indexer.Version,
@@ -333,7 +333,7 @@ func (i *Indexer) blockProcessingWorker(workerID int) {
 
 		// Process the block with inline retries and exponential backoff
 		var lastErr error
-		for attempt := 0; attempt <= maxBlockRetries; attempt++ {
+		for attempt := 0; attempt <= i.maxBlockRetries; attempt++ {
 			if attempt > 0 {
 				delay := time.Duration(1<<uint(attempt-1)) * time.Second
 				select {
@@ -354,12 +354,12 @@ func (i *Indexer) blockProcessingWorker(workerID int) {
 				break
 			}
 
-			if attempt < maxBlockRetries {
+			if attempt < i.maxBlockRetries {
 				logger.Warn("Block processing failed, retrying",
 					zap.String("network", i.network.Name),
 					zap.Uint64("block", task.BlockNumber),
 					zap.Int("attempt", attempt+1),
-					zap.Int("max_retries", maxBlockRetries),
+					zap.Int("max_retries", i.maxBlockRetries),
 					zap.Error(lastErr))
 			}
 		}
@@ -368,7 +368,7 @@ func (i *Indexer) blockProcessingWorker(workerID int) {
 			logger.Error("Block processing failed after all retries",
 				zap.String("network", i.network.Name),
 				zap.Uint64("block", task.BlockNumber),
-				zap.Int("retries", maxBlockRetries),
+				zap.Int("retries", i.maxBlockRetries),
 				zap.Error(lastErr))
 			i.trackFailedBlock(task.BlockNumber)
 			continue
@@ -743,12 +743,12 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		return fmt.Errorf("failed to insert block data for block %d: %w", blockNumber, err)
 	}
 
-	// Update user last seen timestamps (non-critical, don't fail the block)
-	for _, addr := range attributedUsers {
-		if err := i.attribution.UpdateUserLastSeen(i.ctx, addr); err != nil {
-			logger.Error("Failed to update user last seen",
+	// Update user last seen timestamps in batch (non-critical, don't fail the block)
+	if len(attributedUsers) > 0 {
+		if err := i.attribution.BatchUpdateUserLastSeen(i.ctx, attributedUsers); err != nil {
+			logger.Error("Failed to batch update user last seen",
 				zap.String("network", i.network.Name),
-				zap.String("address", addr),
+				zap.Int("address_count", len(attributedUsers)),
 				zap.Error(err))
 		}
 	}
@@ -790,7 +790,7 @@ func (i *Indexer) checkForReorg(blockNumber uint64, block *types.Block) error {
 func (i *Indexer) handleReorg(fromBlock uint64) error {
 	// Walk back to find the fork point
 	forkBlock := fromBlock - 1
-	for depth := 0; depth < maxReorgDepth && forkBlock > 0; depth++ {
+	for depth := 0; depth < i.maxReorgDepth && forkBlock > 0; depth++ {
 		block, err := i.ethClient.GetBlockByNumber(i.ctx, forkBlock)
 		if err != nil {
 			return fmt.Errorf("failed to get block %d during reorg scan: %w", forkBlock, err)
@@ -1208,7 +1208,7 @@ func (i *Indexer) Reindex(startBlock, endBlock uint64) error {
 func (i *Indexer) runGapScanner() {
 	logger.Info("Gap scanner starting", zap.String("network", i.network.Name))
 
-	ticker := time.NewTicker(gapScanInterval)
+	ticker := time.NewTicker(i.gapScanInterval)
 	defer ticker.Stop()
 
 	for {

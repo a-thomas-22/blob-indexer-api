@@ -25,6 +25,9 @@ func newTestIndexer() *Indexer {
 			BatchSize:              50,
 			PollingInterval:        10 * time.Second,
 			MempoolPollingInterval: 20 * time.Second,
+			MaxBlockRetries:        3,
+			GapScanInterval:        5 * time.Minute,
+			MaxReorgDepth:          64,
 		},
 	}
 	network := config.NetworkConfig{
@@ -44,6 +47,9 @@ func newTestIndexer() *Indexer {
 		pollingInterval:        cfg.Indexer.PollingInterval,
 		mempoolPollingInterval: cfg.Indexer.MempoolPollingInterval,
 		workerCount:            DefaultWorkerCount,
+		maxBlockRetries:        cfg.Indexer.MaxBlockRetries,
+		gapScanInterval:        cfg.Indexer.GapScanInterval,
+		maxReorgDepth:          cfg.Indexer.MaxReorgDepth,
 		ctx:                    ctx,
 		cancel:                 cancel,
 		indexerVersion:         cfg.Indexer.Version,
@@ -398,17 +404,19 @@ func TestErrReorgDetected(t *testing.T) {
 }
 
 func TestInternalConstants(t *testing.T) {
-	if maxBlockRetries != 3 {
-		t.Errorf("expected maxBlockRetries=3, got %d", maxBlockRetries)
+	idx := newTestIndexer()
+
+	if idx.maxBlockRetries != 3 {
+		t.Errorf("expected maxBlockRetries=3, got %d", idx.maxBlockRetries)
 	}
 	if maxGapScanRetries != 10 {
 		t.Errorf("expected maxGapScanRetries=10, got %d", maxGapScanRetries)
 	}
-	if gapScanInterval != 5*time.Minute {
-		t.Errorf("expected gapScanInterval=5m, got %s", gapScanInterval)
+	if idx.gapScanInterval != 5*time.Minute {
+		t.Errorf("expected gapScanInterval=5m, got %s", idx.gapScanInterval)
 	}
-	if maxReorgDepth != 64 {
-		t.Errorf("expected maxReorgDepth=64, got %d", maxReorgDepth)
+	if idx.maxReorgDepth != 64 {
+		t.Errorf("expected maxReorgDepth=64, got %d", idx.maxReorgDepth)
 	}
 }
 

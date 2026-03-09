@@ -123,3 +123,14 @@ local_resource(
     'echo "Development dashboard available at: http://localhost:' + port + '/api/dev/dashboard"',
     labels=['dev-tools'],
 )
+
+# === Frontend (blob-flow) ===
+# Runs the Next.js frontend locally with API proxy to the backend.
+# Clone https://github.com/douvy/blob-flow as a sibling directory.
+local_resource(
+    'blob-flow',
+    serve_cmd='cd ../blob-flow && npm install && npm run dev',
+    deps=['../blob-flow/src', '../blob-flow/package.json'],
+    resource_deps=['blob-indexer'],
+    labels=['frontend'],
+)

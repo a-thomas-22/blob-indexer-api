@@ -31,13 +31,18 @@ type NetworkConfig struct {
 
 // DatabaseConfig holds the database configuration
 type DatabaseConfig struct {
-	URL string `mapstructure:"url" yaml:"url"`
+	URL             string        `mapstructure:"url" yaml:"url"`
+	MaxOpenConns    int           `mapstructure:"max_open_conns" yaml:"max_open_conns"`
+	MaxIdleConns    int           `mapstructure:"max_idle_conns" yaml:"max_idle_conns"`
+	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime" yaml:"conn_max_lifetime"`
+	ConnMaxIdleTime time.Duration `mapstructure:"conn_max_idle_time" yaml:"conn_max_idle_time"`
 }
 
 // ServerConfig holds the server configuration
 type ServerConfig struct {
-	Port    int  `mapstructure:"port" yaml:"port"`
-	DevMode bool `mapstructure:"dev_mode" yaml:"dev_mode"`
+	Port            int           `mapstructure:"port" yaml:"port"`
+	DevMode         bool          `mapstructure:"dev_mode" yaml:"dev_mode"`
+	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout" yaml:"shutdown_timeout"`
 }
 
 // LoggingConfig holds the logging configuration
@@ -52,6 +57,10 @@ type IndexerConfig struct {
 	BatchSize              int           `mapstructure:"batch_size" yaml:"batch_size"`
 	PollingInterval        time.Duration `mapstructure:"polling_interval" yaml:"polling_interval"`
 	MempoolPollingInterval time.Duration `mapstructure:"mempool_polling_interval" yaml:"mempool_polling_interval"`
+	WorkerCount            int           `mapstructure:"worker_count" yaml:"worker_count"`
+	MaxBlockRetries        int           `mapstructure:"max_block_retries" yaml:"max_block_retries"`
+	GapScanInterval        time.Duration `mapstructure:"gap_scan_interval" yaml:"gap_scan_interval"`
+	MaxReorgDepth          int           `mapstructure:"max_reorg_depth" yaml:"max_reorg_depth"`
 }
 
 // Config holds the application configuration
@@ -84,12 +93,21 @@ func loadConfig() (*Config, error) {
 	// Set default values
 	v.SetDefault("server.port", 8080)
 	v.SetDefault("server.dev_mode", false)
+	v.SetDefault("server.shutdown_timeout", "15s")
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")
+	v.SetDefault("database.max_open_conns", 25)
+	v.SetDefault("database.max_idle_conns", 10)
+	v.SetDefault("database.conn_max_lifetime", "5m")
+	v.SetDefault("database.conn_max_idle_time", "1m")
 	v.SetDefault("indexer.version", "v1.0.0")
 	v.SetDefault("indexer.batch_size", 100)
 	v.SetDefault("indexer.polling_interval", "15s")
 	v.SetDefault("indexer.mempool_polling_interval", "30s")
+	v.SetDefault("indexer.worker_count", 4)
+	v.SetDefault("indexer.max_block_retries", 3)
+	v.SetDefault("indexer.gap_scan_interval", "5m")
+	v.SetDefault("indexer.max_reorg_depth", 64)
 	v.SetDefault("networks", []NetworkConfig{})
 
 	// Configure Viper to read from config file
@@ -268,6 +286,30 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("invalid mempool_polling_interval: %w", err)
 	}
 	cfg.Indexer.MempoolPollingInterval = mempoolPollingInterval
+
+	shutdownTimeout, err := time.ParseDuration(v.GetString("server.shutdown_timeout"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid shutdown_timeout: %w", err)
+	}
+	cfg.Server.ShutdownTimeout = shutdownTimeout
+
+	connMaxLifetime, err := time.ParseDuration(v.GetString("database.conn_max_lifetime"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid conn_max_lifetime: %w", err)
+	}
+	cfg.Database.ConnMaxLifetime = connMaxLifetime
+
+	connMaxIdleTime, err := time.ParseDuration(v.GetString("database.conn_max_idle_time"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid conn_max_idle_time: %w", err)
+	}
+	cfg.Database.ConnMaxIdleTime = connMaxIdleTime
+
+	gapScanInterval, err := time.ParseDuration(v.GetString("indexer.gap_scan_interval"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid gap_scan_interval: %w", err)
+	}
+	cfg.Indexer.GapScanInterval = gapScanInterval
 
 	return &cfg, nil
 }

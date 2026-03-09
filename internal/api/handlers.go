@@ -740,6 +740,21 @@ func (a *API) DevIndexers(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// allowedTables is a whitelist of table names that can be queried in the DevDatabase handler.
+// This prevents SQL injection by ensuring only known table names are used in queries.
+var allowedTables = map[string]bool{
+	"networks":         true,
+	"blobs":            true,
+	"blob_users":       true,
+	"indexer_metadata": true,
+	"indexed_blocks":   true,
+}
+
+// isAllowedTable checks whether a table name is in the whitelist of allowed tables.
+func isAllowedTable(table string) bool {
+	return allowedTables[table]
+}
+
 // DevDatabase godoc
 // @Summary Get database statistics
 // @Description Retrieve statistics about the database
@@ -747,6 +762,7 @@ func (a *API) DevIndexers(w http.ResponseWriter, r *http.Request) {
 // @Accept json
 // @Produce json
 // @Success 200 {object} Response{data=DatabaseStats} "Success"
+// @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
 // @Router /dev/database [get]
 func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
@@ -756,6 +772,12 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 	tables := []string{"blobs", "blob_users", "networks", "indexer_metadata"}
 	tableStats := make([]TableStat, 0, len(tables))
 	for _, table := range tables {
+		// Validate the table name against the whitelist to prevent SQL injection
+		if !isAllowedTable(table) {
+			a.respondError(w, http.StatusBadRequest, fmt.Sprintf("Invalid table name: %s", table))
+			return
+		}
+
 		// Get row count
 		var rowCount int
 		query := fmt.Sprintf("SELECT COUNT(*) FROM %s", table)

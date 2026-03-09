@@ -101,8 +101,10 @@ func NewRouter(db DBProvider, cfg *config.Config) http.Handler {
 		// Status endpoint
 		r.Get("/status", api.GetIndexerStatus)
 
-		// Development endpoints
+		// Development endpoints — all gated behind dev mode
 		r.Route("/dev", func(r chi.Router) {
+			r.Use(DevModeMiddleware(cfg.Server.DevMode))
+
 			r.Get("/metrics", api.DevMetrics)
 			r.Get("/indexers", api.DevIndexers)
 			r.Get("/database", api.DevDatabase)
