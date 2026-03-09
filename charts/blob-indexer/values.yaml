@@ -61,6 +61,15 @@ containerSecurityContext:
     drop:
       - ALL
 
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false
+
+networkPolicy:
+  enabled: true
+  dbPort: 5432
+
 # ConfigMap creation toggle. Set to false when config is managed externally (e.g., Tilt).
 configMap:
   create: true
