@@ -1304,15 +1304,15 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 		}
 	})
 
-	t.Run("processPendingTransactions latest block error", func(t *testing.T) {
+	t.Run("processPendingTransactions pending tx fetch error", func(t *testing.T) {
 		idx := newTestIndexer()
 		ethClient, rpcSvc := newMockEthClient(t, 10)
 		rpcSvc.failBlock = true
 		idx.ethClient = ethClient
 
 		err := idx.processPendingTransactions()
-		if err == nil || !strings.Contains(err.Error(), "failed to get latest block number") {
-			t.Fatalf("expected latest block error, got %v", err)
+		if err == nil || !strings.Contains(err.Error(), "failed to get pending transactions") {
+			t.Fatalf("expected pending tx fetch error, got %v", err)
 		}
 	})
 
@@ -1502,15 +1502,15 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 		}
 	})
 
-	t.Run("processPendingTransactions latest block error", func(t *testing.T) {
+	t.Run("processPendingTransactions pending tx fetch error", func(t *testing.T) {
 		idx := newTestIndexer()
 		client, ethSvc, _ := newMockEthClientWithTxPool(t, 10)
 		idx.ethClient = client
-		ethSvc.failBlock = true // causes GetBlockByNumber to fail
+		ethSvc.failBlock = true // causes pending block lookup to fail
 
 		err := idx.processPendingTransactions()
-		if err == nil || !strings.Contains(err.Error(), "failed to get latest block") {
-			t.Fatalf("expected latest block error, got %v", err)
+		if err == nil || !strings.Contains(err.Error(), "failed to get pending transactions") {
+			t.Fatalf("expected pending tx fetch error, got %v", err)
 		}
 	})
 }
