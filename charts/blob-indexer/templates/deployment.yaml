@@ -20,6 +20,9 @@ spec:
         {{- if .Values.configMap.create }}
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- end }}
+        {{- if .Values.databaseSecret.create }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -35,6 +38,11 @@ spec:
           env:
             - name: CONFIG_PATH
               value: /etc/config/config.yaml
+            - name: DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "blob-indexer.fullname" . }}-db
+                  key: DB_URL
           volumeMounts:
             - name: config-volume
               mountPath: /etc/config
@@ -79,6 +87,9 @@ spec:
         {{- if .Values.configMap.create }}
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- end }}
+        {{- if .Values.databaseSecret.create }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -90,6 +101,11 @@ spec:
           env:
             - name: CONFIG_PATH
               value: /etc/config/config.yaml
+            - name: DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "blob-indexer.fullname" . }}-db
+                  key: DB_URL
           volumeMounts:
             - name: config-volume
               mountPath: /etc/config
