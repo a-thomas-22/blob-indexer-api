@@ -79,7 +79,7 @@ func calculateBlobMetrics(tx *types.Transaction, blobBaseFee *big.Int) blobMetri
 	blobGasUsedInt := int64(blobGasUsed)
 
 	return blobMetrics{
-		blobSizeBytes:     int64(blobGasUsed * 128), // Approximate size
+		blobSizeBytes:     int64(blobGasUsed * bytesPerBlobGasUnit), // Approximate size
 		baseFeePerBlobGas: blobBaseFee.String(),
 		tipPerBlobGas:     tipPerBlobGas.String(),
 		totalCostETH:      totalCost.String(),

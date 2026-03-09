@@ -49,3 +49,14 @@ Selector labels
 app.kubernetes.io/name: {{ include "blob-indexer.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
+
+{{/*
+Service account name
+*/}}
+{{- define "blob-indexer.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (printf "%s-sa" (include "blob-indexer.fullname" .)) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}

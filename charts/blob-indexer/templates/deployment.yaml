@@ -24,6 +24,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      serviceAccountName: {{ include "blob-indexer.serviceAccountName" . }}
       {{- with .Values.podSecurityContext }}
       securityContext:
       {{- with .Values.podSecurityContext }}
@@ -93,6 +94,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      serviceAccountName: {{ include "blob-indexer.serviceAccountName" . }}
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
