@@ -16,7 +16,7 @@ const RequestIDKey contextKey = "requestID"
 
 var (
 	// Global logger instance
-	log *zap.Logger
+	log = zap.NewNop()
 )
 
 // Log levels mapped from string to zapcore.Level
