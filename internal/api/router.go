@@ -6,15 +6,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/a-thomas-22/blob-indexer-api/internal/config"
-	"github.com/a-thomas-22/blob-indexer-api/internal/db"
-	"github.com/a-thomas-22/blob-indexer-api/internal/indexer"
-	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	httpSwagger "github.com/swaggo/http-swagger"
 	"go.uber.org/zap"
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
+	"github.com/a-thomas-22/blob-indexer-api/internal/db"
+	"github.com/a-thomas-22/blob-indexer-api/internal/indexer"
+	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
 // API holds the API dependencies
@@ -159,7 +160,7 @@ func (a *API) getNetworkFromRequest(r *http.Request) (*indexer.Indexer, error) {
 
 // GetNetworks returns the list of available networks
 func (a *API) GetNetworks(w http.ResponseWriter, r *http.Request) {
-	var networks []NetworkResponse
+	networks := make([]NetworkResponse, 0, len(a.indexers))
 	for _, idx := range a.indexers {
 		network := idx.GetNetworkInfo()
 		networks = append(networks, NetworkResponse{
