@@ -265,7 +265,6 @@ blob-indexer-api/
 ├── Makefile                    # Build, test, and deployment tasks
 ├── Tiltfile                    # Tilt configuration for local development
 ├── tilt-config.yaml            # Tilt settings
-├── railway-config.yaml         # Railway deployment config
 ├── go.mod                      # Go module definition
 └── README.md                   # Project documentation
 ```
