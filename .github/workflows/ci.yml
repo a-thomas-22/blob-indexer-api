@@ -125,7 +125,7 @@ jobs:
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
-      - name: Run govulncheck
+      - name: Run govulncheck (fail on reachable vulnerabilities)
         run: govulncheck ./...
 
   docker:

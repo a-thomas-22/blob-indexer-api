@@ -60,7 +60,7 @@ func TestInitialize_AllLevels(t *testing.T) {
 func TestWithContext_WithRequestID(t *testing.T) {
 	Initialize()
 
-	ctx := context.WithValue(context.Background(), "requestID", "test-req-123")
+	ctx := context.WithValue(context.Background(), RequestIDKey, "test-req-123")
 	l := WithContext(ctx)
 	if l == nil {
 		t.Fatal("expected non-nil logger")
