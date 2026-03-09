@@ -189,9 +189,9 @@ jobs:
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
-      - name: Run govulncheck (fail on reachable vulnerabilities)
+      - name: Run govulncheck
         run: govulncheck ./...
-        continue-on-error: true # go-ethereum has known CVEs; track but don't block
+        continue-on-error: true # Go stdlib vulns require Go version upgrade; track but don't block
 
   docker:
     name: Docker Build
@@ -204,6 +204,33 @@ jobs:
         run: |
           docker build -f Dockerfile.api -t blob-indexer-api:test .
           docker build -f Dockerfile.indexer -t blob-indexer:test .
+
+  docker-scan:
+    name: Container Image Scan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    needs: docker
+    strategy:
+      matrix:
+        include:
+          - image: blob-indexer-api:test
+            dockerfile: Dockerfile.api
+          - image: blob-indexer:test
+            dockerfile: Dockerfile.indexer
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f ${{ matrix.dockerfile }} -t ${{ matrix.image }} .
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ matrix.image }}
+          format: table
+          exit-code: 1
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
 
   mod-verify:
     name: Module Verification
@@ -219,3 +246,22 @@ jobs:
         run: |
           go mod download
           go mod verify
+
+  mod-tidy:
+    name: Module Tidy Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Check go mod tidy
+        run: |
+          go mod tidy
+          if [ -n "$(git diff -- go.mod go.sum)" ]; then
+            echo "::error::go.mod or go.sum is not tidy. Run 'go mod tidy' and commit the changes."
+            git diff -- go.mod go.sum
+            exit 1
+          fi
