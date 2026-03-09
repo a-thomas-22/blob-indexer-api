@@ -1,4 +1,4 @@
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 
@@ -12,11 +12,13 @@ COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags "-X main.version=${VERSION}" -o blob-indexer-api ./cmd/api
 
-FROM alpine:latest
+FROM alpine:3.21
 
 WORKDIR /app
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -S appgroup \
+    && adduser -S appuser -G appgroup
 
 COPY --from=builder /app/blob-indexer-api .
 COPY --from=builder /app/internal/db/migrations ./internal/db/migrations
@@ -24,6 +26,13 @@ COPY --from=builder /app/internal/db/migrations ./internal/db/migrations
 # Copy configuration files
 COPY --from=builder /app/config.yaml ./
 
+RUN chown -R appuser:appgroup /app
+
+USER appuser
+
 EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -qO- http://localhost:8080/api/status || exit 1
 
 CMD ["./blob-indexer-api"]
