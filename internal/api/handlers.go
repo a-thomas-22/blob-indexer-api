@@ -165,6 +165,7 @@ func (a *API) respondError(w http.ResponseWriter, status int, message string) {
 	})
 }
 
+// respondSuccess responds with a 200 OK success response
 func (a *API) respondSuccess(w http.ResponseWriter, data interface{}) {
 	a.respondJSON(w, http.StatusOK, Response{
 		Success: true,
