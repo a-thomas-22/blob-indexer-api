@@ -150,7 +150,6 @@ func (a *API) respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
 		logger.Error("Failed to encode JSON response", zap.Error(err))
-		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
 
