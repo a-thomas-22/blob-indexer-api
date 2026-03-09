@@ -62,6 +62,15 @@ type IndexedBlock struct {
 	IndexedAt   time.Time `db:"indexed_at"`
 }
 
+// BlobUserStats holds aggregated blob user statistics returned by queries.
+type BlobUserStats struct {
+	Address       string    `db:"from_address" json:"address"`
+	Name          string    `db:"user_attribution" json:"name"`
+	BlobCount     int       `db:"blob_count" json:"blob_count"`
+	TotalCostETH  string    `db:"total_cost_eth" json:"total_cost_eth"`
+	LastTimestamp time.Time `db:"last_timestamp" json:"last_timestamp"`
+}
+
 // Common metadata keys
 const (
 	MetadataLastIndexedBlock = "last_indexed_block"

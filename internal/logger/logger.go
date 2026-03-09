@@ -8,9 +8,15 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+// contextKey is a custom type for context keys to avoid SA1029.
+type contextKey string
+
+// RequestIDKey is the context key used to store and retrieve request IDs.
+const RequestIDKey contextKey = "requestID"
+
 var (
 	// Global logger instance
-	log *zap.Logger
+	log = zap.NewNop()
 )
 
 // Log levels mapped from string to zapcore.Level
@@ -88,7 +94,7 @@ func Fatal(msg string, fields ...zap.Field) {
 // WithContext returns a logger with request context
 func WithContext(ctx context.Context) *zap.Logger {
 	// Extract request ID or other context values
-	if requestID, ok := ctx.Value("requestID").(string); ok {
+	if requestID, ok := ctx.Value(RequestIDKey).(string); ok {
 		return log.With(zap.String("request_id", requestID))
 	}
 	return log

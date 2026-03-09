@@ -15,37 +15,55 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 - Support full and partial reindexing safely after version changes
 - Support multiple Ethereum networks simultaneously (e.g., mainnet, Sepolia)
 - Configuration-based RPC URLs (not stored in database for flexibility)
+- Rate limiting (100 req/s per IP with burst of 200)
+- Chain reorganization detection via block hash tracking
+- Structured JSON logging with configurable levels
+- Swagger/OpenAPI documentation
+- Development dashboard with metrics, indexer status, and database stats
 
 ## Tech Stack
 
-- Language: Go (Golang)
+- Language: Go 1.24
 - HTTP Framework: Chi
-- Database: PostgreSQL
+- Database: PostgreSQL (with sqlx query builder)
 - Ethereum Client: go-ethereum (ethclient)
+- Configuration: Viper (YAML + environment variables)
+- Logging: Zap (structured JSON)
 - Migrations: golang-migrate
-- Deployment: Docker container, Kubernetes with Helm, Tilt for development
+- API Docs: Swagger/OpenAPI (swag + http-swagger)
+- Deployment: Docker, Kubernetes with Helm, Tilt for development
 
 ## API Endpoints
 
 ### Network Endpoints
-- `/api/networks` - List all available networks
-- `/api/networks/{chainId}` - Get status of a specific network
+- `GET /api/networks` - List all available networks
+- `GET /api/networks/{chainId}` - Get status of a specific network
 
 ### Blob Endpoints
-- `/api/blob/latest?network=mainnet` - Fetch latest blobs from recent blocks
-- `/api/blob/mempool?network=sepolia` - Fetch pending (unconfirmed) blob transactions
-- `/api/blob/{txHash}?network=mainnet` - Fetch a specific blob by transaction hash
+- `GET /api/blob/latest?network=mainnet&limit=10` - Fetch latest blobs from recent blocks
+- `GET /api/blob/mempool?network=mainnet&limit=10` - Fetch pending (unconfirmed) blob transactions
+- `GET /api/blob/{txHash}?network=mainnet` - Fetch a specific blob by transaction hash
 
 ### User Endpoints
-- `/api/users?network=mainnet` - Top blob users by blobs submitted
+- `GET /api/users?network=mainnet&limit=10` - Top blob users by blobs submitted
 
 ### Stats Endpoints
-- `/api/stats?network=mainnet` - Historical blob cost trends, base fee history
+- `GET /api/stats?network=mainnet` - Historical blob cost trends, base fee history
 
 ### Status Endpoints
-- `/api/status?network=mainnet` - Indexer status
+- `GET /api/status?network=mainnet` - Indexer status
 
-All endpoints accept an optional `network` query parameter to specify which network to query. If not provided, the first enabled network is used.
+### Development Endpoints
+These endpoints are always available for debugging and monitoring:
+- `GET /api/dev/metrics` - System-wide metrics (memory, goroutines, uptime)
+- `GET /api/dev/indexers` - Per-network indexer status
+- `GET /api/dev/database` - Database statistics
+- `GET /api/dev/logs` - Log entries
+- `GET /api/dev/queries` - Database query stats
+- `GET /api/dev/dashboard` - HTML development dashboard
+- `POST /api/dev/reindex` - Trigger block reindexing (requires `dev_mode: true`)
+
+All endpoints accept an optional `network` query parameter (name or chain ID) to specify which network to query. If not provided, the first enabled network is used.
 
 ## API Documentation
 
@@ -103,7 +121,7 @@ networks:
     rpc_url: "https://mainnet.infura.io/v3/your-key"
     start_block: "LATEST-1000"
     enabled: true
-    
+
   - name: "sepolia"
     chain_id: 11155111
     rpc_url: "https://sepolia.infura.io/v3/your-key"
@@ -131,6 +149,7 @@ Alternatively, you can use environment variables:
 
 For backward compatibility, you can configure a single network using:
 - `RPC_URL` - Ethereum node endpoint
+- `ETH_RPC_URL` - Ethereum node endpoint (takes precedence over `RPC_URL`)
 - `START_BLOCK` - Starting block for indexing (e.g., "LATEST-1000")
 
 For multiple networks, use the following pattern:
@@ -148,7 +167,7 @@ NETWORK_SEPOLIA_ENABLED=true
 ### Running Locally with Tilt
 
 1. Install Tilt: https://docs.tilt.dev/install.html
-2. Create a `.env` file with your environment variables:
+2. Create a `.env` file with your environment variables (see `.env.example`):
    ```
    ETH_RPC_URL=https://mainnet.infura.io/v3/your-api-key
    START_BLOCK=LATEST-1000
@@ -158,6 +177,26 @@ NETWORK_SEPOLIA_ENABLED=true
    tilt up
    ```
 4. Access the API at http://localhost:8080/api
+
+### Makefile Targets
+
+```bash
+make build          # Build the binary
+make run            # Build and run locally
+make test           # Run all tests
+make clean          # Remove built binary
+make deps           # Download and tidy Go module dependencies
+make docker-build   # Build Docker image
+make docker-run     # Run Docker container
+make tilt-up        # Start Tilt development environment
+make seed-data      # Seed test data (runs cmd/testdata)
+make swagger        # Generate Swagger/OpenAPI documentation
+make db-migrate     # Run database migrations
+make db-rollback    # Rollback one database migration
+make helm-install   # Install Helm chart
+make helm-upgrade   # Upgrade Helm release
+make helm-uninstall # Uninstall Helm release
+```
 
 ### Building and Running with Docker
 
@@ -194,21 +233,29 @@ helm install blob-indexer ./charts/blob-indexer \
 ```
 blob-indexer-api/
 ├── cmd/
-│   └── server/              # Main application entry point
+│   ├── server/                 # Main application entry point
+│   └── testdata/               # Test data seeding utility
 ├── internal/
-│   ├── api/                 # API handlers and middleware
-│   ├── config/              # Configuration management
-│   ├── db/                  # Database access layer
-│   │   ├── migrations/      # SQL migration files
-│   │   └── models/          # Database models
-│   ├── ethereum/            # Ethereum client and utilities
-│   ├── indexer/             # Core indexing logic
-│   └── attribution/         # User attribution logic
-├── charts/                  # Helm chart for Kubernetes deployment
-├── Dockerfile               # Docker build file
-├── Tiltfile                 # Tilt configuration for development
-├── go.mod                   # Go module definition
-└── README.md                # Project documentation
+│   ├── api/                    # API handlers, router, middleware, rate limiting
+│   ├── attribution/            # User attribution (maps addresses to rollup names)
+│   ├── config/                 # Configuration management (Viper-based)
+│   ├── db/                     # Database access layer
+│   │   ├── migrations/         # SQL migration files
+│   │   └── models/             # Database models
+│   ├── ethereum/               # Ethereum client wrapper
+│   ├── indexer/                # Core indexing logic
+│   └── logger/                 # Centralized structured logging (Zap)
+├── charts/                     # Helm chart for Kubernetes deployment
+├── docs/                       # Generated Swagger/OpenAPI documentation
+├── .env.example                # Environment variable template
+├── config.yaml                 # Default YAML configuration
+├── Dockerfile                  # Multi-stage Docker build
+├── Makefile                    # Build, test, and deployment tasks
+├── Tiltfile                    # Tilt configuration for local development
+├── tilt-config.yaml            # Tilt settings
+├── railway-config.yaml         # Railway deployment config
+├── go.mod                      # Go module definition
+└── README.md                   # Project documentation
 ```
 
 ## License
