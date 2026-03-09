@@ -53,18 +53,22 @@ func (e *testEthRPC) GetBlockByNumber(_ context.Context, blockNum string, _ bool
 		}
 	}
 
+	excessBlobGas := uint64(0)
+	blobGasUsed := uint64(0)
 	header := &types.Header{
-		ParentHash:  common.BigToHash(big.NewInt(int64(number))),
-		UncleHash:   types.EmptyUncleHash,
-		Root:        common.BigToHash(big.NewInt(2)),
-		TxHash:      types.EmptyTxsHash,
-		ReceiptHash: types.EmptyReceiptsHash,
-		Difficulty:  big.NewInt(1),
-		Number:      big.NewInt(int64(number)),
-		GasLimit:    30_000_000,
-		GasUsed:     0,
-		Time:        uint64(time.Now().Unix()),
-		Extra:       []byte{},
+		ParentHash:    common.BigToHash(big.NewInt(int64(number))),
+		UncleHash:     types.EmptyUncleHash,
+		Root:          common.BigToHash(big.NewInt(2)),
+		TxHash:        types.EmptyTxsHash,
+		ReceiptHash:   types.EmptyReceiptsHash,
+		Difficulty:    big.NewInt(1),
+		Number:        big.NewInt(int64(number)),
+		GasLimit:      30_000_000,
+		GasUsed:       0,
+		Time:          uint64(time.Now().Unix()),
+		Extra:         []byte{},
+		ExcessBlobGas: &excessBlobGas,
+		BlobGasUsed:   &blobGasUsed,
 	}
 	if len(e.blockTxs) > 0 {
 		header.TxHash = common.BigToHash(big.NewInt(999))
@@ -631,6 +635,9 @@ func TestReindex(t *testing.T) {
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3")).
 			WithArgs(idx.network.ChainID, uint64(5), uint64(7)).
 			WillReturnResult(sqlmock.NewResult(0, 3))
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3")).
+			WithArgs(idx.network.ChainID, uint64(5), uint64(7)).
+			WillReturnResult(sqlmock.NewResult(0, 3))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3")).
 			WithArgs(idx.network.ChainID, uint64(5), uint64(7)).
 			WillReturnResult(sqlmock.NewResult(0, 3))
@@ -675,6 +682,9 @@ func TestReindex(t *testing.T) {
 		idx.db = idxDB
 
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3")).
+			WithArgs(idx.network.ChainID, uint64(5), uint64(7)).
+			WillReturnResult(sqlmock.NewResult(0, 3))
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3")).
 			WithArgs(idx.network.ChainID, uint64(5), uint64(7)).
 			WillReturnResult(sqlmock.NewResult(0, 3))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3")).
@@ -738,7 +748,8 @@ func TestInsertPendingBlob(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"id", "tx_hash"}).AddRow(5, blob.TxHash))
 		mock.ExpectExec("UPDATE blobs SET").
 			WithArgs(5, blob.TxHash, blob.FromAddress, blob.UserAttribution, blob.BlobSizeBytes,
-				blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH, blob.Timestamp, blob.Confirmed, blob.IndexerVersion).
+				blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH, blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
+				blob.MaxFeePerBlobGas, blob.BlobGasUsed).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
 		if err := idx.insertPendingBlob(blob); err != nil {
@@ -764,7 +775,8 @@ func TestInsertPendingBlob(t *testing.T) {
 		mock.ExpectExec("INSERT INTO blobs").
 			WithArgs(blob.NetworkID, blob.BlockNumber, 8, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
-				blob.Timestamp, blob.Confirmed, blob.IndexerVersion).
+				blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
+				blob.MaxFeePerBlobGas, blob.BlobGasUsed).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 
 		if err := idx.insertPendingBlob(blob); err != nil {
@@ -787,7 +799,8 @@ func TestInsertPendingBlob(t *testing.T) {
 		mock.ExpectExec("UPDATE blobs SET").
 			WithArgs(blob.NetworkID, blob.TxHash, blob.BlobIndex, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
-				blob.Timestamp, blob.Confirmed, blob.IndexerVersion).
+				blob.Timestamp, blob.Confirmed, blob.IndexerVersion,
+				blob.MaxFeePerBlobGas, blob.BlobGasUsed).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
 		if err := idx.insertPendingBlob(blob); err != nil {
@@ -845,14 +858,14 @@ func TestInsertBlockData(t *testing.T) {
 		mock.ExpectExec("INSERT INTO blobs").
 			WithArgs(blob.NetworkID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
-				blob.Timestamp, blob.Confirmed, blob.IndexerVersion).
+				blob.Timestamp, blob.Confirmed, blob.IndexerVersion, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectExec("INSERT INTO indexed_blocks").
 			WithArgs(indexedBlock.NetworkID, indexedBlock.BlockNumber, indexedBlock.BlockHash, indexedBlock.ParentHash).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
-		if err := idx.insertBlockData([]models.Blob{blob}, indexedBlock); err != nil {
+		if err := idx.insertBlockData([]models.Blob{blob}, indexedBlock, nil); err != nil {
 			t.Fatalf("insertBlockData() error = %v", err)
 		}
 	})
@@ -866,7 +879,7 @@ func TestInsertBlockData(t *testing.T) {
 		mock.ExpectPrepare("INSERT INTO blobs").WillReturnError(errors.New("prepare failed"))
 		mock.ExpectRollback()
 
-		err := idx.insertBlockData([]models.Blob{blob}, indexedBlock)
+		err := idx.insertBlockData([]models.Blob{blob}, indexedBlock, nil)
 		if err == nil || !strings.Contains(err.Error(), "failed to prepare blob statement") {
 			t.Fatalf("expected prepare error, got %v", err)
 		}
@@ -883,7 +896,7 @@ func TestInsertBlockData(t *testing.T) {
 			WillReturnError(errors.New("insert failed"))
 		mock.ExpectRollback()
 
-		err := idx.insertBlockData([]models.Blob{blob}, indexedBlock)
+		err := idx.insertBlockData([]models.Blob{blob}, indexedBlock, nil)
 		if err == nil || !strings.Contains(err.Error(), "failed to insert blob") {
 			t.Fatalf("expected blob insert error, got %v", err)
 		}
@@ -900,7 +913,7 @@ func TestInsertBlockData(t *testing.T) {
 			WillReturnError(errors.New("indexed insert failed"))
 		mock.ExpectRollback()
 
-		err := idx.insertBlockData(nil, indexedBlock)
+		err := idx.insertBlockData(nil, indexedBlock, nil)
 		if err == nil || !strings.Contains(err.Error(), "failed to record indexed block") {
 			t.Fatalf("expected indexed block error, got %v", err)
 		}
@@ -918,7 +931,7 @@ func TestInsertBlockData(t *testing.T) {
 		mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
 		mock.ExpectRollback()
 
-		err := idx.insertBlockData(nil, indexedBlock)
+		err := idx.insertBlockData(nil, indexedBlock, nil)
 		if err == nil {
 			t.Fatal("expected commit error")
 		}
@@ -935,6 +948,8 @@ func TestProcessBlock_NoBlobTransactions(t *testing.T) {
 		WithArgs(idx.network.ChainID, uint64(0)).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO block_metrics").
+		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO indexed_blocks").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
@@ -974,7 +989,11 @@ func TestProcessBlock_WithBlobTransaction(t *testing.T) {
 			sqlmock.AnyArg(),
 			true,
 			idx.indexerVersion,
+			sqlmock.AnyArg(), // max_fee_per_blob_gas
+			sqlmock.AnyArg(), // blob_gas_used
 		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO block_metrics").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO indexed_blocks").
 		WithArgs(idx.network.ChainID, int64(1), sqlmock.AnyArg(), sqlmock.AnyArg()).
@@ -986,23 +1005,9 @@ func TestProcessBlock_WithBlobTransaction(t *testing.T) {
 	}
 }
 
-func TestProcessBlock_BlobBaseFeeError(t *testing.T) {
-	idx := newTestIndexer()
-	idxDB, mock := newMockIndexerDB(t)
-	idx.db = idxDB
-	ethClient, rpcSvc := newMockEthClient(t, 10)
-	idx.ethClient = ethClient
-	rpcSvc.blobBaseFeeErr = errors.New("blob fee unavailable")
-
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2")).
-		WithArgs(idx.network.ChainID, uint64(0)).
-		WillReturnError(sql.ErrNoRows)
-
-	err := idx.processBlock(1)
-	if err == nil || !strings.Contains(err.Error(), "failed to get blob base fee") {
-		t.Fatalf("expected blob base fee error, got %v", err)
-	}
-}
+// TestProcessBlock_BlobBaseFeeError is no longer applicable because blob base fee
+// is now computed from the block header (ExcessBlobGas) instead of calling the
+// eth_blobBaseFee RPC. The RPC-based error path no longer exists in processBlock.
 
 func TestCheckForReorg_Branches(t *testing.T) {
 	idx := newTestIndexer()
@@ -1059,6 +1064,9 @@ func TestCheckForReorg_DetectsMismatchAndRewinds(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2")).
 		WithArgs(idx.network.ChainID, int64(5)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, int64(5)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2")).
 		WithArgs(idx.network.ChainID, uint64(5)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -1090,6 +1098,9 @@ func TestHandleReorg_SuccessAndError(t *testing.T) {
 			WithArgs(idx.network.ChainID, forkBlock).
 			WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(expectedHash))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2")).
+			WithArgs(idx.network.ChainID, int64(forkBlock+1)).
+			WillReturnResult(sqlmock.NewResult(0, 2))
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2")).
 			WithArgs(idx.network.ChainID, int64(forkBlock+1)).
 			WillReturnResult(sqlmock.NewResult(0, 2))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2")).
@@ -1138,6 +1149,7 @@ func TestBlockProcessingWorker_ProcessesTask(t *testing.T) {
 		WithArgs(idx.network.ChainID, uint64(0)).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO block_metrics").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO indexed_blocks").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 	mock.ExpectExec("INSERT INTO indexer_metadata").
@@ -1271,13 +1283,13 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 		idx.processPendingTransaction(ethSvc.txByHash.Hash())
 	})
 
-	t.Run("processPendingTransaction blob base fee error", func(t *testing.T) {
+	t.Run("processPendingTransaction latest block error", func(t *testing.T) {
 		idx := newTestIndexer()
 		client, ethSvc := newMockEthClient(t, 10)
 		idx.ethClient = client
 		ethSvc.txByHash = newSignedBlobTx(t, int64(idx.network.ChainID), 3)
 		ethSvc.txPending = true
-		ethSvc.blobBaseFeeErr = errors.New("blob fee unavailable")
+		ethSvc.failBlock = true // causes GetBlockByNumber to fail
 
 		idx.processPendingTransaction(ethSvc.txByHash.Hash())
 	})
@@ -1339,7 +1351,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			WithArgs(idx.network.ChainID, txHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 		mock.ExpectExec("INSERT INTO blobs").
-			WithArgs(idx.network.ChainID, int64(-1), 0, txHash, sqlmock.AnyArg(), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), false, idx.indexerVersion).
+			WithArgs(idx.network.ChainID, int64(-1), 0, txHash, sqlmock.AnyArg(), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), false, idx.indexerVersion, sqlmock.AnyArg(), sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 
 		idx.processPendingTransaction(ethSvc.txByHash.Hash())
@@ -1378,7 +1390,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			WithArgs(idx.network.ChainID, txHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 		mock.ExpectExec("INSERT INTO blobs").
-			WithArgs(idx.network.ChainID, int64(-1), 0, txHash, sqlmock.AnyArg(), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), false, idx.indexerVersion).
+			WithArgs(idx.network.ChainID, int64(-1), 0, txHash, sqlmock.AnyArg(), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), false, idx.indexerVersion, sqlmock.AnyArg(), sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 
 		if err := idx.processPendingTransactions(); err != nil {
@@ -1409,15 +1421,15 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 		}
 	})
 
-	t.Run("processPendingTransactions blob base fee error", func(t *testing.T) {
+	t.Run("processPendingTransactions latest block error", func(t *testing.T) {
 		idx := newTestIndexer()
 		client, ethSvc, _ := newMockEthClientWithTxPool(t, 10)
 		idx.ethClient = client
-		ethSvc.blobBaseFeeErr = errors.New("blob fee unavailable")
+		ethSvc.failBlock = true // causes GetBlockByNumber to fail
 
 		err := idx.processPendingTransactions()
-		if err == nil || !strings.Contains(err.Error(), "failed to get blob base fee for latest block") {
-			t.Fatalf("expected blob base fee error, got %v", err)
+		if err == nil || !strings.Contains(err.Error(), "failed to get latest block") {
+			t.Fatalf("expected latest block error, got %v", err)
 		}
 	})
 }

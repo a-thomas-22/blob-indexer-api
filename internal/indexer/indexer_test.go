@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
+	"github.com/a-thomas-22/blob-indexer-api/internal/blobparams"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
@@ -53,6 +54,7 @@ func newTestIndexer() *Indexer {
 		ctx:                    ctx,
 		cancel:                 cancel,
 		indexerVersion:         cfg.Indexer.Version,
+		chainConfig:            blobparams.ChainConfigForID(network.ChainID),
 		blockTaskCh:            make(chan BlockTask, 1000),
 		failedBlocks:           make(map[uint64]int),
 		mu:                     sync.Mutex{},

@@ -21,7 +21,7 @@ type Blob struct {
 	Confirmed         bool      `db:"confirmed"`
 	IndexerVersion    string    `db:"indexer_version"`
 	MaxFeePerBlobGas  *string   `db:"max_fee_per_blob_gas"` // Nullable for pre-migration rows
-	BlobGasUsed       *int64    `db:"blob_gas_used"`         // Nullable for pre-migration rows
+	BlobGasUsed       *int64    `db:"blob_gas_used"`        // Nullable for pre-migration rows
 }
 
 // BlobUser represents a known blob transaction sender

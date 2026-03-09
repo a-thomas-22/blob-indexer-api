@@ -79,7 +79,7 @@ type Indexer struct {
 	pendingTxSub           *ethereum.PendingTxSubscription
 	failedBlocks           map[uint64]int // block number -> cumulative failure count
 	failedBlocksMu         sync.Mutex
-	reorgDetected          uint32 // atomic flag: 1 = reorg detected, main loop should reset
+	reorgDetected          uint32              // atomic flag: 1 = reorg detected, main loop should reset
 	chainConfig            *params.ChainConfig // go-ethereum chain config for fork-aware blob math
 }
 
