@@ -90,6 +90,23 @@ type BlockMetrics struct {
 	UpdateFraction   int64     `db:"update_fraction"`
 }
 
+// BlobStatsAggregate is the aggregated result shape for blob stats queries.
+type BlobStatsAggregate struct {
+	TotalBlobs          int       `db:"total_blobs"`
+	TotalConfirmedBlobs int       `db:"total_confirmed_blobs"`
+	TotalPendingBlobs   int       `db:"total_pending_blobs"`
+	AverageBaseFee      string    `db:"average_base_fee"`
+	AverageTip          string    `db:"average_tip"`
+	AverageTotalCost    string    `db:"average_total_cost"`
+	LastIndexedTime     time.Time `db:"last_indexed_time"`
+}
+
+// BlobCountTotals is the aggregated confirmed/pending count shape.
+type BlobCountTotals struct {
+	Confirmed int `db:"confirmed_count"`
+	Pending   int `db:"pending_count"`
+}
+
 // Common metadata keys
 const (
 	MetadataLastIndexedBlock = "last_indexed_block"

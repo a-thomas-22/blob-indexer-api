@@ -523,15 +523,7 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 
 	logger.Debug("Getting blob statistics", zap.String("network", network.Name))
 
-	var stats struct {
-		TotalBlobs          int       `db:"total_blobs"`
-		TotalConfirmedBlobs int       `db:"total_confirmed_blobs"`
-		TotalPendingBlobs   int       `db:"total_pending_blobs"`
-		AverageBaseFee      string    `db:"average_base_fee"`
-		AverageTip          string    `db:"average_tip"`
-		AverageTotalCost    string    `db:"average_total_cost"`
-		LastIndexedTime     time.Time `db:"last_indexed_time"`
-	}
+	var stats models.BlobStatsAggregate
 
 	if err := a.db.GetContext(r.Context(), &stats, queryBlobStats, network.ChainID); err != nil {
 		logger.Error("Failed to get blob statistics",
@@ -846,10 +838,7 @@ func (a *API) DevIndexers(w http.ResponseWriter, r *http.Request) {
 	for _, network := range a.networks {
 		lastIndexedBlock := a.getLastIndexedBlockFromDB(r.Context(), network.ChainID)
 
-		var counts struct {
-			Confirmed int `db:"confirmed_count"`
-			Pending   int `db:"pending_count"`
-		}
+		var counts models.BlobCountTotals
 		if err := a.db.GetContext(r.Context(), &counts, queryDevIndexerCounts, network.ChainID); err != nil {
 			logger.Error("Failed to get blob counts",
 				zap.String("network", network.Name),
