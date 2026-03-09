@@ -141,7 +141,7 @@ func (db *DB) GetIndexedBlockHash(ctx context.Context, networkID int, blockNumbe
 	query := "SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2"
 	err := db.GetContext(ctx, &hash, query, networkID, blockNumber)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get indexed block hash for network %d block %d: %w", networkID, blockNumber, err)
 	}
 	return hash, nil
 }

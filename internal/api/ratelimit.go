@@ -2,7 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -76,9 +78,9 @@ func (rl *RateLimiter) allow(ip string) bool {
 func RateLimitMiddleware(rl *RateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := r.RemoteAddr
-			if realIP := r.Header.Get("X-Real-Ip"); realIP != "" {
-				ip = realIP
+			ip := strings.TrimSpace(r.RemoteAddr)
+			if host, _, err := net.SplitHostPort(ip); err == nil {
+				ip = host
 			}
 
 			if !rl.allow(ip) {

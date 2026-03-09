@@ -143,7 +143,7 @@ func TestRateLimitMiddleware_Returns429(t *testing.T) {
 	}
 }
 
-func TestRateLimitMiddleware_UsesXRealIP(t *testing.T) {
+func TestRateLimitMiddleware_IgnoresXRealIP(t *testing.T) {
 	rl := &RateLimiter{
 		visitors: make(map[string]*visitor),
 		rate:     10,
@@ -154,15 +154,17 @@ func TestRateLimitMiddleware_UsesXRealIP(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	// First request with X-Real-Ip
+	// Request with a spoofed X-Real-Ip header.
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("X-Real-Ip", "8.8.8.8")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	// Check that the visitor was stored under the X-Real-Ip
-	if _, ok := rl.visitors["8.8.8.8"]; !ok {
-		t.Error("visitor should be tracked by X-Real-Ip header")
+	if _, ok := rl.visitors["8.8.8.8"]; ok {
+		t.Error("visitor should not be tracked by X-Real-Ip header")
+	}
+	if _, ok := rl.visitors["127.0.0.1"]; !ok {
+		t.Error("visitor should be tracked by normalized remote address")
 	}
 }
