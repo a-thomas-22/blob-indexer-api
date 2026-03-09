@@ -161,6 +161,14 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 	}
 }
 
+func (i *Indexer) getBlobBaseFeeFromBlock(block *types.Block) *big.Int {
+	header := block.Header()
+	if header.ExcessBlobGas != nil {
+		return eip4844.CalcBlobFee(i.chainConfig, header)
+	}
+	return big.NewInt(1)
+}
+
 // Start starts the indexer
 func (i *Indexer) Start() error {
 	logger.Info("Starting indexer...",
@@ -657,12 +665,7 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 		return
 	}
 
-	var blobBaseFee *big.Int
-	if latestBlock.Header().ExcessBlobGas != nil {
-		blobBaseFee = eip4844.CalcBlobFee(i.chainConfig, latestBlock.Header())
-	} else {
-		blobBaseFee = big.NewInt(1)
-	}
+	blobBaseFee := i.getBlobBaseFeeFromBlock(latestBlock)
 
 	// Get the sender address
 	from, err := i.getSender(tx)
@@ -723,12 +726,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 	// Compute blob base fee from the block header (fixes historical accuracy bug
 	// where eth_blobBaseFee RPC returned the current fee, not the block's actual fee)
 	header := block.Header()
-	var blobBaseFee *big.Int
-	if header.ExcessBlobGas != nil {
-		blobBaseFee = eip4844.CalcBlobFee(i.chainConfig, header)
-	} else {
-		blobBaseFee = big.NewInt(1) // pre-4844 block, minimum fee
-	}
+	blobBaseFee := i.getBlobBaseFeeFromBlock(block)
 
 	// Get the block timestamp
 	timestamp := i.ethClient.GetBlockTimestamp(block)
@@ -1098,12 +1096,7 @@ func (i *Indexer) processPendingTransactions() error {
 		return fmt.Errorf("failed to get latest block: %w", err)
 	}
 
-	var blobBaseFee *big.Int
-	if latestBlock.Header().ExcessBlobGas != nil {
-		blobBaseFee = eip4844.CalcBlobFee(i.chainConfig, latestBlock.Header())
-	} else {
-		blobBaseFee = big.NewInt(1)
-	}
+	blobBaseFee := i.getBlobBaseFeeFromBlock(latestBlock)
 
 	// Process each pending transaction
 	for _, tx := range pendingTxs {
