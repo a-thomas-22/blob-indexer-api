@@ -163,7 +163,7 @@ func (s *Service) GetKnownUsers(ctx context.Context) ([]models.BlobUser, error) 
 }
 
 // GetTopBlobUsers gets the top blob users by number of blobs
-func (s *Service) GetTopBlobUsers(ctx context.Context, limit int) ([]models.BlobUserStats, error) {
+func (s *Service) GetTopBlobUsers(ctx context.Context, limit, offset int) ([]models.BlobUserStats, error) {
 	var result []models.BlobUserStats
 
 	query := `
