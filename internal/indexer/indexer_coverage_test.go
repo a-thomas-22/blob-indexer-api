@@ -30,11 +30,14 @@ import (
 )
 
 type testEthRPC struct {
-	latest    uint64
-	failBlock bool
-	txByHash  *types.Transaction
-	txPending bool
-	txErr     error
+	latest         uint64
+	failBlock      bool
+	txByHash       *types.Transaction
+	txPending      bool
+	txErr          error
+	blockTxs       []*types.Transaction
+	blobBaseFeeHex string
+	blobBaseFeeErr error
 }
 
 func (e *testEthRPC) GetBlockByNumber(_ context.Context, blockNum string, _ bool) (interface{}, error) {
@@ -63,6 +66,9 @@ func (e *testEthRPC) GetBlockByNumber(_ context.Context, blockNum string, _ bool
 		Time:        uint64(time.Now().Unix()),
 		Extra:       []byte{},
 	}
+	if len(e.blockTxs) > 0 {
+		header.TxHash = common.BigToHash(big.NewInt(999))
+	}
 
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
@@ -74,13 +80,32 @@ func (e *testEthRPC) GetBlockByNumber(_ context.Context, blockNum string, _ bool
 		return nil, err
 	}
 	payload["hash"] = common.BigToHash(big.NewInt(int64(number + 1000))).Hex()
-	payload["transactions"] = []interface{}{}
+
+	txs := make([]interface{}, 0, len(e.blockTxs))
+	for _, tx := range e.blockTxs {
+		txJSON, err := tx.MarshalJSON()
+		if err != nil {
+			return nil, err
+		}
+		var txPayload map[string]interface{}
+		if err := json.Unmarshal(txJSON, &txPayload); err != nil {
+			return nil, err
+		}
+		txs = append(txs, txPayload)
+	}
+	payload["transactions"] = txs
 	payload["uncles"] = []interface{}{}
 
 	return payload, nil
 }
 
 func (e *testEthRPC) BlobBaseFee(_ context.Context) (string, error) {
+	if e.blobBaseFeeErr != nil {
+		return "", e.blobBaseFeeErr
+	}
+	if e.blobBaseFeeHex != "" {
+		return e.blobBaseFeeHex, nil
+	}
 	return "0x3b9aca00", nil
 }
 
@@ -177,6 +202,47 @@ func newBlobFixture() models.Blob {
 		Confirmed:         false,
 		IndexerVersion:    "test-v1",
 	}
+}
+
+func newSignedBlobTx(t *testing.T, chainID int64, nonce uint64) *types.Transaction {
+	t.Helper()
+
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("failed to generate private key: %v", err)
+	}
+	signer := types.LatestSignerForChainID(big.NewInt(chainID))
+
+	return types.MustSignNewTx(key, signer, &types.BlobTx{
+		ChainID:    uint256.NewInt(uint64(chainID)),
+		Nonce:      nonce,
+		GasTipCap:  uint256.NewInt(1),
+		GasFeeCap:  uint256.NewInt(2),
+		Gas:        21_000,
+		To:         common.Address{},
+		Value:      uint256.NewInt(0),
+		BlobFeeCap: uint256.NewInt(3),
+		BlobHashes: []common.Hash{{byte(nonce + 1)}},
+	})
+}
+
+func newSignedDynamicTx(t *testing.T, chainID int64, nonce uint64) *types.Transaction {
+	t.Helper()
+
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("failed to generate private key: %v", err)
+	}
+	signer := types.LatestSignerForChainID(big.NewInt(chainID))
+
+	return types.MustSignNewTx(key, signer, &types.DynamicFeeTx{
+		ChainID:   big.NewInt(chainID),
+		Nonce:     nonce,
+		GasTipCap: big.NewInt(1),
+		GasFeeCap: big.NewInt(2),
+		Gas:       21_000,
+		To:        &common.Address{},
+	})
 }
 
 func TestNew_InitializesIndexer(t *testing.T) {
@@ -432,6 +498,35 @@ func TestStart_ErrorsAndSuccessPath(t *testing.T) {
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
 		idx.ethClient, _ = newMockEthClient(t, 10)
+		idx.attribution = attribution.NewService(idxDB)
+		idx.attribution.SetNetworkID(idx.network.ChainID)
+
+		userRows := sqlmock.NewRows([]string{"id", "network_id", "address", "name", "description", "category", "first_seen", "last_seen"})
+		mock.ExpectQuery("SELECT \\* FROM blob_users WHERE network_id = \\$1").
+			WithArgs(idx.network.ChainID).
+			WillReturnRows(userRows)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = $2")).
+			WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock).
+			WillReturnError(sql.ErrNoRows)
+
+		if err := idx.Start(); err != nil {
+			t.Fatalf("Start() error = %v", err)
+		}
+
+		time.Sleep(30 * time.Millisecond)
+		idx.Stop()
+	})
+
+	t.Run("websocket enabled with subscription fallback", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.pollingInterval = 5 * time.Millisecond
+		idx.mempoolPollingInterval = 5 * time.Millisecond
+		idx.network.StartBlock = "1000" // keep runBlockIndexer from queueing work
+		idx.useWebsocket = true
+
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+		idx.ethClient, _ = newMockEthClient(t, 10) // HTTP client, subscribe calls will fail
 		idx.attribution = attribution.NewService(idxDB)
 		idx.attribution.SetNetworkID(idx.network.ChainID)
 
@@ -849,6 +944,66 @@ func TestProcessBlock_NoBlobTransactions(t *testing.T) {
 	}
 }
 
+func TestProcessBlock_WithBlobTransaction(t *testing.T) {
+	idx := newTestIndexer()
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+	ethClient, rpcSvc := newMockEthClient(t, 10)
+	idx.ethClient = ethClient
+
+	blobTx := newSignedBlobTx(t, int64(idx.network.ChainID), 7)
+	rpcSvc.blockTxs = []*types.Transaction{blobTx}
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2")).
+		WithArgs(idx.network.ChainID, uint64(0)).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectBegin()
+	mock.ExpectPrepare("INSERT INTO blobs")
+	mock.ExpectExec("INSERT INTO blobs").
+		WithArgs(
+			idx.network.ChainID,
+			int64(1),
+			0,
+			blobTx.Hash().Hex(),
+			sqlmock.AnyArg(),
+			"",
+			sqlmock.AnyArg(),
+			sqlmock.AnyArg(),
+			sqlmock.AnyArg(),
+			sqlmock.AnyArg(),
+			sqlmock.AnyArg(),
+			true,
+			idx.indexerVersion,
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO indexed_blocks").
+		WithArgs(idx.network.ChainID, int64(1), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	if err := idx.processBlock(1); err != nil {
+		t.Fatalf("processBlock() error = %v", err)
+	}
+}
+
+func TestProcessBlock_BlobBaseFeeError(t *testing.T) {
+	idx := newTestIndexer()
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+	ethClient, rpcSvc := newMockEthClient(t, 10)
+	idx.ethClient = ethClient
+	rpcSvc.blobBaseFeeErr = errors.New("blob fee unavailable")
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2")).
+		WithArgs(idx.network.ChainID, uint64(0)).
+		WillReturnError(sql.ErrNoRows)
+
+	err := idx.processBlock(1)
+	if err == nil || !strings.Contains(err.Error(), "failed to get blob base fee") {
+		t.Fatalf("expected blob base fee error, got %v", err)
+	}
+}
+
 func TestCheckForReorg_Branches(t *testing.T) {
 	idx := newTestIndexer()
 	idxDB, mock := newMockIndexerDB(t)
@@ -876,6 +1031,44 @@ func TestCheckForReorg_Branches(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(block.ParentHash().Hex()))
 	if err := idx.checkForReorg(1, block); err != nil {
 		t.Fatalf("matching parent hash should not trigger reorg: %v", err)
+	}
+}
+
+func TestCheckForReorg_DetectsMismatchAndRewinds(t *testing.T) {
+	idx := newTestIndexer()
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+	idx.ethClient, _ = newMockEthClient(t, 10)
+
+	block, err := idx.ethClient.GetBlockByNumber(context.Background(), 5)
+	if err != nil {
+		t.Fatalf("failed to get test block: %v", err)
+	}
+	forkBlock := uint64(4)
+	forkBlockHash, err := idx.ethClient.GetBlockByNumber(context.Background(), forkBlock)
+	if err != nil {
+		t.Fatalf("failed to get fork block: %v", err)
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2")).
+		WithArgs(idx.network.ChainID, uint64(4)).
+		WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow("0xdeadbeef"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2")).
+		WithArgs(idx.network.ChainID, uint64(4)).
+		WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(forkBlockHash.Hash().Hex()))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, int64(5)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, uint64(5)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, "4").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	err = idx.checkForReorg(5, block)
+	if err == nil || !errors.Is(err, errReorgDetected) {
+		t.Fatalf("expected errReorgDetected, got %v", err)
 	}
 }
 
@@ -977,6 +1170,37 @@ func TestBlockProcessingWorker_ProcessesTask(t *testing.T) {
 	}
 }
 
+func TestBlockProcessingWorker_TracksFailedBlock(t *testing.T) {
+	idx := newTestIndexer()
+	ethClient, rpcSvc := newMockEthClient(t, 10)
+	rpcSvc.failBlock = true
+	idx.ethClient = ethClient
+	idx.blockTaskCh = make(chan BlockTask, 1)
+	idx.maxBlockRetries = 0
+
+	done := make(chan struct{})
+	go func() {
+		idx.blockProcessingWorker(1)
+		close(done)
+	}()
+
+	idx.blockTaskCh <- BlockTask{BlockNumber: 2}
+	close(idx.blockTaskCh)
+
+	select {
+	case <-done:
+	case <-time.After(400 * time.Millisecond):
+		t.Fatal("blockProcessingWorker did not exit")
+	}
+
+	idx.failedBlocksMu.Lock()
+	failures := idx.failedBlocks[2]
+	idx.failedBlocksMu.Unlock()
+	if failures != 1 {
+		t.Fatalf("expected failed block retry count of 1, got %d", failures)
+	}
+}
+
 func TestMempoolProcessingAndLoop(t *testing.T) {
 	t.Run("processPendingTransactions success with empty txpool", func(t *testing.T) {
 		idx := newTestIndexer()
@@ -1025,6 +1249,57 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 		idx.ethClient, _ = newMockEthClient(t, 10)
 
 		idx.processPendingTransaction(common.HexToHash("0x1"))
+	})
+
+	t.Run("processPendingTransaction skips non-pending tx", func(t *testing.T) {
+		idx := newTestIndexer()
+		client, ethSvc := newMockEthClient(t, 10)
+		idx.ethClient = client
+		ethSvc.txByHash = newSignedBlobTx(t, int64(idx.network.ChainID), 1)
+		ethSvc.txPending = false
+
+		idx.processPendingTransaction(ethSvc.txByHash.Hash())
+	})
+
+	t.Run("processPendingTransaction skips non-blob tx", func(t *testing.T) {
+		idx := newTestIndexer()
+		client, ethSvc := newMockEthClient(t, 10)
+		idx.ethClient = client
+		ethSvc.txByHash = newSignedDynamicTx(t, int64(idx.network.ChainID), 2)
+		ethSvc.txPending = true
+
+		idx.processPendingTransaction(ethSvc.txByHash.Hash())
+	})
+
+	t.Run("processPendingTransaction blob base fee error", func(t *testing.T) {
+		idx := newTestIndexer()
+		client, ethSvc := newMockEthClient(t, 10)
+		idx.ethClient = client
+		ethSvc.txByHash = newSignedBlobTx(t, int64(idx.network.ChainID), 3)
+		ethSvc.txPending = true
+		ethSvc.blobBaseFeeErr = errors.New("blob fee unavailable")
+
+		idx.processPendingTransaction(ethSvc.txByHash.Hash())
+	})
+
+	t.Run("processPendingTransaction sender error", func(t *testing.T) {
+		idx := newTestIndexer()
+		client, ethSvc := newMockEthClient(t, 10)
+		idx.ethClient = client
+		ethSvc.txByHash = types.NewTx(&types.BlobTx{
+			ChainID:    uint256.NewInt(uint64(idx.network.ChainID)),
+			Nonce:      4,
+			GasTipCap:  uint256.NewInt(1),
+			GasFeeCap:  uint256.NewInt(2),
+			Gas:        21_000,
+			To:         common.Address{},
+			Value:      uint256.NewInt(0),
+			BlobFeeCap: uint256.NewInt(3),
+			BlobHashes: []common.Hash{{4}},
+		})
+		ethSvc.txPending = true
+
+		idx.processPendingTransaction(ethSvc.txByHash.Hash())
 	})
 
 	t.Run("processPendingTransaction inserts pending blob", func(t *testing.T) {
@@ -1108,6 +1383,41 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 
 		if err := idx.processPendingTransactions(); err != nil {
 			t.Fatalf("processPendingTransactions() error = %v", err)
+		}
+	})
+
+	t.Run("processPendingTransactions skips tx with sender error", func(t *testing.T) {
+		idx := newTestIndexer()
+		client, _, txpool := newMockEthClientWithTxPool(t, 10)
+		idx.ethClient = client
+
+		unsignedBlobTx := types.NewTx(&types.BlobTx{
+			ChainID:    uint256.NewInt(uint64(idx.network.ChainID)),
+			Nonce:      5,
+			GasTipCap:  uint256.NewInt(1),
+			GasFeeCap:  uint256.NewInt(2),
+			Gas:        21_000,
+			To:         common.Address{},
+			Value:      uint256.NewInt(0),
+			BlobFeeCap: uint256.NewInt(3),
+			BlobHashes: []common.Hash{{5}},
+		})
+		txpool.txs = map[string]*types.Transaction{unsignedBlobTx.Hash().Hex(): unsignedBlobTx}
+
+		if err := idx.processPendingTransactions(); err != nil {
+			t.Fatalf("processPendingTransactions() error = %v", err)
+		}
+	})
+
+	t.Run("processPendingTransactions blob base fee error", func(t *testing.T) {
+		idx := newTestIndexer()
+		client, ethSvc, _ := newMockEthClientWithTxPool(t, 10)
+		idx.ethClient = client
+		ethSvc.blobBaseFeeErr = errors.New("blob fee unavailable")
+
+		err := idx.processPendingTransactions()
+		if err == nil || !strings.Contains(err.Error(), "failed to get blob base fee for latest block") {
+			t.Fatalf("expected blob base fee error, got %v", err)
 		}
 	})
 }

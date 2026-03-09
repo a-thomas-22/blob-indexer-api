@@ -1,8 +1,11 @@
 package api
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
@@ -42,5 +45,46 @@ func TestLoggerMiddleware_PassesThrough(t *testing.T) {
 
 	if w.Code != http.StatusTeapot {
 		t.Errorf("expected 418, got %d", w.Code)
+	}
+}
+
+func TestMaxBytesMiddleware_RejectsLargeBody(t *testing.T) {
+	handler := MaxBytesMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := io.ReadAll(r.Body)
+		if err != nil {
+			RespondMaxBytesError(w)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	tooLarge := bytes.Repeat([]byte("a"), MaxRequestBodySize+1)
+	req := httptest.NewRequest(http.MethodPost, "/test", bytes.NewReader(tooLarge))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for oversized body, got %d", w.Code)
+	}
+}
+
+func TestRequestCounterMiddleware_TracksCounts(t *testing.T) {
+	a := &API{}
+	handler := a.requestCounterMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := atomic.LoadInt64(&a.activeRequests); got != 1 {
+			t.Fatalf("expected activeRequests=1 during request, got %d", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/status", http.NoBody)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := atomic.LoadInt64(&a.totalRequests); got != 1 {
+		t.Fatalf("expected totalRequests=1, got %d", got)
+	}
+	if got := atomic.LoadInt64(&a.activeRequests); got != 0 {
+		t.Fatalf("expected activeRequests=0 after request, got %d", got)
 	}
 }

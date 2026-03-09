@@ -17,14 +17,14 @@ jobs:
           go-version-file: go.mod
 
       - name: Run tests with coverage
-        run: go test ./... -coverprofile=coverage.out -count=1
+        run: go test ./internal/... ./docs -coverprofile=coverage.out -covermode=atomic -count=1
 
       - name: Check coverage threshold
         run: |
           COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $NF}' | tr -d '%')
           echo "Total coverage: ${COVERAGE}%"
-          THRESHOLD=80
-          if [ "$(echo "$COVERAGE < $THRESHOLD" | bc -l)" -eq 1 ]; then
+          THRESHOLD=90
+          if awk -v cov="${COVERAGE}" -v threshold="${THRESHOLD}" 'BEGIN {exit !(cov < threshold)}'; then
             echo "::error::Coverage ${COVERAGE}% is below the ${THRESHOLD}% threshold"
             exit 1
           fi
