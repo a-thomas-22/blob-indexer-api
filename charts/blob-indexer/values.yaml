@@ -65,6 +65,10 @@ containerSecurityContext:
 configMap:
   create: true
 
+# Database Secret creation toggle.
+databaseSecret:
+  create: true
+
 # Application configuration -- rendered into a ConfigMap as YAML.
 # Maps directly to the Config struct in internal/config/config.go.
 appConfig:

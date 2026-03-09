@@ -8,13 +8,7 @@ metadata:
 data:
   config.yaml: |
     database:
-      {{- if .Values.externalDatabase.url }}
-      url: {{ .Values.externalDatabase.url | quote }}
-      {{- else if .Values.postgresql.enabled }}
-      url: "postgres://{{ .Values.postgresql.auth.username }}:{{ .Values.postgresql.auth.password }}@{{ .Release.Name }}-postgresql:5432/{{ .Values.postgresql.auth.database }}?sslmode=disable"
-      {{- else }}
-      url: {{ .Values.appConfig.database.url | quote }}
-      {{- end }}
+      url: ""
     server:
       port: {{ .Values.appConfig.server.port }}
       dev_mode: {{ .Values.appConfig.server.dev_mode }}
