@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,12 @@ import (
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
+)
+
+const (
+	networkMainnet = "mainnet"
+	networkSepolia = "sepolia"
+	maskedValue    = "****"
 )
 
 // NetworkConfig holds the configuration for a single Ethereum network
@@ -114,12 +121,12 @@ func Load() (*Config, error) {
 	// Read the config file
 	if err := v.ReadInConfig(); err != nil {
 		// It's okay if the config file doesn't exist
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			logger.Error("Error reading config file", zap.Error(err))
+		var configFileNotFoundError viper.ConfigFileNotFoundError
+		if !errors.As(err, &configFileNotFoundError) {
+			fmt.Printf("Error reading config file: %v\n", err)
 			return nil, fmt.Errorf("failed to read config file: %w", err)
-		} else {
-			logger.Info("Config file not found, continuing with defaults and environment variables")
 		}
+		fmt.Println("Config file not found, continuing with defaults and environment variables")
 	} else {
 		logger.Info("Successfully loaded config file", zap.String("path", v.ConfigFileUsed()))
 	}
@@ -143,7 +150,7 @@ func Load() (*Config, error) {
 
 	// Development mode - direct environment variable override
 	if devMode := os.Getenv("DEV_MODE"); devMode != "" {
-		v.Set("server.dev_mode", strings.ToLower(devMode) == "true")
+		v.Set("server.dev_mode", strings.EqualFold(devMode, "true"))
 	}
 
 	// Indexer version - direct environment variable override
@@ -173,23 +180,24 @@ func Load() (*Config, error) {
 		}
 
 		// Check if ETH_RPC_URL is set (newer variable name)
-		if ethRpcURL := os.Getenv("ETH_RPC_URL"); ethRpcURL != "" {
-			rpcURL = ethRpcURL // Prefer ETH_RPC_URL over RPC_URL
+		if ethRPCURL := os.Getenv("ETH_RPC_URL"); ethRPCURL != "" {
+			rpcURL = ethRPCURL // Prefer ETH_RPC_URL over RPC_URL
 		}
 
 		// Try to determine the network from the RPC URL
-		networkName := "mainnet"
+		networkName := networkMainnet
 		chainID := 1
 
 		// Check for common testnet URLs in the RPC URL
 		rpcLower := strings.ToLower(rpcURL)
-		if strings.Contains(rpcLower, "sepolia") {
-			networkName = "sepolia"
+		switch {
+		case strings.Contains(rpcLower, networkSepolia):
+			networkName = networkSepolia
 			chainID = 11155111
-		} else if strings.Contains(rpcLower, "goerli") {
+		case strings.Contains(rpcLower, "goerli"):
 			networkName = "goerli"
 			chainID = 5
-		} else if strings.Contains(rpcLower, "holesky") {
+		case strings.Contains(rpcLower, "holesky"):
 			networkName = "holesky"
 			chainID = 17000
 		}
@@ -229,7 +237,7 @@ func Load() (*Config, error) {
 		}
 
 		if enabled := os.Getenv(prefix + "ENABLED"); enabled != "" {
-			network.Enabled = strings.ToLower(enabled) == "true"
+			network.Enabled = strings.EqualFold(enabled, "true")
 		}
 	}
 
@@ -264,11 +272,10 @@ func validateConfig(cfg *Config) error {
 		if os.Getenv("DB_URL") == "" {
 			logger.Error("Database URL is required", zap.String("hint", "set DB_URL environment variable or add database.url to config file"))
 			return fmt.Errorf("database URL is required - set DB_URL environment variable or add database.url to config file")
-		} else {
-			logger.Warn("Database URL not set in config, falling back to DB_URL environment variable")
-			// Set the database URL from the environment variable
-			cfg.Database.URL = os.Getenv("DB_URL")
 		}
+		fmt.Println("WARNING: Database URL is not set in config, but DB_URL environment variable is set")
+		// Set the database URL from the environment variable
+		cfg.Database.URL = os.Getenv("DB_URL")
 	}
 
 	logger.Debug("Database URL configured", zap.String("url", maskConnectionString(cfg.Database.URL)))
@@ -277,9 +284,8 @@ func validateConfig(cfg *Config) error {
 	if len(cfg.Networks) == 0 {
 		logger.Error("At least one network configuration is required")
 		return fmt.Errorf("at least one network configuration is required")
-	} else {
-		logger.Info("Network configurations found", zap.Int("count", len(cfg.Networks)))
 	}
+	fmt.Printf("Found %d network(s) in configuration\n", len(cfg.Networks))
 
 	for i, network := range cfg.Networks {
 		logger.Debug("Validating network", zap.Int("index", i+1), zap.String("name", network.Name))
@@ -292,23 +298,20 @@ func validateConfig(cfg *Config) error {
 		if network.ChainID <= 0 {
 			logger.Error("Network has invalid chain ID", zap.String("network", network.Name), zap.Int("chain_id", network.ChainID))
 			return fmt.Errorf("network '%s' has an invalid chain ID: %d", network.Name, network.ChainID)
-		} else {
-			logger.Debug("Network chain ID", zap.String("network", network.Name), zap.Int("chain_id", network.ChainID))
 		}
+		fmt.Printf("  Chain ID: %d\n", network.ChainID)
 
 		if network.RpcURL == "" {
 			logger.Error("Network is missing an RPC URL", zap.String("network", network.Name))
 			return fmt.Errorf("network '%s' is missing an RPC URL", network.Name)
-		} else {
-			logger.Debug("Network RPC URL configured", zap.String("network", network.Name), zap.String("rpc_url", maskURL(network.RpcURL)))
 		}
+		fmt.Printf("  RPC URL: %s (masked for security)\n", maskURL(network.RpcURL))
 
 		if network.StartBlock == "" {
 			logger.Error("Network is missing a start block", zap.String("network", network.Name))
 			return fmt.Errorf("network '%s' is missing a start block", network.Name)
-		} else {
-			logger.Debug("Network start block", zap.String("network", network.Name), zap.String("start_block", network.StartBlock))
 		}
+		fmt.Printf("  Start Block: %s\n", network.StartBlock)
 
 		logger.Debug("Network enabled status", zap.String("network", network.Name), zap.Bool("enabled", network.Enabled))
 	}
@@ -318,15 +321,15 @@ func validateConfig(cfg *Config) error {
 }
 
 // maskConnectionString masks a database connection string for security
-func maskConnectionString(connStr string) string {
+func maskConnectionString(_ string) string {
 	// Simple masking for now - in a real app you might want to parse the URL properly
-	return "****"
+	return maskedValue
 }
 
 // maskURL masks a URL for security
-func maskURL(url string) string {
+func maskURL(_ string) string {
 	// Simple masking for now - in a real app you might want to parse the URL properly
-	return "****"
+	return maskedValue
 }
 
 // GetEnabledNetworks returns a slice of enabled network configurations
