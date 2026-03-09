@@ -1,0 +1,40 @@
+name: Update Copyright Year
+
+on:
+  schedule:
+    - cron: '0 0 1 1 *' # January 1st at midnight UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-year:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update copyright year in LICENSE
+        run: |
+          CURRENT_YEAR=$(date +%Y)
+          sed -i "s/Copyright (c) [0-9]\{4\} a-thomas-22/Copyright (c) $CURRENT_YEAR a-thomas-22/" LICENSE
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create pull request
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: 'chore: update copyright year'
+          title: 'chore: update copyright year'
+          body: Automated copyright year update.
+          branch: chore/update-copyright-year
+          delete-branch: true
