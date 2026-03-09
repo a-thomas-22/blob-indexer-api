@@ -1,4 +1,4 @@
-.PHONY: build run test test-coverage clean docker-build docker-run tilt-up seed-data
+.PHONY: build run test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data
 
 # Go parameters
 GOCMD=go
@@ -7,6 +7,10 @@ GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 BINARY_NAME=blob-indexer-api
+COVERAGE_THRESHOLD ?= 50
+COVERAGE_DIR=coverage
+COVERAGE_FILE=$(COVERAGE_DIR)/coverage.out
+COVERAGE_HTML=$(COVERAGE_DIR)/coverage.html
 
 all: test build
 
@@ -20,21 +24,39 @@ run:
 test:
 	$(GOTEST) -v ./...
 
-COVERAGE_THRESHOLD=50
-
 test-coverage:
-	$(GOTEST) ./... -coverprofile=coverage.out -count=1
-	@COVERAGE=$$($(GOCMD) tool cover -func=coverage.out | grep total | awk '{print $$NF}' | tr -d '%'); \
+	@mkdir -p $(COVERAGE_DIR)
+	$(GOTEST) -v -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./...
+	$(GOCMD) tool cover -html=$(COVERAGE_FILE) -o $(COVERAGE_HTML)
+	$(GOCMD) tool cover -func=$(COVERAGE_FILE)
+	@COVERAGE=$$($(GOCMD) tool cover -func=$(COVERAGE_FILE) | grep total | awk '{print $$NF}' | tr -d '%'); \
 	echo "Total coverage: $${COVERAGE}%"; \
-	if [ $$(echo "$${COVERAGE} < $(COVERAGE_THRESHOLD)" | bc -l) -eq 1 ]; then \
+	if awk -v cov="$${COVERAGE}" -v threshold="$(COVERAGE_THRESHOLD)" 'BEGIN {exit !(cov < threshold)}'; then \
 		echo "FAIL: Coverage $${COVERAGE}% is below $(COVERAGE_THRESHOLD)% threshold"; \
 		exit 1; \
 	fi; \
 	echo "OK: Coverage $${COVERAGE}% meets $(COVERAGE_THRESHOLD)% threshold"
 
+test-race:
+	$(GOTEST) -v -race ./...
+
+lint:
+	golangci-lint run ./...
+
+lint-fix:
+	golangci-lint run --fix ./...
+
+vet:
+	$(GOCMD) vet ./...
+
+fmt:
+	gofmt -s -w .
+	goimports -w -local github.com/a-thomas-22/blob-indexer-api .
+
 clean:
 	rm -f $(BINARY_NAME)
 	rm -f $(BINARY_NAME).exe
+	rm -rf $(COVERAGE_DIR)
 
 deps:
 	$(GOMOD) download
