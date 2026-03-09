@@ -1,0 +1,102 @@
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - durationcheck
+    - errname
+    - errorlint
+    - exhaustive
+    - copyloopvar
+    - goconst
+    - gocritic
+    - gofmt
+    - goimports
+    - gosec
+    - misspell
+    - nilerr
+    - noctx
+    - prealloc
+    - predeclared
+    - revive
+    - unconvert
+    - unparam
+    - whitespace
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+    disabled-checks:
+      - hugeParam
+      - rangeValCopy
+  goimports:
+    local-prefixes: github.com/a-thomas-22/blob-indexer-api
+  gosec:
+    excludes:
+      - G101 # false positives for hardcoded credentials in test files
+      - G104 # unhandled errors (covered by errcheck)
+      - G115 # integer overflow conversion (intentional uint64<->int64 casts for Ethereum types)
+      - G304 # file path from variable (false positives)
+  revive:
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: exported
+        disabled: true
+      - name: increment-decrement
+      - name: var-naming
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+  exhaustive:
+    default-signifies-exhaustive: true
+  misspell:
+    locale: US
+
+issues:
+  exclude-rules:
+    # RpcURL is used across many files; suppress var-naming suggestion to rename to RPCURL
+    - text: "struct field RpcURL should be RPCURL"
+      linters:
+        - revive
+    # Allow unchecked errors and string constants in test files
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+        - goconst
+        - noctx
+    # Allow fmt.Sprintf in SQL queries (false positive for SQL injection)
+    - path: internal/api/handlers\.go
+      text: "G201"
+      linters:
+        - gosec
+    # Allow fmt.Sprintf in database code
+    - path: internal/db/
+      text: "G201"
+      linters:
+        - gosec
+  max-issues-per-linter: 50
+  max-same-issues: 10
