@@ -230,6 +230,32 @@ func newSignedBlobTx(t *testing.T, chainID int64, nonce uint64) *types.Transacti
 	})
 }
 
+func newSignedBlobTxWithNBlobs(t *testing.T, chainID int64, nonce uint64, n int) *types.Transaction {
+	t.Helper()
+
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("failed to generate private key: %v", err)
+	}
+	signer := types.LatestSignerForChainID(big.NewInt(chainID))
+
+	hashes := make([]common.Hash, n)
+	for i := range hashes {
+		hashes[i] = common.Hash{byte(i + 1)}
+	}
+	return types.MustSignNewTx(key, signer, &types.BlobTx{
+		ChainID:    uint256.NewInt(uint64(chainID)),
+		Nonce:      nonce,
+		GasTipCap:  uint256.NewInt(1),
+		GasFeeCap:  uint256.NewInt(2),
+		Gas:        21_000,
+		To:         common.Address{},
+		Value:      uint256.NewInt(0),
+		BlobFeeCap: uint256.NewInt(3),
+		BlobHashes: hashes,
+	})
+}
+
 func newSignedDynamicTx(t *testing.T, chainID int64, nonce uint64) *types.Transaction {
 	t.Helper()
 

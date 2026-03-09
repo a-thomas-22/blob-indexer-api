@@ -165,6 +165,40 @@ func TestBlobGasToBytes_UsesBlobGasDirectly(t *testing.T) {
 	}
 }
 
+func TestCalculateBlobMetrics_BlobSizeBytes(t *testing.T) {
+	blobBaseFee := big.NewInt(100)
+
+	tests := []struct {
+		name      string
+		blobCount int
+	}{
+		{"single blob", 1},
+		{"three blobs", 3},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := newSignedBlobTx(t, 1, 0)
+			if tc.blobCount > 1 {
+				tx = newSignedBlobTxWithNBlobs(t, 1, 0, tc.blobCount)
+			}
+
+			metrics := calculateBlobMetrics(tx, blobBaseFee)
+
+			expectedBlobSizeBytes := int64(tx.BlobGas())
+			if metrics.blobSizeBytes != expectedBlobSizeBytes {
+				t.Errorf("blobSizeBytes = %d, want %d (tx.BlobGas())", metrics.blobSizeBytes, expectedBlobSizeBytes)
+			}
+
+			// Ensure the legacy multiplied value is not used
+			incorrectLegacyValue := int64(tx.BlobGas() * 128)
+			if metrics.blobSizeBytes == incorrectLegacyValue {
+				t.Errorf("blobSizeBytes unexpectedly equals legacy multiplied value: %d", incorrectLegacyValue)
+			}
+		})
+	}
+}
+
 func TestDetermineStartBlock_NumericBlock(t *testing.T) {
 	idx := newTestIndexer()
 	idx.network.StartBlock = "12345"
