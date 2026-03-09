@@ -43,6 +43,7 @@ func NewRouter(db DBProvider, indexers map[int]IndexerProvider, cfg *config.Conf
 	// Middleware
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(MaxBytesMiddleware)
 	r.Use(RateLimitMiddleware(rateLimiter))
 	r.Use(LoggerMiddleware)
 	r.Use(ContentTypeJSON)

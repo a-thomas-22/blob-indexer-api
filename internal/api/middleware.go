@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"mime"
 	"net/http"
 	"time"
@@ -13,6 +14,41 @@ import (
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
+
+// MaxRequestBodySize is the maximum allowed request body size (1MB).
+const MaxRequestBodySize = 1 << 20 // 1 MB
+
+// MaxBytesMiddleware limits the size of incoming request bodies.
+// If the body exceeds the limit, the request is rejected with
+// 413 Request Entity Too Large.
+func MaxBytesMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodySize)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isMaxBytesError checks whether err (or any error in its chain) is a
+// *http.MaxBytesError, which is produced when http.MaxBytesReader's
+// limit is exceeded.
+func isMaxBytesError(err error) bool {
+	var maxBytesErr *http.MaxBytesError
+	return errors.As(err, &maxBytesErr)
+}
+
+// RespondMaxBytesError writes a 413 JSON error response. Handlers that
+// decode the request body can call this when they detect the body was
+// too large.
+func RespondMaxBytesError(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusRequestEntityTooLarge)
+	if err := json.NewEncoder(w).Encode(Response{
+		Success: false,
+		Error:   "Request body too large (limit: 1MB)",
+	}); err != nil {
+		logger.Warn("failed to encode max-bytes error response", zap.Error(err))
+	}
+}
 
 // LoggerMiddleware logs HTTP requests with details
 func LoggerMiddleware(next http.Handler) http.Handler {
