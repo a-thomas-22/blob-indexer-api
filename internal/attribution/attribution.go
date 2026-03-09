@@ -22,6 +22,11 @@ type Service struct {
 	networkID int
 }
 
+// normalizeAddress lowercases an Ethereum address for consistent map lookups and DB queries.
+func normalizeAddress(address string) string {
+	return strings.ToLower(address)
+}
+
 // NewService creates a new attribution service
 func NewService(database *db.DB) *Service {
 	return &Service{
@@ -47,7 +52,7 @@ func (s *Service) Initialize(ctx context.Context) error {
 
 	// Populate the known users map
 	for _, user := range users {
-		s.knownUsers[strings.ToLower(user.Address)] = user.Name
+		s.knownUsers[normalizeAddress(user.Address)] = user.Name
 	}
 
 	logger.Info("Attribution service initialized",
@@ -64,7 +69,7 @@ func (s *Service) SetNetworkID(networkID int) {
 // GetUserAttribution gets the user attribution for an address
 func (s *Service) GetUserAttribution(address string) string {
 	// Normalize the address
-	normalizedAddress := strings.ToLower(address)
+	normalizedAddress := normalizeAddress(address)
 
 	// Check if the address is a known user
 	if name, ok := s.knownUsers[normalizedAddress]; ok {
@@ -78,7 +83,7 @@ func (s *Service) GetUserAttribution(address string) string {
 // UpdateUserLastSeen updates the last seen timestamp for a user
 func (s *Service) UpdateUserLastSeen(ctx context.Context, address string) error {
 	// Normalize the address
-	normalizedAddress := strings.ToLower(address)
+	normalizedAddress := normalizeAddress(address)
 
 	// Check if the address is a known user
 	if _, ok := s.knownUsers[normalizedAddress]; ok {
@@ -107,7 +112,7 @@ func (s *Service) BatchUpdateUserLastSeen(ctx context.Context, addresses []strin
 	// Filter to only known users and normalize addresses
 	knownAddresses := make([]string, 0, len(addresses))
 	for _, addr := range addresses {
-		normalized := strings.ToLower(addr)
+		normalized := normalizeAddress(addr)
 		if _, ok := s.knownUsers[normalized]; ok {
 			knownAddresses = append(knownAddresses, normalized)
 		}
@@ -132,7 +137,7 @@ func (s *Service) BatchUpdateUserLastSeen(ctx context.Context, addresses []strin
 // AddKnownUser adds a new known user
 func (s *Service) AddKnownUser(ctx context.Context, address, name, description, category string) error {
 	// Normalize the address
-	normalizedAddress := strings.ToLower(address)
+	normalizedAddress := normalizeAddress(address)
 
 	// Check if the user already exists
 	if _, ok := s.knownUsers[normalizedAddress]; ok {
