@@ -231,6 +231,64 @@ func TestNewClient_SuccessAndError(t *testing.T) {
 	}
 }
 
+func TestNewClient_WithRateLimit(t *testing.T) {
+	srv := rpc.NewServer()
+	ethSvc := &rpcEthService{latest: 10}
+	if err := srv.RegisterName("eth", ethSvc); err != nil {
+		t.Fatalf("register eth service: %v", err)
+	}
+	httpSrv := httptest.NewServer(srv)
+	defer httpSrv.Close()
+
+	client, err := NewClient(httpSrv.URL, WithRateLimit(RateLimitConfig{
+		RequestsPerSecond: 50,
+		MaxRetries:        2,
+		InitialBackoff:    time.Second,
+	}))
+	if err != nil {
+		t.Fatalf("NewClient() with rate limit error = %v", err)
+	}
+	defer client.Close()
+
+	if client.IsWebsocket() {
+		t.Fatal("expected HTTP client")
+	}
+
+	// Verify the client works by making an RPC call.
+	ctx := context.Background()
+	_, err = client.GetLatestBlockNumber(ctx)
+	if err != nil {
+		t.Fatalf("GetLatestBlockNumber() error = %v", err)
+	}
+}
+
+func TestNewClient_WithRateLimit_SubOneRate(t *testing.T) {
+	srv := rpc.NewServer()
+	ethSvc := &rpcEthService{latest: 5}
+	if err := srv.RegisterName("eth", ethSvc); err != nil {
+		t.Fatalf("register eth service: %v", err)
+	}
+	httpSrv := httptest.NewServer(srv)
+	defer httpSrv.Close()
+
+	// RequestsPerSecond < 1 should still result in burst=1.
+	client, err := NewClient(httpSrv.URL, WithRateLimit(RateLimitConfig{
+		RequestsPerSecond: 0.5,
+		MaxRetries:        1,
+		InitialBackoff:    time.Second,
+	}))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	_, err = client.GetLatestBlockNumber(ctx)
+	if err != nil {
+		t.Fatalf("GetLatestBlockNumber() error = %v", err)
+	}
+}
+
 func TestSubscriptions_SuccessPaths(t *testing.T) {
 	ethSvc := &rpcEthService{latest: 12}
 	c := newRPCClient(t, ethSvc, &rpcTxpoolService{}, true)

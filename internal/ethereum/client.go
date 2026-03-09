@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,20 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 )
+
+// ClientOption configures the Ethereum client.
+type ClientOption func(*clientOptions)
+
+type clientOptions struct {
+	rateLimitConfig *RateLimitConfig
+}
+
+// WithRateLimit configures RPC rate limiting and 429 handling.
+func WithRateLimit(cfg RateLimitConfig) ClientOption {
+	return func(o *clientOptions) {
+		o.rateLimitConfig = &cfg
+	}
+}
 
 // BlockSubscription represents a subscription to new blocks
 type BlockSubscription struct {
@@ -39,12 +54,28 @@ type Client struct {
 	mu               sync.RWMutex
 }
 
-// NewClient creates a new Ethereum client
-func NewClient(rpcURL string) (*Client, error) {
+// NewClient creates a new Ethereum client. Options are applied via functional
+// options (e.g., WithRateLimit). The variadic signature is backward-compatible.
+func NewClient(rpcURL string, opts ...ClientOption) (*Client, error) {
 	// Determine if this is a WebSocket URL
 	isWebsocket := strings.HasPrefix(rpcURL, "ws://") || strings.HasPrefix(rpcURL, "wss://")
 
-	rpcClient, err := rpc.Dial(rpcURL)
+	// Apply options.
+	var options clientOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	var rpcClient *rpc.Client
+	var err error
+
+	if !isWebsocket && options.rateLimitConfig != nil {
+		transport := newRateLimitedTransport(http.DefaultTransport, *options.rateLimitConfig)
+		httpClient := &http.Client{Transport: transport}
+		rpcClient, err = rpc.DialOptions(context.Background(), rpcURL, rpc.WithHTTPClient(httpClient))
+	} else {
+		rpcClient, err = rpc.Dial(rpcURL)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Ethereum node: %w", err)
 	}

@@ -16,6 +16,7 @@ require (
 	github.com/swaggo/http-swagger v1.3.4
 	github.com/swaggo/swag v1.16.4
 	go.uber.org/zap v1.27.0
+	golang.org/x/time v0.9.0
 )
 
 require (
