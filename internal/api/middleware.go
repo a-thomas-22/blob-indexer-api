@@ -41,10 +41,12 @@ func isMaxBytesError(err error) bool {
 func RespondMaxBytesError(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusRequestEntityTooLarge)
-	json.NewEncoder(w).Encode(Response{
+	if err := json.NewEncoder(w).Encode(Response{
 		Success: false,
 		Error:   "Request body too large (limit: 1MB)",
-	})
+	}); err != nil {
+		logger.Warn("failed to encode max-bytes error response", zap.Error(err))
+	}
 }
 
 // LoggerMiddleware logs HTTP requests with details
