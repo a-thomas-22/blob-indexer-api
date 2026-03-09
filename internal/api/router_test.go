@@ -294,6 +294,35 @@ func TestGetTopBlobUsers_BadNetwork(t *testing.T) {
 	}
 }
 
+func TestGetTopBlobUsers_InvalidOffset(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?offset=-5", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetTopBlobUsers_ExcessiveOffset(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(_ context.Context, dest interface{}, _ string, _ ...interface{}) error {
+			users := dest.(*[]models.BlobUserStats)
+			*users = []models.BlobUserStats{}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/?offset=%d", MaxQueryOffset+1), http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
 // --- DevMetrics ---
 
 func TestDevMetrics(t *testing.T) {
@@ -334,6 +363,17 @@ func TestDevLogs_FilterByLevel(t *testing.T) {
 func TestDevLogs_InvalidLimit(t *testing.T) {
 	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/api/dev/logs?limit=abc", http.NoBody)
+	w := httptest.NewRecorder()
+	a.DevLogs(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestDevLogs_InvalidLevel(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/api/dev/logs?level=critical", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
 
