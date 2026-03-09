@@ -18,6 +18,9 @@ import (
 // MaxQueryLimit is the maximum number of results any endpoint will return
 const MaxQueryLimit = 100
 
+// MaxQueryOffset is the maximum offset to prevent abuse of deep pagination
+const MaxQueryOffset = 10000
+
 // Response is a generic API response
 type Response struct {
 	Success bool        `json:"success"`
@@ -112,7 +115,8 @@ func (a *API) respondError(w http.ResponseWriter, status int, message string) {
 // @Accept json
 // @Produce json
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
-// @Param limit query int false "Number of blobs to return (default: 10)"
+// @Param limit query int false "Number of blobs to return (default: 10, max: 100)"
+// @Param offset query int false "Number of blobs to skip for pagination (default: 0, max: 10000)"
 // @Success 200 {object} Response{data=[]BlobResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -142,9 +146,23 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 		limit = MaxQueryLimit
 	}
 
+	offset := 0
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		var err error
+		offset, err = strconv.Atoi(offsetStr)
+		if err != nil || offset < 0 {
+			a.respondError(w, http.StatusBadRequest, "Invalid offset parameter")
+			return
+		}
+	}
+	if offset > MaxQueryOffset {
+		offset = MaxQueryOffset
+	}
+
 	logger.Debug("Getting latest blobs",
 		zap.String("network", network.Name),
-		zap.Int("limit", limit))
+		zap.Int("limit", limit),
+		zap.Int("offset", offset))
 
 	// Get the latest blobs
 	var blobs []models.Blob
@@ -152,9 +170,9 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 		SELECT * FROM blobs
 		WHERE confirmed = true AND network_id = $1
 		ORDER BY block_number DESC, blob_index ASC
-		LIMIT $2
+		LIMIT $2 OFFSET $3
 	`
-	if err := a.db.SelectContext(r.Context(), &blobs, query, network.ChainID, limit); err != nil {
+	if err := a.db.SelectContext(r.Context(), &blobs, query, network.ChainID, limit, offset); err != nil {
 		logger.Error("Failed to get latest blobs",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -198,7 +216,8 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 // @Accept json
 // @Produce json
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
-// @Param limit query int false "Number of blobs to return (default: 10)"
+// @Param limit query int false "Number of blobs to return (default: 10, max: 100)"
+// @Param offset query int false "Number of blobs to skip for pagination (default: 0, max: 10000)"
 // @Success 200 {object} Response{data=[]BlobResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -228,9 +247,23 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 		limit = MaxQueryLimit
 	}
 
+	offset := 0
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		var err error
+		offset, err = strconv.Atoi(offsetStr)
+		if err != nil || offset < 0 {
+			a.respondError(w, http.StatusBadRequest, "Invalid offset parameter")
+			return
+		}
+	}
+	if offset > MaxQueryOffset {
+		offset = MaxQueryOffset
+	}
+
 	logger.Debug("Getting mempool blobs",
 		zap.String("network", network.Name),
-		zap.Int("limit", limit))
+		zap.Int("limit", limit),
+		zap.Int("offset", offset))
 
 	// Get the pending blobs
 	var blobs []models.Blob
@@ -238,9 +271,9 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 		SELECT * FROM blobs
 		WHERE confirmed = false AND network_id = $1
 		ORDER BY timestamp DESC
-		LIMIT $2
+		LIMIT $2 OFFSET $3
 	`
-	if err := a.db.SelectContext(r.Context(), &blobs, query, network.ChainID, limit); err != nil {
+	if err := a.db.SelectContext(r.Context(), &blobs, query, network.ChainID, limit, offset); err != nil {
 		logger.Error("Failed to get pending blobs",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -354,7 +387,8 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 // @Accept json
 // @Produce json
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
-// @Param limit query int false "Number of users to return (default: 10)"
+// @Param limit query int false "Number of users to return (default: 10, max: 100)"
+// @Param offset query int false "Number of users to skip for pagination (default: 0, max: 10000)"
 // @Success 200 {object} Response{data=[]UserResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -384,12 +418,26 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 		limit = MaxQueryLimit
 	}
 
+	offset := 0
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		var err error
+		offset, err = strconv.Atoi(offsetStr)
+		if err != nil || offset < 0 {
+			a.respondError(w, http.StatusBadRequest, "Invalid offset parameter")
+			return
+		}
+	}
+	if offset > MaxQueryOffset {
+		offset = MaxQueryOffset
+	}
+
 	logger.Debug("Getting top blob users",
 		zap.String("network", network.Name),
-		zap.Int("limit", limit))
+		zap.Int("limit", limit),
+		zap.Int("offset", offset))
 
 	// Get the top blob users
-	users, err := idx.GetTopBlobUsers(r.Context(), limit)
+	users, err := idx.GetTopBlobUsers(r.Context(), limit, offset)
 	if err != nil {
 		logger.Error("Failed to get top blob users",
 			zap.String("network", network.Name),
@@ -1073,6 +1121,11 @@ func (a *API) DevReindex(w http.ResponseWriter, r *http.Request) {
 	// Parse the request body
 	var req ReindexRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if isMaxBytesError(err) {
+			logger.Warn("Reindex request body too large", zap.Error(err))
+			RespondMaxBytesError(w)
+			return
+		}
 		logger.Warn("Invalid reindex request body", zap.Error(err))
 		a.respondError(w, http.StatusBadRequest, "Invalid request body")
 		return

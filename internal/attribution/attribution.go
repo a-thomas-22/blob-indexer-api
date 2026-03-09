@@ -196,7 +196,7 @@ func (s *Service) GetKnownUsers(ctx context.Context) ([]models.BlobUser, error) 
 }
 
 // GetTopBlobUsers gets the top blob users by number of blobs
-func (s *Service) GetTopBlobUsers(ctx context.Context, limit int) ([]models.BlobUserStats, error) {
+func (s *Service) GetTopBlobUsers(ctx context.Context, limit, offset int) ([]models.BlobUserStats, error) {
 	var result []models.BlobUserStats
 
 	query := `
@@ -210,9 +210,9 @@ func (s *Service) GetTopBlobUsers(ctx context.Context, limit int) ([]models.Blob
 		WHERE network_id = $1
 		GROUP BY from_address, user_attribution
 		ORDER BY blob_count DESC
-		LIMIT $2
+		LIMIT $2 OFFSET $3
 	`
-	err := s.db.SelectContext(ctx, &result, query, s.networkID, limit)
+	err := s.db.SelectContext(ctx, &result, query, s.networkID, limit, offset)
 	if err != nil {
 		logger.Error("Failed to get top blob users",
 			zap.Int("network_id", s.networkID),
