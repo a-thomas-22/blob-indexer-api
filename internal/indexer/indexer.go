@@ -122,9 +122,8 @@ type Indexer struct {
 func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *config.Config, network config.NetworkConfig) *Indexer {
 	indexerCtx, cancel := context.WithCancel(ctx)
 
-	// Create attribution service and set network ID
-	attributionSvc := attribution.NewService(database)
-	attributionSvc.SetNetworkID(network.ChainID)
+	// Create attribution service with network ID context.
+	attributionSvc := attribution.NewService(database, network.ChainID)
 
 	// Determine the number of workers: use config value, or fall back to CPU-based heuristic
 	workerCount := cfg.Indexer.WorkerCount

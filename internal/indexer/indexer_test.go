@@ -38,8 +38,7 @@ func newTestIndexer() *Indexer {
 		Enabled:    true,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	attrSvc := attribution.NewService(nil)
-	attrSvc.SetNetworkID(network.ChainID)
+	attrSvc := attribution.NewService(nil, network.ChainID)
 	return &Indexer{
 		attribution:            attrSvc,
 		config:                 cfg,
