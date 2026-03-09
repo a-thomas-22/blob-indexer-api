@@ -47,7 +47,7 @@ func syntheticChainConfig(chainID int) *params.ChainConfig {
 // GetBlobParams returns the active blob parameters for a chain config at a given block timestamp.
 func GetBlobParams(cfg *params.ChainConfig, time uint64) BlobParams {
 	target := eip4844.TargetBlobsPerBlock(cfg, time)
-	max := eip4844.MaxBlobsPerBlock(cfg, time)
+	maxBlobs := eip4844.MaxBlobsPerBlock(cfg, time)
 
 	var updateFraction uint64
 	if bc := getActiveBlobConfig(cfg, time); bc != nil {
@@ -56,10 +56,10 @@ func GetBlobParams(cfg *params.ChainConfig, time uint64) BlobParams {
 
 	return BlobParams{
 		Target:         target,
-		Max:            max,
+		Max:            maxBlobs,
 		UpdateFraction: updateFraction,
 		TargetGas:      uint64(target) * params.BlobTxBlobGasPerBlob,
-		MaxGas:         uint64(max) * params.BlobTxBlobGasPerBlob,
+		MaxGas:         uint64(maxBlobs) * params.BlobTxBlobGasPerBlob,
 	}
 }
 
