@@ -1,4 +1,4 @@
-.PHONY: build build-api build-indexer run-api run-indexer test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall ci staticcheck
+.PHONY: build build-api build-indexer run-api run-indexer test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall ci staticcheck chart-lint chart-test chart-test-run kind-create kind-delete
 
 # Go parameters
 GOCMD=go
@@ -121,6 +121,32 @@ helm-upgrade:
 
 helm-uninstall:
 	helm uninstall blob-indexer
+
+# Chart testing
+KIND_CLUSTER_NAME ?= blob-indexer-test
+
+chart-lint:
+	ct lint --config charts/ct.yaml
+
+chart-test: kind-create chart-test-run kind-delete
+
+chart-test-run:
+	docker build -f Dockerfile.api -t blob-indexer-api:test .
+	docker build -f Dockerfile.indexer -t blob-indexer-indexer:test .
+	kind load docker-image blob-indexer-api:test --name $(KIND_CLUSTER_NAME)
+	kind load docker-image blob-indexer-indexer:test --name $(KIND_CLUSTER_NAME)
+	helm repo add bitnami https://charts.bitnami.com/bitnami || true
+	helm dependency update ./charts/blob-indexer
+	ct install \
+		--config charts/ct.yaml \
+		--helm-extra-set-args "--values charts/blob-indexer/values-test.yaml --set appConfig.networks[0].rpc_url=$(SEPOLIA_RPC_URL)" \
+		--helm-extra-args "--timeout 300s"
+
+kind-create:
+	kind create cluster --name $(KIND_CLUSTER_NAME) --wait 60s
+
+kind-delete:
+	kind delete cluster --name $(KIND_CLUSTER_NAME)
 
 # Database commands
 db-migrate:

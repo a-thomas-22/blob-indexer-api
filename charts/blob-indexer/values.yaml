@@ -122,7 +122,7 @@ postgresql:
 
 # Health check configuration
 healthCheck:
-  path: /api/status
+  path: /api/v1/status
   initialDelaySeconds: 30
   periodSeconds: 10
 
