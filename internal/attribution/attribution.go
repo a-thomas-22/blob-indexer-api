@@ -3,6 +3,7 @@ package attribution
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lib/pq"
@@ -17,7 +18,8 @@ import (
 type Service struct {
 	db *db.DB
 	// Map of known addresses to user names for quick lookups
-	knownUsers map[string]string
+	knownUsers   map[string]string
+	knownUsersMu sync.RWMutex
 	// Network ID
 	networkID int
 }
@@ -51,13 +53,17 @@ func (s *Service) Initialize(ctx context.Context) error {
 	}
 
 	// Populate the known users map
+	s.knownUsersMu.Lock()
+	s.knownUsers = make(map[string]string, len(users))
 	for _, user := range users {
 		s.knownUsers[normalizeAddress(user.Address)] = user.Name
 	}
+	knownUsersCount := len(s.knownUsers)
+	s.knownUsersMu.Unlock()
 
 	logger.Info("Attribution service initialized",
 		zap.Int("network_id", s.networkID),
-		zap.Int("known_users", len(s.knownUsers)))
+		zap.Int("known_users", knownUsersCount))
 	return nil
 }
 
@@ -72,9 +78,12 @@ func (s *Service) GetUserAttribution(address string) string {
 	normalizedAddress := normalizeAddress(address)
 
 	// Check if the address is a known user
+	s.knownUsersMu.RLock()
 	if name, ok := s.knownUsers[normalizedAddress]; ok {
+		s.knownUsersMu.RUnlock()
 		return name
 	}
+	s.knownUsersMu.RUnlock()
 
 	// Unknown user
 	return ""
@@ -86,7 +95,10 @@ func (s *Service) UpdateUserLastSeen(ctx context.Context, address string) error 
 	normalizedAddress := normalizeAddress(address)
 
 	// Check if the address is a known user
-	if _, ok := s.knownUsers[normalizedAddress]; ok {
+	s.knownUsersMu.RLock()
+	_, ok := s.knownUsers[normalizedAddress]
+	s.knownUsersMu.RUnlock()
+	if ok {
 		// Update the last seen timestamp
 		query := "UPDATE blob_users SET last_seen = $1 WHERE address = $2 AND network_id = $3"
 		_, err := s.db.ExecContext(ctx, query, time.Now(), normalizedAddress, s.networkID)
@@ -111,12 +123,14 @@ func (s *Service) BatchUpdateUserLastSeen(ctx context.Context, addresses []strin
 
 	// Filter to only known users and normalize addresses
 	knownAddresses := make([]string, 0, len(addresses))
+	s.knownUsersMu.RLock()
 	for _, addr := range addresses {
 		normalized := normalizeAddress(addr)
 		if _, ok := s.knownUsers[normalized]; ok {
 			knownAddresses = append(knownAddresses, normalized)
 		}
 	}
+	s.knownUsersMu.RUnlock()
 
 	if len(knownAddresses) == 0 {
 		return nil
@@ -140,7 +154,10 @@ func (s *Service) AddKnownUser(ctx context.Context, address, name, description, 
 	normalizedAddress := normalizeAddress(address)
 
 	// Check if the user already exists
-	if _, ok := s.knownUsers[normalizedAddress]; ok {
+	s.knownUsersMu.RLock()
+	_, exists := s.knownUsers[normalizedAddress]
+	s.knownUsersMu.RUnlock()
+	if exists {
 		logger.Info("Updating existing known user",
 			zap.Int("network_id", s.networkID),
 			zap.String("address", normalizedAddress),
@@ -183,7 +200,9 @@ func (s *Service) AddKnownUser(ctx context.Context, address, name, description, 
 	}
 
 	// Add to the known users map
+	s.knownUsersMu.Lock()
 	s.knownUsers[normalizedAddress] = name
+	s.knownUsersMu.Unlock()
 	return nil
 }
 
