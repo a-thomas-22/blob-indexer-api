@@ -1,21 +1,13 @@
 package config
 
 import (
-	"os"
 	"testing"
 	"time"
 )
 
 func TestLoadForAPI(t *testing.T) {
-	originalConfigPath := os.Getenv("CONFIG_PATH")
-	originalDBURL := os.Getenv("DB_URL")
-	defer func() {
-		os.Setenv("CONFIG_PATH", originalConfigPath)
-		os.Setenv("DB_URL", originalDBURL)
-	}()
-
-	os.Setenv("CONFIG_PATH", "../../config.yaml")
-	os.Setenv("DB_URL", "postgres://test:test@localhost:5432/testdb")
+	t.Setenv("CONFIG_PATH", "../../config.yaml")
+	t.Setenv("DB_URL", "postgres://test:test@localhost:5432/testdb")
 
 	// LoadForAPI should succeed even without RPC URLs set
 	cfg, err := LoadForAPI()
@@ -59,25 +51,10 @@ func TestValidateConfig_RequiresRPC(t *testing.T) {
 }
 
 func TestViperConfig(t *testing.T) {
-	// Save original environment variables to restore later
-	originalConfigPath := os.Getenv("CONFIG_PATH")
-	originalDBURL := os.Getenv("DB_URL")
-	originalMainnetRPCURL := os.Getenv("NETWORK_MAINNET_RPC_URL")
-	originalSepoliaRPCURL := os.Getenv("NETWORK_SEPOLIA_RPC_URL")
-
-	// Clean up after the test
-	defer func() {
-		os.Setenv("CONFIG_PATH", originalConfigPath)
-		os.Setenv("DB_URL", originalDBURL)
-		os.Setenv("NETWORK_MAINNET_RPC_URL", originalMainnetRPCURL)
-		os.Setenv("NETWORK_SEPOLIA_RPC_URL", originalSepoliaRPCURL)
-	}()
-
-	// Set up test environment
-	os.Setenv("CONFIG_PATH", "../../config.yaml")
-	os.Setenv("DB_URL", "postgres://test:test@localhost:5432/testdb")
-	os.Setenv("NETWORK_MAINNET_RPC_URL", "https://mainnet.example.com")
-	os.Setenv("NETWORK_SEPOLIA_RPC_URL", "https://sepolia.example.com")
+	t.Setenv("CONFIG_PATH", "../../config.yaml")
+	t.Setenv("DB_URL", "postgres://test:test@localhost:5432/testdb")
+	t.Setenv("NETWORK_MAINNET_RPC_URL", "https://mainnet.example.com")
+	t.Setenv("NETWORK_SEPOLIA_RPC_URL", "https://sepolia.example.com")
 
 	// Load the configuration
 	cfg, err := Load()

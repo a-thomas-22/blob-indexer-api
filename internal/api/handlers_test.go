@@ -108,7 +108,15 @@ func TestRespondJSON_EncodeError(t *testing.T) {
 	api.respondJSON(w, http.StatusOK, map[string]interface{}{
 		"bad": math.Inf(1),
 	})
-	// Should not panic; the error handler writes an error response
+	if strings.Contains(w.Body.String(), "unsupported value") {
+		t.Fatal("internal JSON encoding error should not be exposed in response body")
+	}
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected status 500 on encode error, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "internal server error") {
+		t.Errorf("expected safe error body, got %q", w.Body.String())
+	}
 }
 
 func TestFormatBytes_LargeValues(t *testing.T) {

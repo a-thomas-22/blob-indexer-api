@@ -436,6 +436,9 @@ func TestRetryFailedBlocks_AllExceeded(t *testing.T) {
 	default:
 		// expected
 	}
+	if len(idx.failedBlocks) != 0 {
+		t.Fatalf("expected permanently failed blocks to be removed, got %d entries", len(idx.failedBlocks))
+	}
 }
 
 func TestRetryFailedBlocks_CancelledContext(t *testing.T) {
