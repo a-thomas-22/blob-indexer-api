@@ -42,8 +42,8 @@ linters:
         - G101
         - G104
         - G115
-        - G703
         - G304
+        - G703
     misspell:
       locale: US
     revive:
@@ -83,10 +83,6 @@ linters:
       - linters:
           - gosec
         path: internal/api/handlers\.go
-        text: G201
-      - linters:
-          - gosec
-        path: internal/db/
         text: G201
     paths:
       - third_party$
