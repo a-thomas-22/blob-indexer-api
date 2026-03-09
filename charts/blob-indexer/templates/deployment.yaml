@@ -101,8 +101,10 @@ spec:
         - name: {{ .Chart.Name }}-indexer
           image: "{{ .Values.indexer.image.repository | default .Values.image.repository }}:{{ .Values.indexer.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
           securityContext:
-            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: CONFIG_PATH
               value: /etc/config/config.yaml
