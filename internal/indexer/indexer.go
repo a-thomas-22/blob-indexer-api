@@ -1299,6 +1299,6 @@ func (i *Indexer) GetBlobCounts(ctx context.Context) (confirmedCount, pendingCou
 }
 
 // GetTopBlobUsers gets the top blob users by number of blobs for this network
-func (i *Indexer) GetTopBlobUsers(ctx context.Context, limit int) ([]models.BlobUserStats, error) {
-	return i.attribution.GetTopBlobUsers(ctx, limit)
+func (i *Indexer) GetTopBlobUsers(ctx context.Context, limit, offset int) ([]models.BlobUserStats, error) {
+	return i.attribution.GetTopBlobUsers(ctx, limit, offset)
 }
