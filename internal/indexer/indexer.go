@@ -53,6 +53,41 @@ type BlockTask struct {
 	BlockNumber uint64
 }
 
+type blobMetrics struct {
+	blobSizeBytes     int64
+	baseFeePerBlobGas string
+	tipPerBlobGas     string
+	totalCostETH      string
+	maxFeePerBlobGas  *string
+	blobGasUsed       *int64
+}
+
+func calculateBlobMetrics(tx *types.Transaction, blobBaseFee *big.Int) blobMetrics {
+	maxFeePerBlobGas := tx.BlobGasFeeCap()
+	tipPerBlobGas := new(big.Int).Sub(maxFeePerBlobGas, blobBaseFee)
+	if tipPerBlobGas.Sign() < 0 {
+		tipPerBlobGas = big.NewInt(0)
+	}
+
+	blobGasUsed := tx.BlobGas()
+	totalCost := new(big.Int).Mul(
+		new(big.Int).Add(blobBaseFee, tipPerBlobGas),
+		new(big.Int).SetUint64(blobGasUsed),
+	)
+
+	maxFeeStr := maxFeePerBlobGas.String()
+	blobGasUsedInt := int64(blobGasUsed)
+
+	return blobMetrics{
+		blobSizeBytes:     int64(blobGasUsed * 128), // Approximate size
+		baseFeePerBlobGas: blobBaseFee.String(),
+		tipPerBlobGas:     tipPerBlobGas.String(),
+		totalCostETH:      totalCost.String(),
+		maxFeePerBlobGas:  &maxFeeStr,
+		blobGasUsed:       &blobGasUsedInt,
+	}
+}
+
 // Indexer is responsible for indexing blob transactions
 type Indexer struct {
 	db                     *db.DB
@@ -623,22 +658,7 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 	// Get the user attribution
 	userAttribution := i.attribution.GetUserAttribution(from)
 
-	// Calculate the tip per blob gas
-	maxFeePerBlobGas := tx.BlobGasFeeCap()
-	tipPerBlobGas := new(big.Int).Sub(maxFeePerBlobGas, blobBaseFee)
-	if tipPerBlobGas.Sign() < 0 {
-		tipPerBlobGas = big.NewInt(0)
-	}
-
-	// Calculate the total cost
-	blobGasUsed := tx.BlobGas()
-	totalCost := new(big.Int).Mul(
-		new(big.Int).Add(blobBaseFee, tipPerBlobGas),
-		new(big.Int).SetUint64(blobGasUsed),
-	)
-
-	maxFeeStr := maxFeePerBlobGas.String()
-	blobGasUsedInt := int64(blobGasUsed)
+	metrics := calculateBlobMetrics(tx, blobBaseFee)
 
 	// Create the blob record
 	blob := models.Blob{
@@ -648,15 +668,15 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 		TxHash:            hash.Hex(),
 		FromAddress:       from,
 		UserAttribution:   userAttribution,
-		BlobSizeBytes:     int64(blobGasUsed * 128), // Approximate size
-		BaseFeePerBlobGas: blobBaseFee.String(),
-		TipPerBlobGas:     tipPerBlobGas.String(),
-		TotalCostETH:      totalCost.String(),
+		BlobSizeBytes:     metrics.blobSizeBytes,
+		BaseFeePerBlobGas: metrics.baseFeePerBlobGas,
+		TipPerBlobGas:     metrics.tipPerBlobGas,
+		TotalCostETH:      metrics.totalCostETH,
 		Timestamp:         time.Now(),
 		Confirmed:         false,
 		IndexerVersion:    i.indexerVersion,
-		MaxFeePerBlobGas:  &maxFeeStr,
-		BlobGasUsed:       &blobGasUsedInt,
+		MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
+		BlobGasUsed:       metrics.blobGasUsed,
 	}
 
 	// Insert the blob record
@@ -736,22 +756,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		// Get the user attribution
 		userAttribution := i.attribution.GetUserAttribution(from)
 
-		// Calculate the tip per blob gas
-		maxFeePerBlobGas := tx.BlobGasFeeCap()
-		tipPerBlobGas := new(big.Int).Sub(maxFeePerBlobGas, blobBaseFee)
-		if tipPerBlobGas.Sign() < 0 {
-			tipPerBlobGas = big.NewInt(0)
-		}
-
-		// Calculate the total cost
-		blobGasUsed := tx.BlobGas()
-		totalCost := new(big.Int).Mul(
-			new(big.Int).Add(blobBaseFee, tipPerBlobGas),
-			new(big.Int).SetUint64(blobGasUsed),
-		)
-
-		maxFeeStr := maxFeePerBlobGas.String()
-		blobGasUsedInt := int64(blobGasUsed)
+		metrics := calculateBlobMetrics(tx, blobBaseFee)
 
 		blobs = append(blobs, models.Blob{
 			NetworkID:         i.network.ChainID,
@@ -760,15 +765,15 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 			TxHash:            tx.Hash().Hex(),
 			FromAddress:       from,
 			UserAttribution:   userAttribution,
-			BlobSizeBytes:     int64(blobGasUsed * 128), // Approximate size
-			BaseFeePerBlobGas: blobBaseFee.String(),
-			TipPerBlobGas:     tipPerBlobGas.String(),
-			TotalCostETH:      totalCost.String(),
+			BlobSizeBytes:     metrics.blobSizeBytes,
+			BaseFeePerBlobGas: metrics.baseFeePerBlobGas,
+			TipPerBlobGas:     metrics.tipPerBlobGas,
+			TotalCostETH:      metrics.totalCostETH,
 			Timestamp:         timestamp,
 			Confirmed:         true,
 			IndexerVersion:    i.indexerVersion,
-			MaxFeePerBlobGas:  &maxFeeStr,
-			BlobGasUsed:       &blobGasUsedInt,
+			MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
+			BlobGasUsed:       metrics.blobGasUsed,
 		})
 
 		if userAttribution != "" {
@@ -1101,22 +1106,7 @@ func (i *Indexer) processPendingTransactions() error {
 		// Get the user attribution
 		userAttribution := i.attribution.GetUserAttribution(from)
 
-		// Calculate the tip per blob gas
-		maxFeePerBlobGas := tx.BlobGasFeeCap()
-		tipPerBlobGas := new(big.Int).Sub(maxFeePerBlobGas, blobBaseFee)
-		if tipPerBlobGas.Sign() < 0 {
-			tipPerBlobGas = big.NewInt(0)
-		}
-
-		// Calculate the total cost
-		blobGasUsed := tx.BlobGas()
-		totalCost := new(big.Int).Mul(
-			new(big.Int).Add(blobBaseFee, tipPerBlobGas),
-			new(big.Int).SetUint64(blobGasUsed),
-		)
-
-		maxFeeStr := maxFeePerBlobGas.String()
-		blobGasUsedInt := int64(blobGasUsed)
+		metrics := calculateBlobMetrics(tx, blobBaseFee)
 
 		// Create the blob record
 		blob := models.Blob{
@@ -1126,15 +1116,15 @@ func (i *Indexer) processPendingTransactions() error {
 			TxHash:            tx.Hash().Hex(),
 			FromAddress:       from,
 			UserAttribution:   userAttribution,
-			BlobSizeBytes:     int64(blobGasUsed * 128), // Approximate size
-			BaseFeePerBlobGas: blobBaseFee.String(),
-			TipPerBlobGas:     tipPerBlobGas.String(),
-			TotalCostETH:      totalCost.String(),
+			BlobSizeBytes:     metrics.blobSizeBytes,
+			BaseFeePerBlobGas: metrics.baseFeePerBlobGas,
+			TipPerBlobGas:     metrics.tipPerBlobGas,
+			TotalCostETH:      metrics.totalCostETH,
 			Timestamp:         time.Now(),
 			Confirmed:         false,
 			IndexerVersion:    i.indexerVersion,
-			MaxFeePerBlobGas:  &maxFeeStr,
-			BlobGasUsed:       &blobGasUsedInt,
+			MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
+			BlobGasUsed:       metrics.blobGasUsed,
 		}
 
 		// Insert the blob record
