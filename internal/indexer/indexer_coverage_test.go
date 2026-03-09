@@ -65,7 +65,7 @@ func (e *testEthRPC) GetBlockByNumber(_ context.Context, blockNum string, _ bool
 		Number:        big.NewInt(int64(number)),
 		GasLimit:      30_000_000,
 		GasUsed:       0,
-		Time:          uint64(time.Now().Unix()),
+		Time:          number * 12, // deterministic: 12-second slot time per block number
 		Extra:         []byte{},
 		ExcessBlobGas: &excessBlobGas,
 		BlobGasUsed:   &blobGasUsed,
