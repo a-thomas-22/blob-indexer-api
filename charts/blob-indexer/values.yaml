@@ -69,6 +69,10 @@ configMap:
 databaseSecret:
   create: true
 
+# Database security settings for constructed URLs.
+database:
+  sslMode: require
+
 # Application configuration -- rendered into a ConfigMap as YAML.
 # Maps directly to the Config struct in internal/config/config.go.
 appConfig:
