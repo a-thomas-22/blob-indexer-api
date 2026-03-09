@@ -167,7 +167,7 @@ func loadConfig() (*Config, error) {
 			logger.Error("Error reading config file", zap.Error(err))
 			return nil, fmt.Errorf("failed to read config file: %w", err)
 		}
-		logger.Info("Config file not found, continuing with defaults and environment variables")
+		logger.Warn("Config file not found, continuing with defaults and environment variables")
 	} else {
 		logger.Info("Successfully loaded config file", zap.String("path", v.ConfigFileUsed()))
 	}
@@ -375,7 +375,7 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 			logger.Error("Database URL is required", zap.String("hint", "set DB_URL environment variable or add database.url to config file"))
 			return fmt.Errorf("database URL is required - set DB_URL environment variable or add database.url to config file")
 		}
-		logger.Warn("Database URL is not set in config, using DB_URL environment variable")
+		logger.Warn("Database URL is not set in config, but DB_URL environment variable is set")
 		cfg.Database.URL = os.Getenv("DB_URL")
 	}
 
@@ -386,7 +386,7 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 		logger.Error("At least one network configuration is required")
 		return fmt.Errorf("at least one network configuration is required")
 	}
-	logger.Info("Found networks in configuration", zap.Int("count", len(cfg.Networks)))
+	logger.Info("Networks found in configuration", zap.Int("count", len(cfg.Networks)))
 
 	for i, network := range cfg.Networks {
 		logger.Debug("Validating network", zap.Int("index", i+1), zap.String("name", network.Name))
@@ -400,24 +400,20 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 			logger.Error("Network has invalid chain ID", zap.String("network", network.Name), zap.Int("chain_id", network.ChainID))
 			return fmt.Errorf("network '%s' has an invalid chain ID: %d", network.Name, network.ChainID)
 		}
-		logger.Debug("Network chain ID", zap.String("network", network.Name), zap.Int("chain_id", network.ChainID))
+		logger.Debug("Network chain id", zap.String("network", network.Name), zap.Int("chain_id", network.ChainID))
 
 		if requireRPC {
 			if network.RpcURL == "" {
 				logger.Error("Network is missing an RPC URL", zap.String("network", network.Name))
 				return fmt.Errorf("network '%s' is missing an RPC URL", network.Name)
 			}
-			logger.Debug("Network RPC URL configured",
-				zap.String("network", network.Name),
-				zap.String("rpc_url", maskURL(network.RpcURL)))
+			logger.Debug("Network RPC URL configured", zap.String("network", network.Name), zap.String("rpc_url", maskURL(network.RpcURL)))
 
 			if network.StartBlock == "" {
 				logger.Error("Network is missing a start block", zap.String("network", network.Name))
 				return fmt.Errorf("network '%s' is missing a start block", network.Name)
 			}
-			logger.Debug("Network start block configured",
-				zap.String("network", network.Name),
-				zap.String("start_block", network.StartBlock))
+			logger.Debug("Network start block configured", zap.String("network", network.Name), zap.String("start_block", network.StartBlock))
 		}
 
 		logger.Debug("Network enabled status", zap.String("network", network.Name), zap.Bool("enabled", network.Enabled))
