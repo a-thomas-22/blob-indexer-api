@@ -7,6 +7,8 @@ import (
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
 
+const testUserOptimism = "Optimism"
+
 func TestNewService(t *testing.T) {
 	s := NewService(nil)
 	if s == nil {
@@ -28,13 +30,13 @@ func TestSetNetworkID(t *testing.T) {
 	}
 }
 
-func TestGetUserAttribution_Known(t *testing.T) {
+func TestGetUserAttribution_KnownUser(t *testing.T) {
 	s := NewService(nil)
-	s.knownUsers["0xabcdef"] = "Optimism"
+	s.knownUsers["0xabcdef1234567890abcdef1234567890abcdef12"] = testUserOptimism
 
-	result := s.GetUserAttribution("0xABCDEF")
-	if result != "Optimism" {
-		t.Errorf("expected 'Optimism', got %q", result)
+	result := s.GetUserAttribution("0xABCDEF1234567890ABCDEF1234567890ABCDEF12")
+	if result != testUserOptimism {
+		t.Errorf("expected %q, got %q", testUserOptimism, result)
 	}
 }
 
@@ -48,7 +50,7 @@ func TestGetUserAttribution_Unknown(t *testing.T) {
 
 func TestUpdateUserLastSeen_UnknownAddress(t *testing.T) {
 	s := NewService(nil)
-	// Unknown address should return nil without DB call
+	// Unknown address should return nil without DB call.
 	err := s.UpdateUserLastSeen(context.TODO(), "0xunknown")
 	if err != nil {
 		t.Errorf("expected nil error for unknown address, got %v", err)
@@ -59,15 +61,34 @@ func TestGetUserAttribution_CaseInsensitive(t *testing.T) {
 	s := NewService(nil)
 	s.knownUsers["0xdeadbeef"] = "TestUser"
 
-	tests := []string{
-		"0xDeAdBeEf",
-		"0xDEADBEEF",
-		"0xdeadbeef",
-	}
-	for _, addr := range tests {
+	for _, addr := range []string{"0xDeAdBeEf", "0xDEADBEEF", "0xdeadbeef"} {
 		result := s.GetUserAttribution(addr)
 		if result != "TestUser" {
-			t.Errorf("GetUserAttribution(%q) = %q, want 'TestUser'", addr, result)
+			t.Errorf("GetUserAttribution(%q) = %q, want %q", addr, result, "TestUser")
+		}
+	}
+}
+
+func TestGetUserAttribution_MultipleUsers(t *testing.T) {
+	s := NewService(nil)
+	s.knownUsers["0xaaa"] = testUserOptimism
+	s.knownUsers["0xbbb"] = "Arbitrum"
+	s.knownUsers["0xccc"] = "Base"
+
+	tests := []struct {
+		address string
+		want    string
+	}{
+		{"0xAAA", testUserOptimism},
+		{"0xBBB", "Arbitrum"},
+		{"0xCCC", "Base"},
+		{"0xDDD", ""},
+	}
+
+	for _, tt := range tests {
+		result := s.GetUserAttribution(tt.address)
+		if result != tt.want {
+			t.Errorf("GetUserAttribution(%q) = %q, want %q", tt.address, result, tt.want)
 		}
 	}
 }

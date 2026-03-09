@@ -45,7 +45,6 @@ import (
 	"go.uber.org/zap"
 
 	_ "github.com/a-thomas-22/blob-indexer-api/docs"
-
 	"github.com/a-thomas-22/blob-indexer-api/internal/api"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
@@ -57,9 +56,7 @@ import (
 func main() {
 	// Initialize logger
 	logger.Initialize()
-	defer func() {
-		_ = logger.Sync()
-	}()
+	defer func() { _ = logger.Sync() }()
 
 	// Load configuration
 	cfg, err := config.Load()
@@ -123,7 +120,7 @@ func main() {
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:           router,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	// Channel to listen for shutdown signals
