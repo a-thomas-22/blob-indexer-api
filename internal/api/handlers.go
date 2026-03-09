@@ -53,12 +53,12 @@ const (
 	queryBlobStats = `
 		SELECT
 			COUNT(*) as total_blobs,
-			SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END) as total_confirmed_blobs,
-			SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END) as total_pending_blobs,
-			AVG(base_fee_per_blob_gas::numeric) as average_base_fee,
-			AVG(tip_per_blob_gas::numeric) as average_tip,
-			AVG(total_cost_eth::numeric) as average_total_cost,
-			MAX(timestamp) as last_indexed_time
+			COALESCE(SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END), 0) as total_confirmed_blobs,
+			COALESCE(SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END), 0) as total_pending_blobs,
+			COALESCE(AVG(base_fee_per_blob_gas::numeric), '0'::numeric) as average_base_fee,
+			COALESCE(AVG(tip_per_blob_gas::numeric), '0'::numeric) as average_tip,
+			COALESCE(AVG(total_cost_eth::numeric), '0'::numeric) as average_total_cost,
+			COALESCE(MAX(timestamp), '1970-01-01'::timestamp) as last_indexed_time
 		FROM blobs
 		WHERE network_id = $1
 	`
