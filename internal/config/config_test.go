@@ -22,7 +22,7 @@ func TestViperConfig(t *testing.T) {
 	}()
 
 	// Set up test environment
-	os.Setenv("CONFIG_PATH", "../../railway-config.yaml")
+	os.Setenv("CONFIG_PATH", "../../config.yaml")
 	os.Setenv("DB_URL", "postgres://test:test@localhost:5432/testdb")
 	os.Setenv("NETWORK_MAINNET_RPC_URL", "https://mainnet.example.com")
 	os.Setenv("NETWORK_SEPOLIA_RPC_URL", "https://sepolia.example.com")
@@ -30,17 +30,6 @@ func TestViperConfig(t *testing.T) {
 	// Load the configuration
 	cfg, err := Load()
 	if err != nil {
-		// Print more debug information
-		t.Logf("Error loading configuration: %v", err)
-
-		// Try to load the railway-config.yaml file directly to see its contents
-		data, readErr := os.ReadFile("../../railway-config.yaml")
-		if readErr != nil {
-			t.Logf("Error reading railway-config.yaml: %v", readErr)
-		} else {
-			t.Logf("railway-config.yaml contents:\n%s", string(data))
-		}
-
 		t.Fatalf("Failed to load configuration: %v", err)
 	}
 
@@ -54,8 +43,8 @@ func TestViperConfig(t *testing.T) {
 		t.Errorf("Expected server port to be 8080, got: %d", cfg.Server.Port)
 	}
 
-	if cfg.Server.DevMode != false {
-		t.Errorf("Expected server dev mode to be false, got: %v", cfg.Server.DevMode)
+	if cfg.Server.DevMode != true {
+		t.Errorf("Expected server dev mode to be true, got: %v", cfg.Server.DevMode)
 	}
 
 	// Verify logging configuration from config file
@@ -72,35 +61,41 @@ func TestViperConfig(t *testing.T) {
 		t.Errorf("Expected indexer version to be v1.0.0, got: %s", cfg.Indexer.Version)
 	}
 
-	if cfg.Indexer.BatchSize != 100 {
-		t.Errorf("Expected batch size to be 100, got: %d", cfg.Indexer.BatchSize)
+	if cfg.Indexer.BatchSize != 50 {
+		t.Errorf("Expected batch size to be 50, got: %d", cfg.Indexer.BatchSize)
 	}
 
-	if cfg.Indexer.PollingInterval != 15*time.Second {
-		t.Errorf("Expected polling interval to be 15s, got: %s", cfg.Indexer.PollingInterval)
+	if cfg.Indexer.PollingInterval != 5*time.Second {
+		t.Errorf("Expected polling interval to be 5s, got: %s", cfg.Indexer.PollingInterval)
 	}
 
-	if cfg.Indexer.MempoolPollingInterval != 30*time.Second {
-		t.Errorf("Expected mempool polling interval to be 30s, got: %s", cfg.Indexer.MempoolPollingInterval)
+	if cfg.Indexer.MempoolPollingInterval != 15*time.Second {
+		t.Errorf("Expected mempool polling interval to be 15s, got: %s", cfg.Indexer.MempoolPollingInterval)
 	}
 
 	// Verify networks configuration
-	if len(cfg.Networks) != 1 {
-		t.Errorf("Expected 1 network, got: %d", len(cfg.Networks))
+	if len(cfg.Networks) != 2 {
+		t.Fatalf("Expected 2 networks, got: %d", len(cfg.Networks))
 	}
 
-	// Verify sepolia network configuration
-	sepolia := cfg.Networks[0]
-	if sepolia.Name != "sepolia" {
-		t.Errorf("Expected second network name to be sepolia, got: %s", sepolia.Name)
+	var sepolia *NetworkConfig
+	for i := range cfg.Networks {
+		if cfg.Networks[i].Name == "sepolia" {
+			sepolia = &cfg.Networks[i]
+			break
+		}
+	}
+
+	if sepolia == nil {
+		t.Fatal("Expected sepolia network to be configured")
 	}
 
 	if sepolia.ChainID != 11155111 {
 		t.Errorf("Expected sepolia chain ID to be 11155111, got: %d", sepolia.ChainID)
 	}
 
-	if sepolia.StartBlock != "5187051" {
-		t.Errorf("Expected sepolia start block to be 5187051, got: %s", sepolia.StartBlock)
+	if sepolia.StartBlock != "LATEST-100" {
+		t.Errorf("Expected sepolia start block to be LATEST-100, got: %s", sepolia.StartBlock)
 	}
 
 	// RPC URL should be from environment variable, not config file

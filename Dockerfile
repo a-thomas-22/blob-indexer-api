@@ -33,7 +33,7 @@ COPY --from=builder /app/blob-indexer-api .
 COPY --from=builder /app/internal/db/migrations ./internal/db/migrations
 
 # Copy configuration files
-COPY --from=builder /app/railway-config.yaml ./
+COPY --from=builder /app/config.yaml ./
 
 # Expose the API port
 EXPOSE 8080

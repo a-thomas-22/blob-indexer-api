@@ -86,4 +86,3 @@ Managed by **release-please** (`.github/workflows/release-please.yml`). The app 
 - **Docker**: multi-stage build (Go 1.24 Alpine → Alpine runtime), exposes port 8080
 - **Kubernetes**: Helm chart in `charts/blob-indexer/` with PostgreSQL dependency (Bitnami)
 - **Tilt**: local K8s dev with hot reload (`Tiltfile` + `tilt-config.yaml`)
-- **Railway**: `railway-config.yaml`
