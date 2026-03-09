@@ -8,10 +8,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
-	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
+	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
 // MaxQueryLimit is the maximum number of results any endpoint will return
@@ -162,7 +163,7 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert to response format
-	var response []BlobResponse
+	response := make([]BlobResponse, 0, len(blobs))
 	for _, blob := range blobs {
 		response = append(response, BlobResponse{
 			NetworkID:         blob.NetworkID,
@@ -248,7 +249,7 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert to response format
-	var response []BlobResponse
+	response := make([]BlobResponse, 0, len(blobs))
 	for _, blob := range blobs {
 		response = append(response, BlobResponse{
 			NetworkID:         blob.NetworkID,
@@ -398,7 +399,7 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert to response format
-	var response []UserResponse
+	response := make([]UserResponse, 0, len(users))
 	for _, user := range users {
 		response = append(response, UserResponse{
 			NetworkID:     network.ChainID,
@@ -686,7 +687,7 @@ func getMemoryUsage() string {
 func (a *API) DevIndexers(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting indexer metrics")
 
-	var metrics []IndexerMetrics
+	metrics := make([]IndexerMetrics, 0, len(a.indexers))
 
 	// Get metrics for each indexer
 	for _, idx := range a.indexers {
@@ -782,10 +783,8 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting database statistics")
 
 	// Get table statistics
-	var tableStats []TableStat
-
-	// Get statistics for each table
-	tables := []string{"networks", "blobs", "blob_users", "indexer_metadata", "indexed_blocks"}
+	tables := []string{"blobs", "blob_users", "networks", "indexer_metadata"}
+	tableStats := make([]TableStat, 0, len(tables))
 	for _, table := range tables {
 		// Validate the table name against the whitelist to prevent SQL injection
 		if !isAllowedTable(table) {
