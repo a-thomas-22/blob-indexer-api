@@ -244,6 +244,13 @@ func TestDeleteFromBlockMethods(t *testing.T) {
 		t.Fatalf("DeleteIndexedBlocksFromBlock() error = %v", err)
 	}
 
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2")).
+		WithArgs(1, int64(100)).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	if err := db.DeleteBlockMetricsFromBlock(context.Background(), 1, 100); err != nil {
+		t.Fatalf("DeleteBlockMetricsFromBlock() error = %v", err)
+	}
+
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
 	}
