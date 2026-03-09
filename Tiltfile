@@ -1,5 +1,8 @@
 # Tiltfile for blob-indexer-api
 
+# === Safety: only allow local dev clusters ===
+allow_k8s_contexts('kind-dev')
+
 # === Configuration ===
 port = str(local('grep -A 2 "server:" tilt-config.yaml | grep "port:" | awk \'{print $2}\'', quiet=True)).strip()
 
