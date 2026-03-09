@@ -1,6 +1,6 @@
 module github.com/a-thomas-22/blob-indexer-api
 
-go 1.24.2
+go 1.26.1
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
