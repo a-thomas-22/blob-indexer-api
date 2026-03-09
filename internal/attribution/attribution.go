@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
 	"go.uber.org/zap"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
@@ -94,6 +95,38 @@ func (s *Service) UpdateUserLastSeen(ctx context.Context, address string) error 
 	}
 
 	return nil
+}
+
+// BatchUpdateUserLastSeen updates the last seen timestamp for multiple users in a single query.
+// This avoids the N+1 query problem when updating many users at once.
+func (s *Service) BatchUpdateUserLastSeen(ctx context.Context, addresses []string) error {
+	if len(addresses) == 0 {
+		return nil
+	}
+
+	// Filter to only known users and normalize addresses
+	knownAddresses := make([]string, 0, len(addresses))
+	for _, addr := range addresses {
+		normalized := strings.ToLower(addr)
+		if _, ok := s.knownUsers[normalized]; ok {
+			knownAddresses = append(knownAddresses, normalized)
+		}
+	}
+
+	if len(knownAddresses) == 0 {
+		return nil
+	}
+
+	// Update all known users in a single query
+	query := "UPDATE blob_users SET last_seen = $1 WHERE address = ANY($2) AND network_id = $3"
+	_, err := s.db.ExecContext(ctx, query, time.Now(), pq.Array(knownAddresses), s.networkID)
+	if err != nil {
+		logger.Error("Failed to batch update user last seen",
+			zap.Int("network_id", s.networkID),
+			zap.Int("address_count", len(knownAddresses)),
+			zap.Error(err))
+	}
+	return err
 }
 
 // AddKnownUser adds a new known user
