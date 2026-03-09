@@ -8,9 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
 const (
