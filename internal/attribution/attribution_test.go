@@ -22,6 +22,14 @@ func TestNewService(t *testing.T) {
 	}
 }
 
+func TestNormalizeAddress(t *testing.T) {
+	got := normalizeAddress("0xABCDEF1234567890ABCDEF1234567890ABCDEF12")
+	want := "0xabcdef1234567890abcdef1234567890abcdef12"
+	if got != want {
+		t.Fatalf("normalizeAddress() = %q, want %q", got, want)
+	}
+}
+
 func TestSetNetworkID(t *testing.T) {
 	s := NewService(nil)
 	s.SetNetworkID(42)

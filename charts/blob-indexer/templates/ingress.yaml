@@ -5,6 +5,10 @@ metadata:
   name: {{ include "blob-indexer.fullname" . }}
   labels:
     {{- include "blob-indexer.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   rules:

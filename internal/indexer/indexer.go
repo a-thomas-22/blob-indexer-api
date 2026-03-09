@@ -53,6 +53,41 @@ type BlockTask struct {
 	BlockNumber uint64
 }
 
+type blobMetrics struct {
+	blobSizeBytes     int64
+	baseFeePerBlobGas string
+	tipPerBlobGas     string
+	totalCostETH      string
+	maxFeePerBlobGas  *string
+	blobGasUsed       *int64
+}
+
+func calculateBlobMetrics(tx *types.Transaction, blobBaseFee *big.Int) blobMetrics {
+	maxFeePerBlobGas := tx.BlobGasFeeCap()
+	tipPerBlobGas := new(big.Int).Sub(maxFeePerBlobGas, blobBaseFee)
+	if tipPerBlobGas.Sign() < 0 {
+		tipPerBlobGas = big.NewInt(0)
+	}
+
+	blobGasUsed := tx.BlobGas()
+	totalCost := new(big.Int).Mul(
+		new(big.Int).Add(blobBaseFee, tipPerBlobGas),
+		new(big.Int).SetUint64(blobGasUsed),
+	)
+
+	maxFeeStr := maxFeePerBlobGas.String()
+	blobGasUsedInt := int64(blobGasUsed)
+
+	return blobMetrics{
+		blobSizeBytes:     int64(blobGasUsed * 128), // Approximate size
+		baseFeePerBlobGas: blobBaseFee.String(),
+		tipPerBlobGas:     tipPerBlobGas.String(),
+		totalCostETH:      totalCost.String(),
+		maxFeePerBlobGas:  &maxFeeStr,
+		blobGasUsed:       &blobGasUsedInt,
+	}
+}
+
 // Indexer is responsible for indexing blob transactions
 type Indexer struct {
 	db                     *db.DB
@@ -178,7 +213,7 @@ func (i *Indexer) Start() error {
 	// If websocket is available, subscribe to new blocks and pending transactions
 	if i.useWebsocket {
 		// Subscribe to new blocks
-		blockSub, err := i.ethClient.SubscribeToNewHeads(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+		blockSub, err := i.subscribeToNewBlocks()
 		if err != nil {
 			logger.Warn("Failed to subscribe to new blocks, falling back to polling",
 				zap.String("network", i.network.Name),
@@ -195,18 +230,13 @@ func (i *Indexer) Start() error {
 		}
 
 		// Subscribe to pending transactions
-		pendingTxSub, err := i.ethClient.SubscribeToPendingTransactions(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+		pendingTxSub, err := i.subscribeToPendingTransactions()
 		if err != nil {
 			logger.Warn("Failed to subscribe to pending transactions, falling back to polling",
 				zap.String("network", i.network.Name),
 				zap.Error(err))
 
-			// Start the mempool indexer with polling
-			i.wg.Add(1)
-			go func() {
-				defer i.wg.Done()
-				i.runMempoolIndexer()
-			}()
+			i.startMempoolIndexer()
 		} else {
 			i.pendingTxSub = pendingTxSub
 			i.wg.Add(1)
@@ -218,18 +248,29 @@ func (i *Indexer) Start() error {
 				zap.String("network", i.network.Name))
 		}
 	} else {
-		// Start the mempool indexer with polling
-		i.wg.Add(1)
-		go func() {
-			defer i.wg.Done()
-			i.runMempoolIndexer()
-		}()
+		i.startMempoolIndexer()
 	}
 
 	logger.Info("Indexer started",
 		zap.String("network", i.network.Name),
 		zap.Uint64("start_block", startBlock))
 	return nil
+}
+
+func (i *Indexer) subscribeToNewBlocks() (*ethereum.BlockSubscription, error) {
+	return i.ethClient.SubscribeToNewHeads(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+}
+
+func (i *Indexer) subscribeToPendingTransactions() (*ethereum.PendingTxSubscription, error) {
+	return i.ethClient.SubscribeToPendingTransactions(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+}
+
+func (i *Indexer) startMempoolIndexer() {
+	i.wg.Add(1)
+	go func() {
+		defer i.wg.Done()
+		i.runMempoolIndexer()
+	}()
 }
 
 // Stop stops the indexer
@@ -326,66 +367,79 @@ func (i *Indexer) blockProcessingWorker(workerID int) {
 		zap.Int("worker_id", workerID))
 
 	for task := range i.blockTaskCh {
-		// Check if the context is canceled
-		select {
-		case <-i.ctx.Done():
-			logger.Info("Block processing worker stopped",
-				zap.String("network", i.network.Name),
-				zap.Int("worker_id", workerID))
-			return
-		default:
-		}
+		func(task BlockTask) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					logger.Error("Recovered panic in block processing worker",
+						zap.String("network", i.network.Name),
+						zap.Int("worker_id", workerID),
+						zap.Uint64("block", task.BlockNumber),
+						zap.Any("panic", recovered))
+					i.trackFailedBlock(task.BlockNumber)
+				}
+			}()
 
-		// Process the block with inline retries and exponential backoff
-		var lastErr error
-		for attempt := 0; attempt <= i.maxBlockRetries; attempt++ {
-			if attempt > 0 {
-				delay := time.Duration(1<<uint(attempt-1)) * time.Second
-				select {
-				case <-time.After(delay):
-				case <-i.ctx.Done():
-					return
+			// Check if the context is canceled
+			select {
+			case <-i.ctx.Done():
+				logger.Info("Block processing worker stopped",
+					zap.String("network", i.network.Name),
+					zap.Int("worker_id", workerID))
+				return
+			default:
+			}
+
+			// Process the block with inline retries and exponential backoff
+			var lastErr error
+			for attempt := 0; attempt <= i.maxBlockRetries; attempt++ {
+				if attempt > 0 {
+					delay := time.Duration(1<<uint(attempt-1)) * time.Second
+					select {
+					case <-time.After(delay):
+					case <-i.ctx.Done():
+						return
+					}
+				}
+
+				lastErr = i.processBlock(task.BlockNumber)
+				if lastErr == nil {
+					break
+				}
+
+				// Reorg was detected and handled — don't retry, the main loop will re-queue
+				if errors.Is(lastErr, errReorgDetected) {
+					lastErr = nil
+					break
+				}
+
+				if attempt < i.maxBlockRetries {
+					logger.Warn("Block processing failed, retrying",
+						zap.String("network", i.network.Name),
+						zap.Uint64("block", task.BlockNumber),
+						zap.Int("attempt", attempt+1),
+						zap.Int("max_retries", i.maxBlockRetries),
+						zap.Error(lastErr))
 				}
 			}
 
-			lastErr = i.processBlock(task.BlockNumber)
-			if lastErr == nil {
-				break
-			}
-
-			// Reorg was detected and handled — don't retry, the main loop will re-queue
-			if errors.Is(lastErr, errReorgDetected) {
-				lastErr = nil
-				break
-			}
-
-			if attempt < i.maxBlockRetries {
-				logger.Warn("Block processing failed, retrying",
+			if lastErr != nil {
+				logger.Error("Block processing failed after all retries",
 					zap.String("network", i.network.Name),
 					zap.Uint64("block", task.BlockNumber),
-					zap.Int("attempt", attempt+1),
-					zap.Int("max_retries", i.maxBlockRetries),
+					zap.Int("retries", i.maxBlockRetries),
 					zap.Error(lastErr))
+				i.trackFailedBlock(task.BlockNumber)
+				return
 			}
-		}
 
-		if lastErr != nil {
-			logger.Error("Block processing failed after all retries",
-				zap.String("network", i.network.Name),
-				zap.Uint64("block", task.BlockNumber),
-				zap.Int("retries", i.maxBlockRetries),
-				zap.Error(lastErr))
-			i.trackFailedBlock(task.BlockNumber)
-			continue
-		}
+			// Clear from failed blocks tracking on success
+			i.failedBlocksMu.Lock()
+			delete(i.failedBlocks, task.BlockNumber)
+			i.failedBlocksMu.Unlock()
 
-		// Clear from failed blocks tracking on success
-		i.failedBlocksMu.Lock()
-		delete(i.failedBlocks, task.BlockNumber)
-		i.failedBlocksMu.Unlock()
-
-		// Update the last indexed block
-		i.updateLastIndexedBlock(task.BlockNumber)
+			// Update the last indexed block
+			i.updateLastIndexedBlock(task.BlockNumber)
+		}(task)
 	}
 
 	logger.Info("Block processing worker exited",
@@ -506,7 +560,7 @@ func (i *Indexer) handleNewBlockSubscription() {
 				zap.Error(err))
 
 			// Try to resubscribe
-			blockSub, err := i.ethClient.SubscribeToNewHeads(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+			blockSub, err := i.subscribeToNewBlocks()
 			if err != nil {
 				logger.Error("Failed to resubscribe to new blocks, falling back to polling",
 					zap.String("network", i.network.Name),
@@ -553,7 +607,7 @@ func (i *Indexer) handlePendingTransactionSubscription() {
 				zap.Error(err))
 
 			// Try to resubscribe
-			pendingTxSub, err := i.ethClient.SubscribeToPendingTransactions(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+			pendingTxSub, err := i.subscribeToPendingTransactions()
 			if err != nil {
 				logger.Error("Failed to resubscribe to pending transactions, falling back to polling",
 					zap.String("network", i.network.Name),
@@ -623,22 +677,7 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 	// Get the user attribution
 	userAttribution := i.attribution.GetUserAttribution(from)
 
-	// Calculate the tip per blob gas
-	maxFeePerBlobGas := tx.BlobGasFeeCap()
-	tipPerBlobGas := new(big.Int).Sub(maxFeePerBlobGas, blobBaseFee)
-	if tipPerBlobGas.Sign() < 0 {
-		tipPerBlobGas = big.NewInt(0)
-	}
-
-	// Calculate the total cost
-	blobGasUsed := tx.BlobGas()
-	totalCost := new(big.Int).Mul(
-		new(big.Int).Add(blobBaseFee, tipPerBlobGas),
-		new(big.Int).SetUint64(blobGasUsed),
-	)
-
-	maxFeeStr := maxFeePerBlobGas.String()
-	blobGasUsedInt := int64(blobGasUsed)
+	metrics := calculateBlobMetrics(tx, blobBaseFee)
 
 	// Create the blob record
 	blob := models.Blob{
@@ -648,15 +687,15 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 		TxHash:            hash.Hex(),
 		FromAddress:       from,
 		UserAttribution:   userAttribution,
-		BlobSizeBytes:     int64(blobGasUsed * 128), // Approximate size
-		BaseFeePerBlobGas: blobBaseFee.String(),
-		TipPerBlobGas:     tipPerBlobGas.String(),
-		TotalCostETH:      totalCost.String(),
+		BlobSizeBytes:     metrics.blobSizeBytes,
+		BaseFeePerBlobGas: metrics.baseFeePerBlobGas,
+		TipPerBlobGas:     metrics.tipPerBlobGas,
+		TotalCostETH:      metrics.totalCostETH,
 		Timestamp:         time.Now(),
 		Confirmed:         false,
 		IndexerVersion:    i.indexerVersion,
-		MaxFeePerBlobGas:  &maxFeeStr,
-		BlobGasUsed:       &blobGasUsedInt,
+		MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
+		BlobGasUsed:       metrics.blobGasUsed,
 	}
 
 	// Insert the blob record
@@ -736,22 +775,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		// Get the user attribution
 		userAttribution := i.attribution.GetUserAttribution(from)
 
-		// Calculate the tip per blob gas
-		maxFeePerBlobGas := tx.BlobGasFeeCap()
-		tipPerBlobGas := new(big.Int).Sub(maxFeePerBlobGas, blobBaseFee)
-		if tipPerBlobGas.Sign() < 0 {
-			tipPerBlobGas = big.NewInt(0)
-		}
-
-		// Calculate the total cost
-		blobGasUsed := tx.BlobGas()
-		totalCost := new(big.Int).Mul(
-			new(big.Int).Add(blobBaseFee, tipPerBlobGas),
-			new(big.Int).SetUint64(blobGasUsed),
-		)
-
-		maxFeeStr := maxFeePerBlobGas.String()
-		blobGasUsedInt := int64(blobGasUsed)
+		metrics := calculateBlobMetrics(tx, blobBaseFee)
 
 		blobs = append(blobs, models.Blob{
 			NetworkID:         i.network.ChainID,
@@ -760,15 +784,15 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 			TxHash:            tx.Hash().Hex(),
 			FromAddress:       from,
 			UserAttribution:   userAttribution,
-			BlobSizeBytes:     int64(blobGasUsed * 128), // Approximate size
-			BaseFeePerBlobGas: blobBaseFee.String(),
-			TipPerBlobGas:     tipPerBlobGas.String(),
-			TotalCostETH:      totalCost.String(),
+			BlobSizeBytes:     metrics.blobSizeBytes,
+			BaseFeePerBlobGas: metrics.baseFeePerBlobGas,
+			TipPerBlobGas:     metrics.tipPerBlobGas,
+			TotalCostETH:      metrics.totalCostETH,
 			Timestamp:         timestamp,
 			Confirmed:         true,
 			IndexerVersion:    i.indexerVersion,
-			MaxFeePerBlobGas:  &maxFeeStr,
-			BlobGasUsed:       &blobGasUsedInt,
+			MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
+			BlobGasUsed:       metrics.blobGasUsed,
 		})
 
 		if userAttribution != "" {
@@ -1101,22 +1125,7 @@ func (i *Indexer) processPendingTransactions() error {
 		// Get the user attribution
 		userAttribution := i.attribution.GetUserAttribution(from)
 
-		// Calculate the tip per blob gas
-		maxFeePerBlobGas := tx.BlobGasFeeCap()
-		tipPerBlobGas := new(big.Int).Sub(maxFeePerBlobGas, blobBaseFee)
-		if tipPerBlobGas.Sign() < 0 {
-			tipPerBlobGas = big.NewInt(0)
-		}
-
-		// Calculate the total cost
-		blobGasUsed := tx.BlobGas()
-		totalCost := new(big.Int).Mul(
-			new(big.Int).Add(blobBaseFee, tipPerBlobGas),
-			new(big.Int).SetUint64(blobGasUsed),
-		)
-
-		maxFeeStr := maxFeePerBlobGas.String()
-		blobGasUsedInt := int64(blobGasUsed)
+		metrics := calculateBlobMetrics(tx, blobBaseFee)
 
 		// Create the blob record
 		blob := models.Blob{
@@ -1126,15 +1135,15 @@ func (i *Indexer) processPendingTransactions() error {
 			TxHash:            tx.Hash().Hex(),
 			FromAddress:       from,
 			UserAttribution:   userAttribution,
-			BlobSizeBytes:     int64(blobGasUsed * 128), // Approximate size
-			BaseFeePerBlobGas: blobBaseFee.String(),
-			TipPerBlobGas:     tipPerBlobGas.String(),
-			TotalCostETH:      totalCost.String(),
+			BlobSizeBytes:     metrics.blobSizeBytes,
+			BaseFeePerBlobGas: metrics.baseFeePerBlobGas,
+			TipPerBlobGas:     metrics.tipPerBlobGas,
+			TotalCostETH:      metrics.totalCostETH,
 			Timestamp:         time.Now(),
 			Confirmed:         false,
 			IndexerVersion:    i.indexerVersion,
-			MaxFeePerBlobGas:  &maxFeeStr,
-			BlobGasUsed:       &blobGasUsedInt,
+			MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
+			BlobGasUsed:       metrics.blobGasUsed,
 		}
 
 		// Insert the blob record
@@ -1361,6 +1370,7 @@ func (i *Indexer) retryFailedBlocks() {
 				zap.String("network", i.network.Name),
 				zap.Uint64("block", block),
 				zap.Int("total_attempts", count))
+			delete(i.failedBlocks, block)
 		}
 	}
 	i.failedBlocksMu.Unlock()

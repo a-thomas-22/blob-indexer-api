@@ -34,6 +34,7 @@ func (s *testRPCSub) Unsubscribe() {
 type rpcEthService struct {
 	latest      uint64
 	failBlock   bool
+	nilNumber   bool
 	blobBaseFee string
 	blobFeeErr  error
 	txByHash    *types.Transaction
@@ -64,6 +65,9 @@ func (e *rpcEthService) headerPayload(number uint64) (map[string]interface{}, er
 	var payload map[string]interface{}
 	if err := json.Unmarshal(headerJSON, &payload); err != nil {
 		return nil, err
+	}
+	if e.nilNumber {
+		delete(payload, "number")
 	}
 	payload["hash"] = common.BigToHash(big.NewInt(int64(number + 1000))).Hex()
 	payload["transactions"] = []interface{}{}
@@ -365,6 +369,16 @@ func TestGetLatestBlockAndGetBlockByNumber(t *testing.T) {
 	}
 	if _, err := c.GetBlockByNumber(context.Background(), 7); err == nil {
 		t.Fatal("expected GetBlockByNumber to fail")
+	}
+}
+
+func TestGetLatestBlockNumber_MissingNumber(t *testing.T) {
+	ethSvc := &rpcEthService{latest: 25, nilNumber: true}
+	c := newRPCClient(t, ethSvc, &rpcTxpoolService{}, false)
+	defer c.Close()
+
+	if _, err := c.GetLatestBlockNumber(context.Background()); err == nil {
+		t.Fatal("expected error when latest header number is missing")
 	}
 }
 
