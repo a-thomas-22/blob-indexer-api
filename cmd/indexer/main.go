@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"os"
 	"os/signal"
 	"syscall"
@@ -9,8 +8,8 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/bootstrap"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
-	"github.com/a-thomas-22/blob-indexer-api/internal/db"
 	"github.com/a-thomas-22/blob-indexer-api/internal/ethereum"
 	"github.com/a-thomas-22/blob-indexer-api/internal/indexer"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
@@ -25,27 +24,20 @@ func main() {
 
 	logger.Info("Starting blob-indexer", zap.String("version", version))
 
-	cfg, err := config.Load()
+	resources, err := bootstrap.InitializeApp(config.Load)
 	if err != nil {
-		logger.Fatal("Failed to load configuration", zap.Error(err))
+		logger.Fatal("Failed to initialize application", zap.Error(err))
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
+	cfg := resources.Config
+	database := resources.Database
+	ctx := resources.Ctx
+	cancel := resources.Cancel
 	defer cancel()
-
-	database, err := db.Connect(ctx, cfg.Database)
-	if err != nil {
-		logger.Fatal("Failed to connect to database", zap.Error(err))
-	}
 	defer func() {
 		if err := database.Close(); err != nil {
 			logger.Warn("Database close returned error", zap.Error(err))
 		}
 	}()
-
-	if err := db.RunMigrations(cfg.Database.URL); err != nil {
-		logger.Fatal("Failed to run database migrations", zap.Error(err))
-	}
 
 	enabledNetworks := cfg.GetEnabledNetworks()
 	if len(enabledNetworks) == 0 {

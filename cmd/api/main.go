@@ -46,8 +46,8 @@ import (
 
 	_ "github.com/a-thomas-22/blob-indexer-api/docs"
 	"github.com/a-thomas-22/blob-indexer-api/internal/api"
+	"github.com/a-thomas-22/blob-indexer-api/internal/bootstrap"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
-	"github.com/a-thomas-22/blob-indexer-api/internal/db"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
@@ -60,22 +60,15 @@ func main() {
 
 	logger.Info("Starting blob-indexer API server", zap.String("version", version))
 
-	cfg, err := config.LoadForAPI()
+	resources, err := bootstrap.InitializeApp(config.LoadForAPI)
 	if err != nil {
-		logger.Fatal("Failed to load configuration", zap.Error(err))
+		logger.Fatal("Failed to initialize application", zap.Error(err))
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
+	cfg := resources.Config
+	database := resources.Database
+	ctx := resources.Ctx
+	cancel := resources.Cancel
 	defer cancel()
-
-	database, err := db.Connect(ctx, cfg.Database)
-	if err != nil {
-		logger.Fatal("Failed to connect to database", zap.Error(err))
-	}
-
-	if err := db.RunMigrations(cfg.Database.URL); err != nil {
-		logger.Fatal("Failed to run database migrations", zap.Error(err))
-	}
 
 	router := api.NewRouter(database, cfg)
 	server := &http.Server{
