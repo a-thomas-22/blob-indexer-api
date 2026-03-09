@@ -117,9 +117,9 @@ func TestGetTopBlobUsers_ReturnsRows(t *testing.T) {
 	rows := sqlmock.NewRows([]string{"from_address", "user_attribution", "blob_count", "total_cost_eth", "last_timestamp"}).
 		AddRow("0xabc", "Alice", 3, "1.5", now)
 
-	mock.ExpectQuery("SELECT").WithArgs(1, 5).WillReturnRows(rows)
+	mock.ExpectQuery("SELECT").WithArgs(1, 5, 0).WillReturnRows(rows)
 
-	stats, err := svc.GetTopBlobUsers(context.TODO(), 5)
+	stats, err := svc.GetTopBlobUsers(context.TODO(), 5, 0)
 	if err != nil {
 		t.Fatalf("GetTopBlobUsers() error = %v", err)
 	}

@@ -1,0 +1,30 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      # App release outputs
+      app_release_created: ${{ steps.release.outputs['blob-indexer-api--release_created'] }}
+      app_tag_name: ${{ steps.release.outputs['blob-indexer-api--tag_name'] }}
+      app_version: ${{ steps.release.outputs['blob-indexer-api--version'] }}
+      # Chart release outputs
+      chart_release_created: ${{ steps.release.outputs['blob-indexer-chart--release_created'] }}
+      chart_tag_name: ${{ steps.release.outputs['blob-indexer-chart--tag_name'] }}
+      chart_version: ${{ steps.release.outputs['blob-indexer-chart--version'] }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
