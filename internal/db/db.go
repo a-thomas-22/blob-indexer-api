@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -18,24 +17,10 @@ import (
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 )
 
-// DB is a wrapper around sqlx.DB
+// DB is a wrapper around sqlx.DB.
+// ExecContext, SelectContext, and GetContext are promoted from the embedded *sqlx.DB.
 type DB struct {
 	*sqlx.DB
-}
-
-// ExecContext executes a query without returning any rows
-func (db *DB) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
-	return db.DB.ExecContext(ctx, query, args...)
-}
-
-// SelectContext executes a query and scans the results into dest
-func (db *DB) SelectContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-	return db.DB.SelectContext(ctx, dest, query, args...)
-}
-
-// GetContext executes a query and scans the result into dest
-func (db *DB) GetContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-	return db.DB.GetContext(ctx, dest, query, args...)
 }
 
 // Connect establishes a connection to the database with pool configuration
