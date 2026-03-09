@@ -70,8 +70,8 @@ const (
 	`
 	queryDevIndexerCounts = `
 			SELECT
-				SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END) as confirmed_count,
-				SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END) as pending_count
+				COALESCE(SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END), 0) as confirmed_count,
+				COALESCE(SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END), 0) as pending_count
 			FROM blobs WHERE network_id = $1
 		`
 	queryDevIndexerLastIndexedTime = "SELECT COALESCE(MAX(timestamp), '1970-01-01'::timestamp) FROM blobs WHERE confirmed = true AND network_id = $1"
