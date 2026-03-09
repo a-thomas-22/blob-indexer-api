@@ -68,6 +68,7 @@ func main() {
 	database := resources.Database
 	ctx := resources.Ctx
 	cancel := resources.Cancel
+	logger.InitializeWithConfig(cfg.Logging.Level, cfg.Logging.Format)
 	defer cancel()
 
 	router := api.NewRouter(database, cfg)

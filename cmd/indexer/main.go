@@ -32,6 +32,7 @@ func main() {
 	database := resources.Database
 	ctx := resources.Ctx
 	cancel := resources.Cancel
+	logger.InitializeWithConfig(cfg.Logging.Level, cfg.Logging.Format)
 	defer cancel()
 	defer func() {
 		if err := database.Close(); err != nil {

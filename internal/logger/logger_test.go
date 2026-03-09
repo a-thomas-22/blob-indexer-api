@@ -31,6 +31,13 @@ func TestInitialize_InvalidLevel(t *testing.T) {
 	}
 }
 
+func TestInitializeWithConfig_ConsoleFormat(t *testing.T) {
+	InitializeWithConfig("info", "console")
+	if log == nil {
+		t.Fatal("expected logger to be initialized")
+	}
+}
+
 func TestInitialize_AllLevels(t *testing.T) {
 	levels := []string{"debug", "info", "warn", "error"}
 	for _, level := range levels {

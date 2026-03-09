@@ -30,31 +30,39 @@ var levelMap = map[string]zapcore.Level{
 
 // Initialize sets up the logger with JSON encoding and the appropriate level
 func Initialize() {
-	// Get log level from environment variable, default to "info"
-	levelStr := os.Getenv("LOG_LEVEL")
+	InitializeWithConfig(os.Getenv("LOG_LEVEL"), os.Getenv("LOG_FORMAT"))
+}
+
+// InitializeWithConfig sets up the logger with explicit level/format settings.
+func InitializeWithConfig(levelStr, format string) {
 	if levelStr == "" {
 		levelStr = "info"
 	}
+	if format == "" {
+		format = "json"
+	}
 
-	// Map string level to zap level
 	level, exists := levelMap[levelStr]
 	if !exists {
 		level = zapcore.InfoLevel
 	}
 
-	// Create JSON encoder config
 	encoderConfig := zap.NewProductionEncoderConfig()
 	encoderConfig.TimeKey = "timestamp"
 	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 
-	// Create JSON encoder
+	encoding := "json"
+	if format == "console" {
+		encoding = "console"
+	}
+
 	config := zap.Config{
 		Level:             zap.NewAtomicLevelAt(level),
 		Development:       false,
 		DisableCaller:     false,
 		DisableStacktrace: false,
 		Sampling:          nil,
-		Encoding:          "json",
+		Encoding:          encoding,
 		EncoderConfig:     encoderConfig,
 		OutputPaths:       []string{"stdout"},
 		ErrorOutputPaths:  []string{"stderr"},
@@ -67,7 +75,7 @@ func Initialize() {
 		panic("Failed to initialize logger: " + err.Error())
 	}
 
-	Info("Logger initialized", zap.String("level", levelStr))
+	Info("Logger initialized", zap.String("level", levelStr), zap.String("format", encoding))
 }
 
 // Helper functions for logging
