@@ -288,8 +288,7 @@ func (a *API) requestCounterMiddleware(next http.Handler) http.Handler {
 // getLastIndexedBlockFromDB reads the last indexed block from the indexer_metadata table.
 func (a *API) getLastIndexedBlockFromDB(ctx context.Context, networkID int) uint64 {
 	var value string
-	query := "SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = 'last_indexed_block'"
-	if err := a.db.GetContext(ctx, &value, query, networkID); err != nil {
+	if err := a.db.GetContext(ctx, &value, queryLastIndexedBlock, networkID); err != nil {
 		return 0
 	}
 	block, err := strconv.ParseUint(value, 10, 64)

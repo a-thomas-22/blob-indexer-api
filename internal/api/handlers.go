@@ -67,56 +67,12 @@ const aggregateCacheTTL = 30 * time.Second
 const aggregateQueryTimeout = 5 * time.Second
 
 const (
-	queryLatestBlobs = `
-		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = true AND network_id = $1
-		ORDER BY block_number DESC, blob_index ASC
-		LIMIT $2 OFFSET $3
-	`
-	queryMempoolBlobs = `
-		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = false AND network_id = $1
-		ORDER BY timestamp DESC
-		LIMIT $2 OFFSET $3
-	`
-	queryTopBlobUsers = `
-		SELECT
-			from_address,
-			user_attribution,
-			COUNT(*) as blob_count,
-			SUM(total_cost_eth::numeric) as total_cost_eth,
-			MAX(timestamp) as last_timestamp
-		FROM blobs
-		WHERE network_id = $1
-		GROUP BY from_address, user_attribution
-		ORDER BY blob_count DESC
-		LIMIT $2 OFFSET $3
-	`
-	queryBlobStats = `
-		SELECT
-			COUNT(*) as total_blobs,
-			COALESCE(SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END), 0) as total_confirmed_blobs,
-			COALESCE(SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END), 0) as total_pending_blobs,
-			COALESCE(AVG(base_fee_per_blob_gas::numeric), '0'::numeric) as average_base_fee,
-			COALESCE(AVG(tip_per_blob_gas::numeric), '0'::numeric) as average_tip,
-			COALESCE(AVG(total_cost_eth::numeric), '0'::numeric) as average_total_cost,
-			COALESCE(MAX(timestamp), '1970-01-01'::timestamp) as last_indexed_time
-		FROM blobs
-		WHERE network_id = $1
-	`
-	queryBlockMetrics = `
-		SELECT ` + blockMetricsSelectColumns + ` FROM block_metrics
-		WHERE network_id = $1
-		ORDER BY block_number DESC
-		LIMIT $2
-	`
 	queryDevIndexerCounts = `
 			SELECT
 				COALESCE(SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END), 0) as confirmed_count,
 				COALESCE(SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END), 0) as pending_count
 			FROM blobs WHERE network_id = $1
 		`
-	queryDevIndexerLastIndexedTime = "SELECT COALESCE(MAX(timestamp), '1970-01-01'::timestamp) FROM blobs WHERE confirmed = true AND network_id = $1"
 )
 
 // Response is a generic API response
@@ -445,7 +401,7 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 
 	// Get the blob
 	var blob models.Blob
-	query := "SELECT " + blobSelectColumns + " FROM blobs WHERE tx_hash = $1 AND network_id = $2"
+	query := queryBlobByTxHash
 	if err := a.db.GetContext(r.Context(), &blob, query, txHash, network.ChainID); err != nil {
 		logger.Warn("Blob not found",
 			zap.String("network", network.Name),
@@ -895,7 +851,7 @@ func (a *API) DevIndexers(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var lastIndexedTime time.Time
-		if err := a.db.GetContext(r.Context(), &lastIndexedTime, queryDevIndexerLastIndexedTime, network.ChainID); err != nil {
+		if err := a.db.GetContext(r.Context(), &lastIndexedTime, queryLastIndexedTimeCoalesce, network.ChainID); err != nil {
 			logger.Error("Failed to get last indexed time",
 				zap.String("network", network.Name),
 				zap.Error(err))
@@ -965,10 +921,7 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 
 		// Get table size
 		var sizeBytes int64
-		query = `
-			SELECT pg_total_relation_size($1)
-		`
-		if err := a.db.GetContext(r.Context(), &sizeBytes, query, table); err != nil {
+		if err := a.db.GetContext(r.Context(), &sizeBytes, queryTableSize, table); err != nil {
 			logger.Error("Failed to get table size",
 				zap.String("table", table),
 				zap.Error(err))
@@ -977,12 +930,7 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 
 		// Get index count
 		var indexCount int
-		query = `
-			SELECT COUNT(*)
-			FROM pg_indexes
-			WHERE tablename = $1
-		`
-		if err := a.db.GetContext(r.Context(), &indexCount, query, table); err != nil {
+		if err := a.db.GetContext(r.Context(), &indexCount, queryIndexCount, table); err != nil {
 			logger.Error("Failed to get index count",
 				zap.String("table", table),
 				zap.Error(err))
@@ -1000,10 +948,7 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 
 	// Get total database size
 	var totalSize int64
-	query := `
-		SELECT pg_database_size(current_database())
-	`
-	if err := a.db.GetContext(r.Context(), &totalSize, query); err != nil {
+	if err := a.db.GetContext(r.Context(), &totalSize, queryDatabaseSize); err != nil {
 		logger.Error("Failed to get database size", zap.Error(err))
 		totalSize = 0 // Fallback
 	}
