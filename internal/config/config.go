@@ -42,6 +42,9 @@ type DatabaseConfig struct {
 type ServerConfig struct {
 	Port            int           `mapstructure:"port" yaml:"port"`
 	DevMode         bool          `mapstructure:"dev_mode" yaml:"dev_mode"`
+	ReadTimeout     time.Duration `mapstructure:"read_timeout" yaml:"read_timeout"`
+	WriteTimeout    time.Duration `mapstructure:"write_timeout" yaml:"write_timeout"`
+	IdleTimeout     time.Duration `mapstructure:"idle_timeout" yaml:"idle_timeout"`
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout" yaml:"shutdown_timeout"`
 }
 
@@ -94,6 +97,9 @@ func loadConfig() (*Config, error) {
 	// Set default values
 	v.SetDefault("server.port", 8080)
 	v.SetDefault("server.dev_mode", false)
+	v.SetDefault("server.read_timeout", "30s")
+	v.SetDefault("server.write_timeout", "30s")
+	v.SetDefault("server.idle_timeout", "120s")
 	v.SetDefault("server.shutdown_timeout", "15s")
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")
@@ -158,10 +164,10 @@ func loadConfig() (*Config, error) {
 		// It's okay if the config file doesn't exist
 		var configFileNotFoundError viper.ConfigFileNotFoundError
 		if !errors.As(err, &configFileNotFoundError) {
-			fmt.Printf("Error reading config file: %v\n", err)
+			logger.Error("Error reading config file", zap.Error(err))
 			return nil, fmt.Errorf("failed to read config file: %w", err)
 		}
-		fmt.Println("Config file not found, continuing with defaults and environment variables")
+		logger.Info("Config file not found, continuing with defaults and environment variables")
 	} else {
 		logger.Info("Successfully loaded config file", zap.String("path", v.ConfigFileUsed()))
 	}
@@ -295,6 +301,24 @@ func loadConfig() (*Config, error) {
 	}
 	cfg.Server.ShutdownTimeout = shutdownTimeout
 
+	readTimeout, err := time.ParseDuration(v.GetString("server.read_timeout"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid read_timeout: %w", err)
+	}
+	cfg.Server.ReadTimeout = readTimeout
+
+	writeTimeout, err := time.ParseDuration(v.GetString("server.write_timeout"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid write_timeout: %w", err)
+	}
+	cfg.Server.WriteTimeout = writeTimeout
+
+	idleTimeout, err := time.ParseDuration(v.GetString("server.idle_timeout"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid idle_timeout: %w", err)
+	}
+	cfg.Server.IdleTimeout = idleTimeout
+
 	connMaxLifetime, err := time.ParseDuration(v.GetString("database.conn_max_lifetime"))
 	if err != nil {
 		return nil, fmt.Errorf("invalid conn_max_lifetime: %w", err)
@@ -351,7 +375,7 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 			logger.Error("Database URL is required", zap.String("hint", "set DB_URL environment variable or add database.url to config file"))
 			return fmt.Errorf("database URL is required - set DB_URL environment variable or add database.url to config file")
 		}
-		fmt.Println("WARNING: Database URL is not set in config, but DB_URL environment variable is set")
+		logger.Warn("Database URL is not set in config, using DB_URL environment variable")
 		cfg.Database.URL = os.Getenv("DB_URL")
 	}
 
@@ -362,7 +386,7 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 		logger.Error("At least one network configuration is required")
 		return fmt.Errorf("at least one network configuration is required")
 	}
-	fmt.Printf("Found %d network(s) in configuration\n", len(cfg.Networks))
+	logger.Info("Found networks in configuration", zap.Int("count", len(cfg.Networks)))
 
 	for i, network := range cfg.Networks {
 		logger.Debug("Validating network", zap.Int("index", i+1), zap.String("name", network.Name))
@@ -376,20 +400,24 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 			logger.Error("Network has invalid chain ID", zap.String("network", network.Name), zap.Int("chain_id", network.ChainID))
 			return fmt.Errorf("network '%s' has an invalid chain ID: %d", network.Name, network.ChainID)
 		}
-		fmt.Printf("  Chain ID: %d\n", network.ChainID)
+		logger.Debug("Network chain ID", zap.String("network", network.Name), zap.Int("chain_id", network.ChainID))
 
 		if requireRPC {
 			if network.RpcURL == "" {
 				logger.Error("Network is missing an RPC URL", zap.String("network", network.Name))
 				return fmt.Errorf("network '%s' is missing an RPC URL", network.Name)
 			}
-			fmt.Printf("  RPC URL: %s (masked for security)\n", maskURL(network.RpcURL))
+			logger.Debug("Network RPC URL configured",
+				zap.String("network", network.Name),
+				zap.String("rpc_url", maskURL(network.RpcURL)))
 
 			if network.StartBlock == "" {
 				logger.Error("Network is missing a start block", zap.String("network", network.Name))
 				return fmt.Errorf("network '%s' is missing a start block", network.Name)
 			}
-			fmt.Printf("  Start Block: %s\n", network.StartBlock)
+			logger.Debug("Network start block configured",
+				zap.String("network", network.Name),
+				zap.String("start_block", network.StartBlock))
 		}
 
 		logger.Debug("Network enabled status", zap.String("network", network.Name), zap.Bool("enabled", network.Enabled))

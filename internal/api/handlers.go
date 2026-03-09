@@ -1,13 +1,16 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/go-chi/chi/v5"
@@ -199,12 +202,17 @@ func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
 
 // respondJSON responds with JSON
 func (a *API) respondJSON(w http.ResponseWriter, status int, data interface{}) {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(data); err != nil {
+		logger.Error("Failed to encode JSON response", zap.Error(err))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"internal server error"}`))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(data); err != nil {
-		logger.Error("Failed to encode JSON response", zap.Error(err))
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
+	_, _ = w.Write(buf.Bytes())
 }
 
 // respondError responds with an error
@@ -216,6 +224,35 @@ func (a *API) respondError(w http.ResponseWriter, status int, message string) {
 		Success: false,
 		Error:   message,
 	})
+}
+
+// parsePagination parses limit/offset query params with clamping.
+func (a *API) parsePagination(r *http.Request, defaultLimit int) (limit, offset int, err error) {
+	limit = defaultLimit
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		parsed, parseErr := strconv.Atoi(limitStr)
+		if parseErr != nil || parsed <= 0 {
+			return 0, 0, fmt.Errorf("invalid limit parameter")
+		}
+		limit = parsed
+	}
+	if limit > MaxQueryLimit {
+		limit = MaxQueryLimit
+	}
+
+	offset = 0
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		parsed, parseErr := strconv.Atoi(offsetStr)
+		if parseErr != nil || parsed < 0 {
+			return 0, 0, fmt.Errorf("invalid offset parameter")
+		}
+		offset = parsed
+	}
+	if offset > MaxQueryOffset {
+		offset = MaxQueryOffset
+	}
+
+	return limit, offset, nil
 }
 
 // GetLatestBlobs godoc
@@ -238,31 +275,10 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get query parameters
-	limit := 10
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil || limit <= 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
-			return
-		}
-	}
-	if limit > MaxQueryLimit {
-		limit = MaxQueryLimit
-	}
-
-	offset := 0
-	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
-		var err error
-		offset, err = strconv.Atoi(offsetStr)
-		if err != nil || offset < 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid offset parameter")
-			return
-		}
-	}
-	if offset > MaxQueryOffset {
-		offset = MaxQueryOffset
+	limit, offset, err := a.parsePagination(r, 10)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	logger.Debug("Getting latest blobs",
@@ -315,31 +331,10 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get query parameters
-	limit := 10
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil || limit <= 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
-			return
-		}
-	}
-	if limit > MaxQueryLimit {
-		limit = MaxQueryLimit
-	}
-
-	offset := 0
-	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
-		var err error
-		offset, err = strconv.Atoi(offsetStr)
-		if err != nil || offset < 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid offset parameter")
-			return
-		}
-	}
-	if offset > MaxQueryOffset {
-		offset = MaxQueryOffset
+	limit, offset, err := a.parsePagination(r, 10)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	logger.Debug("Getting mempool blobs",
@@ -398,6 +393,10 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 		a.respondError(w, http.StatusBadRequest, "Transaction hash is required")
 		return
 	}
+	if !strings.HasPrefix(txHash, "0x") || !common.IsHexHash(txHash) {
+		a.respondError(w, http.StatusBadRequest, "Invalid transaction hash format")
+		return
+	}
 
 	logger.Debug("Getting blob by tx hash",
 		zap.String("network", network.Name),
@@ -442,30 +441,10 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := 10
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil || limit <= 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
-			return
-		}
-	}
-	if limit > MaxQueryLimit {
-		limit = MaxQueryLimit
-	}
-
-	offset := 0
-	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
-		var err error
-		offset, err = strconv.Atoi(offsetStr)
-		if err != nil || offset < 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid offset parameter")
-			return
-		}
-	}
-	if offset > MaxQueryOffset {
-		offset = MaxQueryOffset
+	limit, offset, err := a.parsePagination(r, 10)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	logger.Debug("Getting top blob users",
@@ -994,18 +973,18 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// formatBytes formats bytes as a human-readable string
-func formatBytes(bytes int64) string {
+// formatBytes formats a byte count as a human-readable string
+func formatBytes(numBytes int64) string {
 	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
+	if numBytes < unit {
+		return fmt.Sprintf("%d B", numBytes)
 	}
 	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
+	for n := numBytes / unit; n >= unit; n /= unit {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+	return fmt.Sprintf("%.2f %cB", float64(numBytes)/float64(div), "KMGTPE"[exp])
 }
 
 // DevLogs godoc
@@ -1023,18 +1002,10 @@ func formatBytes(bytes int64) string {
 func (a *API) DevLogs(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting recent logs")
 
-	// Get query parameters
-	limit := 100
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil || limit <= 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
-			return
-		}
-	}
-	if limit > MaxQueryLimit {
-		limit = MaxQueryLimit
+	limit, _, err := a.parsePagination(r, 100)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	level := r.URL.Query().Get("level")
@@ -1122,18 +1093,10 @@ func (a *API) DevLogs(w http.ResponseWriter, r *http.Request) {
 func (a *API) DevQueries(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting database query statistics")
 
-	// Get query parameters
-	limit := 20
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil || limit <= 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
-			return
-		}
-	}
-	if limit > MaxQueryLimit {
-		limit = MaxQueryLimit
+	limit, _, err := a.parsePagination(r, 20)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	// This is a placeholder implementation
