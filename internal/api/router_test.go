@@ -42,7 +42,7 @@ func (m *mockIndexer) GetCurrentBlock(ctx context.Context) (uint64, error) {
 func (m *mockIndexer) GetBlobCounts(ctx context.Context) (confirmedCount, pendingCount int, err error) {
 	return m.confirmedCount, m.pendingCount, m.blobCountsErr
 }
-func (m *mockIndexer) GetTopBlobUsers(ctx context.Context, limit int) ([]models.BlobUserStats, error) {
+func (m *mockIndexer) GetTopBlobUsers(ctx context.Context, limit, offset int) ([]models.BlobUserStats, error) {
 	return m.topUsers, m.topUsersErr
 }
 func (m *mockIndexer) Reindex(startBlock, endBlock uint64) error {
