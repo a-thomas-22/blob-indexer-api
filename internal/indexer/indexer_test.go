@@ -149,6 +149,10 @@ func TestConstants(t *testing.T) {
 func TestBlobGasToBytes_UsesBlobGasDirectly(t *testing.T) {
 	tx := newSignedBlobTx(t, 1, 0)
 
+	if got := len(tx.BlobHashes()); got != 1 {
+		t.Fatalf("expected newSignedBlobTx(t, 1, 0) to produce a single-blob tx, got %d blobs", got)
+	}
+
 	blobGas := tx.BlobGas()
 	if blobGas != params.BlobTxBlobGasPerBlob {
 		t.Fatalf("expected tx.BlobGas()=%d for single-blob tx, got %d", params.BlobTxBlobGasPerBlob, blobGas)
