@@ -226,6 +226,35 @@ func (a *API) respondError(w http.ResponseWriter, status int, message string) {
 	})
 }
 
+// parsePagination parses limit/offset query params with clamping.
+func (a *API) parsePagination(r *http.Request, defaultLimit int) (limit, offset int, err error) {
+	limit = defaultLimit
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		parsed, parseErr := strconv.Atoi(limitStr)
+		if parseErr != nil || parsed <= 0 {
+			return 0, 0, fmt.Errorf("invalid limit parameter")
+		}
+		limit = parsed
+	}
+	if limit > MaxQueryLimit {
+		limit = MaxQueryLimit
+	}
+
+	offset = 0
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		parsed, parseErr := strconv.Atoi(offsetStr)
+		if parseErr != nil || parsed < 0 {
+			return 0, 0, fmt.Errorf("invalid offset parameter")
+		}
+		offset = parsed
+	}
+	if offset > MaxQueryOffset {
+		offset = MaxQueryOffset
+	}
+
+	return limit, offset, nil
+}
+
 // GetLatestBlobs godoc
 // @Summary Get latest confirmed blobs
 // @Description Retrieve the latest confirmed blob transactions from the blockchain
@@ -246,31 +275,10 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get query parameters
-	limit := 10
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil || limit <= 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
-			return
-		}
-	}
-	if limit > MaxQueryLimit {
-		limit = MaxQueryLimit
-	}
-
-	offset := 0
-	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
-		var err error
-		offset, err = strconv.Atoi(offsetStr)
-		if err != nil || offset < 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid offset parameter")
-			return
-		}
-	}
-	if offset > MaxQueryOffset {
-		offset = MaxQueryOffset
+	limit, offset, err := a.parsePagination(r, 10)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	logger.Debug("Getting latest blobs",
@@ -323,31 +331,10 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get query parameters
-	limit := 10
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil || limit <= 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
-			return
-		}
-	}
-	if limit > MaxQueryLimit {
-		limit = MaxQueryLimit
-	}
-
-	offset := 0
-	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
-		var err error
-		offset, err = strconv.Atoi(offsetStr)
-		if err != nil || offset < 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid offset parameter")
-			return
-		}
-	}
-	if offset > MaxQueryOffset {
-		offset = MaxQueryOffset
+	limit, offset, err := a.parsePagination(r, 10)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	logger.Debug("Getting mempool blobs",
@@ -454,30 +441,10 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := 10
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil || limit <= 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
-			return
-		}
-	}
-	if limit > MaxQueryLimit {
-		limit = MaxQueryLimit
-	}
-
-	offset := 0
-	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
-		var err error
-		offset, err = strconv.Atoi(offsetStr)
-		if err != nil || offset < 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid offset parameter")
-			return
-		}
-	}
-	if offset > MaxQueryOffset {
-		offset = MaxQueryOffset
+	limit, offset, err := a.parsePagination(r, 10)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	logger.Debug("Getting top blob users",
@@ -1035,18 +1002,10 @@ func formatBytes(numBytes int64) string {
 func (a *API) DevLogs(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting recent logs")
 
-	// Get query parameters
-	limit := 100
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil || limit <= 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
-			return
-		}
-	}
-	if limit > MaxQueryLimit {
-		limit = MaxQueryLimit
+	limit, _, err := a.parsePagination(r, 100)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	level := r.URL.Query().Get("level")
@@ -1134,18 +1093,10 @@ func (a *API) DevLogs(w http.ResponseWriter, r *http.Request) {
 func (a *API) DevQueries(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting database query statistics")
 
-	// Get query parameters
-	limit := 20
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil || limit <= 0 {
-			a.respondError(w, http.StatusBadRequest, "Invalid limit parameter")
-			return
-		}
-	}
-	if limit > MaxQueryLimit {
-		limit = MaxQueryLimit
+	limit, _, err := a.parsePagination(r, 20)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	// This is a placeholder implementation
