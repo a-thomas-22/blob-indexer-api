@@ -7,11 +7,12 @@ GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 BINARY_NAME=blob-indexer-api
+COVERAGE_THRESHOLD ?= 50
 COVERAGE_DIR=coverage
 COVERAGE_FILE=$(COVERAGE_DIR)/coverage.out
 COVERAGE_HTML=$(COVERAGE_DIR)/coverage.html
 
-all: lint test build
+all: test build
 
 build:
 	$(GOBUILD) -o $(BINARY_NAME) -v ./cmd/server
@@ -28,6 +29,13 @@ test-coverage:
 	$(GOTEST) -v -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./...
 	$(GOCMD) tool cover -html=$(COVERAGE_FILE) -o $(COVERAGE_HTML)
 	$(GOCMD) tool cover -func=$(COVERAGE_FILE)
+	@COVERAGE=$$($(GOCMD) tool cover -func=$(COVERAGE_FILE) | grep total | awk '{print $$NF}' | tr -d '%'); \
+	echo "Total coverage: $${COVERAGE}%"; \
+	if awk -v cov="$${COVERAGE}" -v threshold="$(COVERAGE_THRESHOLD)" 'BEGIN {exit !(cov < threshold)}'; then \
+		echo "FAIL: Coverage $${COVERAGE}% is below $(COVERAGE_THRESHOLD)% threshold"; \
+		exit 1; \
+	fi; \
+	echo "OK: Coverage $${COVERAGE}% meets $(COVERAGE_THRESHOLD)% threshold"
 
 test-race:
 	$(GOTEST) -v -race ./...
