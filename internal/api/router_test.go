@@ -70,7 +70,7 @@ func TestGetNetworkFromRequest_NoIndexers(t *testing.T) {
 		indexers: make(map[int]*indexer.Indexer),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/?network=mainnet", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?network=mainnet", http.NoBody)
 	_, err := api.getNetworkFromRequest(req)
 	if err == nil {
 		t.Error("expected error when no indexers available")
@@ -82,7 +82,7 @@ func TestGetNetworkFromRequest_NoNetworkParam(t *testing.T) {
 		indexers: make(map[int]*indexer.Indexer),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	_, err := api.getNetworkFromRequest(req)
 	if err == nil {
 		t.Error("expected error when no indexers available and no network param")
@@ -94,7 +94,7 @@ func TestGetNetworkFromRequest_NetworkNotFound(t *testing.T) {
 		indexers: make(map[int]*indexer.Indexer),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/?network=nonexistent", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?network=nonexistent", http.NoBody)
 	_, err := api.getNetworkFromRequest(req)
 	if err == nil {
 		t.Error("expected error for nonexistent network")
