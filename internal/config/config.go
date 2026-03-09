@@ -315,10 +315,10 @@ func loadConfig() (*Config, error) {
 	return &cfg, nil
 }
 
-func parseDuration(v *viper.Viper, key, field string) (time.Duration, error) {
+func parseDuration(v *viper.Viper, key, label string) (time.Duration, error) {
 	duration, err := time.ParseDuration(v.GetString(key))
 	if err != nil {
-		return 0, fmt.Errorf("invalid %s: %w", field, err)
+		return 0, fmt.Errorf("invalid %s: %w", label, err)
 	}
 	return duration, nil
 }
