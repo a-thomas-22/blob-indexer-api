@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/params"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
 	"github.com/a-thomas-22/blob-indexer-api/internal/blobparams"
@@ -142,6 +143,25 @@ func TestConstants(t *testing.T) {
 	}
 	if DefaultWorkerCount != 4 {
 		t.Errorf("expected DefaultWorkerCount=4, got %d", DefaultWorkerCount)
+	}
+}
+
+func TestBlobGasToBytes_UsesBlobGasDirectly(t *testing.T) {
+	tx := newSignedBlobTx(t, 1, 0)
+
+	blobGas := tx.BlobGas()
+	if blobGas != params.BlobTxBlobGasPerBlob {
+		t.Fatalf("expected tx.BlobGas()=%d for single-blob tx, got %d", params.BlobTxBlobGasPerBlob, blobGas)
+	}
+
+	blobBytes := blobGasToBytes(blobGas)
+	if blobBytes != int64(params.BlobTxBlobGasPerBlob) {
+		t.Fatalf("expected blob bytes=%d, got %d", params.BlobTxBlobGasPerBlob, blobBytes)
+	}
+
+	incorrectLegacyValue := int64(params.BlobTxBlobGasPerBlob * 128)
+	if blobBytes == incorrectLegacyValue {
+		t.Fatalf("unexpected legacy multiplied value: %d", incorrectLegacyValue)
 	}
 }
 

@@ -48,6 +48,13 @@ const (
 // errReorgDetected is returned when a chain reorganization is detected and handled
 var errReorgDetected = errors.New("chain reorganization detected")
 
+// blobGasToBytes converts go-ethereum blob gas units to blob byte size.
+// In go-ethereum, tx.BlobGas() is already params.BlobTxBlobGasPerBlob * blob_count,
+// and params.BlobTxBlobGasPerBlob is defined as "== blob byte size".
+func blobGasToBytes(blobGas uint64) int64 {
+	return int64(blobGas)
+}
+
 // BlockTask represents a task to process a block
 type BlockTask struct {
 	BlockNumber uint64
@@ -79,7 +86,7 @@ func calculateBlobMetrics(tx *types.Transaction, blobBaseFee *big.Int) blobMetri
 	blobGasUsedInt := int64(blobGasUsed)
 
 	return blobMetrics{
-		blobSizeBytes:     int64(blobGasUsed * 128), // Approximate size
+		blobSizeBytes:     blobGasToBytes(blobGasUsed),
 		baseFeePerBlobGas: blobBaseFee.String(),
 		tipPerBlobGas:     tipPerBlobGas.String(),
 		totalCostETH:      totalCost.String(),
