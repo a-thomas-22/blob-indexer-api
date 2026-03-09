@@ -12,7 +12,7 @@ COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags "-X main.version=${VERSION}" -o blob-indexer-api ./cmd/api
 
-FROM alpine:3.21
+FROM alpine:3.23
 
 WORKDIR /app
 
