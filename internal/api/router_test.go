@@ -172,7 +172,9 @@ func TestGetNetworks(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var resp Response
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if !resp.Success {
 		t.Error("expected Success=true")
 	}
@@ -411,7 +413,9 @@ func TestGetLatestBlobs_Success(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var resp Response
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if !resp.Success {
 		t.Error("expected Success=true")
 	}
@@ -809,7 +813,9 @@ func TestDevQueries_LimitTruncation(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var resp Response
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if !resp.Success {
 		t.Error("expected success=true")
 	}
@@ -1061,7 +1067,9 @@ func TestRespondMaxBytesError(t *testing.T) {
 		t.Fatalf("expected 413, got %d", w.Code)
 	}
 	var resp Response
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if resp.Success {
 		t.Error("expected Success=false")
 	}
@@ -1199,7 +1207,9 @@ func TestGetBlobPricing_Success(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var resp Response
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if !resp.Success {
 		t.Error("expected Success=true")
 	}
@@ -1292,7 +1302,9 @@ func TestGetMempoolBlobs_WithData(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var resp Response
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if !resp.Success {
 		t.Error("expected success=true")
 	}
