@@ -31,7 +31,7 @@ networks:
     start_block: "100"
     enabled: true
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
 	}
 
@@ -81,7 +81,7 @@ networks:
     start_block: "0"
     enabled: true
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -110,7 +110,7 @@ networks:
     start_block: "0"
     enabled: true
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -141,7 +141,7 @@ networks:
     start_block: "0"
     enabled: true
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -170,7 +170,7 @@ networks:
     start_block: "0"
     enabled: true
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -199,7 +199,7 @@ networks:
     start_block: "0"
     enabled: true
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -222,7 +222,7 @@ func TestLoad_LegacyRPCURL(t *testing.T) {
 database:
   url: "postgres://localhost:5432/db"
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -255,7 +255,7 @@ func TestLoad_LegacyRPCURL_Sepolia(t *testing.T) {
 database:
   url: "postgres://localhost:5432/db"
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -284,7 +284,7 @@ func TestLoad_LegacyRPCURL_Holesky(t *testing.T) {
 database:
   url: "postgres://localhost:5432/db"
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -310,7 +310,7 @@ func TestLoad_LegacyRPCURL_Goerli(t *testing.T) {
 database:
   url: "postgres://localhost:5432/db"
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -336,7 +336,7 @@ func TestLoad_LegacyRPCURL_DefaultStartBlock(t *testing.T) {
 database:
   url: "postgres://localhost:5432/db"
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -366,7 +366,7 @@ networks:
     start_block: "0"
     enabled: true
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -413,7 +413,7 @@ networks:
     start_block: "0"
     enabled: true
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -432,7 +432,7 @@ func TestLoad_ValidationFailure(t *testing.T) {
 server:
   port: 8080
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -461,7 +461,7 @@ networks:
     start_block: "0"
     enabled: true
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -480,7 +480,7 @@ func TestLoad_ETHRPCURLOverride(t *testing.T) {
 database:
   url: "postgres://localhost:5432/db"
 `
-	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

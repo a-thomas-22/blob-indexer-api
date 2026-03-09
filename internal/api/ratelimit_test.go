@@ -112,7 +112,7 @@ func TestRateLimitMiddleware_Returns429(t *testing.T) {
 	}))
 
 	// First request should succeed
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.RemoteAddr = "5.5.5.5:1234"
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -155,7 +155,7 @@ func TestRateLimitMiddleware_UsesXRealIP(t *testing.T) {
 	}))
 
 	// First request with X-Real-Ip
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("X-Real-Ip", "8.8.8.8")
 	w := httptest.NewRecorder()

@@ -1,6 +1,7 @@
 package ethereum
 
 import (
+	"context"
 	"math/big"
 	"testing"
 	"time"
@@ -109,7 +110,7 @@ func TestSubscribeToNewHeads_RequiresWebsocket(t *testing.T) {
 		pendingTxSubs: make(map[string]*PendingTxSubscription),
 	}
 
-	_, err := c.SubscribeToNewHeads(nil, "test")
+	_, err := c.SubscribeToNewHeads(context.TODO(), "test")
 	if err == nil {
 		t.Error("expected error for non-websocket client")
 	}
@@ -122,7 +123,7 @@ func TestSubscribeToPendingTransactions_RequiresWebsocket(t *testing.T) {
 		pendingTxSubs: make(map[string]*PendingTxSubscription),
 	}
 
-	_, err := c.SubscribeToPendingTransactions(nil, "test")
+	_, err := c.SubscribeToPendingTransactions(context.TODO(), "test")
 	if err == nil {
 		t.Error("expected error for non-websocket client")
 	}
@@ -134,7 +135,7 @@ func TestGetBlobBaseFee_CacheHit(t *testing.T) {
 		blobBaseFeeTime:  time.Now(), // fresh cache
 	}
 
-	fee, err := c.GetBlobBaseFee(nil, 100)
+	fee, err := c.GetBlobBaseFee(context.TODO(), 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -150,11 +151,11 @@ func TestGetBlobBaseFee_CacheReturnsNewInstance(t *testing.T) {
 		blobBaseFeeTime:  time.Now(),
 	}
 
-	fee, _ := c.GetBlobBaseFee(nil, 100)
+	fee, _ := c.GetBlobBaseFee(context.TODO(), 100)
 	// Modifying the returned value should not affect the cache
 	fee.SetInt64(0)
 
-	fee2, _ := c.GetBlobBaseFee(nil, 100)
+	fee2, _ := c.GetBlobBaseFee(context.TODO(), 100)
 	if fee2.Int64() != 42000 {
 		t.Errorf("cache was modified, expected 42000, got %d", fee2.Int64())
 	}

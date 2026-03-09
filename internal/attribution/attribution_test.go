@@ -1,6 +1,7 @@
 package attribution
 
 import (
+	"context"
 	"testing"
 
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
@@ -48,7 +49,7 @@ func TestGetUserAttribution_Unknown(t *testing.T) {
 func TestUpdateUserLastSeen_UnknownAddress(t *testing.T) {
 	s := NewService(nil)
 	// Unknown address should return nil without DB call
-	err := s.UpdateUserLastSeen(nil, "0xunknown")
+	err := s.UpdateUserLastSeen(context.TODO(), "0xunknown")
 	if err != nil {
 		t.Errorf("expected nil error for unknown address, got %v", err)
 	}

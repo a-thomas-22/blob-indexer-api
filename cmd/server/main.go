@@ -91,7 +91,7 @@ func main() {
 
 	// Create indexers for each enabled network
 	indexerProviders := make(map[int]api.IndexerProvider)
-	var concreteIndexers []*indexer.Indexer
+	concreteIndexers := make([]*indexer.Indexer, 0, len(enabledNetworks))
 	for _, network := range enabledNetworks {
 		// Initialize Ethereum client for this network
 		ethClient, err := ethereum.NewClient(network.RpcURL)

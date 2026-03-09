@@ -8,12 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
-	"github.com/a-thomas-22/blob-indexer-api/internal/config"
-	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
+	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
 
 // newTestIndexer creates a minimal Indexer without connecting to any real services.
@@ -95,12 +96,12 @@ func TestStop(t *testing.T) {
 	idx := newTestIndexer()
 	// Stop should not panic even if Start wasn't called
 	idx.Stop()
-	// Context should be cancelled
+	// Context should be canceled
 	select {
 	case <-idx.ctx.Done():
 		// expected
 	default:
-		t.Error("expected context to be cancelled after Stop")
+		t.Error("expected context to be canceled after Stop")
 	}
 }
 
@@ -223,8 +224,8 @@ func TestRetryFailedBlocks_ExceedsRetryLimit(t *testing.T) {
 
 func TestRetryFailedBlocks_MixedBlocks(t *testing.T) {
 	idx := newTestIndexer()
-	idx.failedBlocks[100] = 2                      // should retry
-	idx.failedBlocks[200] = maxGapScanRetries + 5   // should not retry
+	idx.failedBlocks[100] = 2                     // should retry
+	idx.failedBlocks[200] = maxGapScanRetries + 5 // should not retry
 
 	idx.retryFailedBlocks()
 
@@ -369,7 +370,7 @@ func TestProcessBlockRange_CancelledContext(t *testing.T) {
 
 	err := idx.processBlockRange(1, 100)
 	if err == nil {
-		t.Error("expected error for cancelled context")
+		t.Error("expected error for canceled context")
 	}
 }
 
@@ -429,7 +430,7 @@ func TestRetryFailedBlocks_AllExceeded(t *testing.T) {
 
 func TestRetryFailedBlocks_CancelledContext(t *testing.T) {
 	idx := newTestIndexer()
-	idx.blockTaskCh = make(chan BlockTask, 0) // zero-buffer channel
+	idx.blockTaskCh = make(chan BlockTask) // zero-buffer channel
 	idx.failedBlocks[100] = 1
 	idx.failedBlocks[200] = 1
 

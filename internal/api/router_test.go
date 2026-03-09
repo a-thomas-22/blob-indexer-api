@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,10 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
-	"github.com/go-chi/chi/v5"
 )
 
 // mockIndexer implements IndexerProvider for testing.
@@ -37,7 +39,7 @@ func (m *mockIndexer) GetLastIndexedBlock() uint64          { return m.lastIndex
 func (m *mockIndexer) GetCurrentBlock(ctx context.Context) (uint64, error) {
 	return m.currentBlock, m.currentBlockErr
 }
-func (m *mockIndexer) GetBlobCounts(ctx context.Context) (int, int, error) {
+func (m *mockIndexer) GetBlobCounts(ctx context.Context) (confirmedCount, pendingCount int, err error) {
 	return m.confirmedCount, m.pendingCount, m.blobCountsErr
 }
 func (m *mockIndexer) GetTopBlobUsers(ctx context.Context, limit int) ([]models.BlobUserStats, error) {
@@ -79,8 +81,8 @@ func (m *mockDB) Stats() sql.DBStats {
 	return sql.DBStats{
 		MaxOpenConnections: 25,
 		OpenConnections:    5,
-		InUse:             2,
-		Idle:              3,
+		InUse:              2,
+		Idle:               3,
 	}
 }
 
@@ -113,7 +115,7 @@ func newTestAPIWithDB(db DBProvider) (*API, *mockIndexer) {
 }
 
 // setSliceResult is a helper to assign mock data to a dest pointer via reflection.
-func setSliceResult(dest interface{}, src interface{}) {
+func setSliceResult(dest, src interface{}) {
 	dv := reflect.ValueOf(dest)
 	if dv.Kind() == reflect.Ptr {
 		dv = dv.Elem()
@@ -123,7 +125,7 @@ func setSliceResult(dest interface{}, src interface{}) {
 }
 
 // setStructResult copies a struct value into the dest pointer.
-func setStructResult(dest interface{}, src interface{}) {
+func setStructResult(dest, src interface{}) {
 	dv := reflect.ValueOf(dest)
 	if dv.Kind() == reflect.Ptr {
 		dv = dv.Elem()
@@ -142,7 +144,7 @@ var _ = fmt.Sprintf
 
 func TestGetNetworkFromRequest_ByChainID(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?network=42", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42", http.NoBody)
 	idx, err := a.getNetworkFromRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -154,7 +156,7 @@ func TestGetNetworkFromRequest_ByChainID(t *testing.T) {
 
 func TestGetNetworkFromRequest_ByName(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?network=testnet", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?network=testnet", http.NoBody)
 	idx, err := a.getNetworkFromRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -166,7 +168,7 @@ func TestGetNetworkFromRequest_ByName(t *testing.T) {
 
 func TestGetNetworkFromRequest_DefaultFirstNetwork(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	idx, err := a.getNetworkFromRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -178,18 +180,18 @@ func TestGetNetworkFromRequest_DefaultFirstNetwork(t *testing.T) {
 
 func TestGetNetworkFromRequest_NoIndexers(t *testing.T) {
 	a := &API{indexers: map[int]IndexerProvider{}}
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	_, err := a.getNetworkFromRequest(req)
-	if err != ErrNoNetworksAvailable {
+	if !errors.Is(err, ErrNoNetworksAvailable) {
 		t.Errorf("expected ErrNoNetworksAvailable, got %v", err)
 	}
 }
 
 func TestGetNetworkFromRequest_NotFound(t *testing.T) {
 	a := &API{indexers: map[int]IndexerProvider{}}
-	req := httptest.NewRequest(http.MethodGet, "/?network=999", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
 	_, err := a.getNetworkFromRequest(req)
-	if err != ErrNetworkNotFound {
+	if !errors.Is(err, ErrNetworkNotFound) {
 		t.Errorf("expected ErrNetworkNotFound, got %v", err)
 	}
 }
@@ -198,7 +200,7 @@ func TestGetNetworkFromRequest_NotFound(t *testing.T) {
 
 func TestGetNetworks(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/api/networks", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/networks", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetNetworks(w, req)
 
@@ -220,7 +222,7 @@ func TestGetNetworkStatus_Valid(t *testing.T) {
 	r := chi.NewRouter()
 	r.Get("/api/networks/{chainId}", a.GetNetworkStatus)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/networks/42", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/networks/42", http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -235,7 +237,7 @@ func TestGetNetworkStatus_InvalidChainID(t *testing.T) {
 	r := chi.NewRouter()
 	r.Get("/api/networks/{chainId}", a.GetNetworkStatus)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/networks/abc", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/networks/abc", http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -250,7 +252,7 @@ func TestGetNetworkStatus_NotFound(t *testing.T) {
 	r := chi.NewRouter()
 	r.Get("/api/networks/{chainId}", a.GetNetworkStatus)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/networks/999", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/networks/999", http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -267,7 +269,7 @@ func TestGetTopBlobUsers_Success(t *testing.T) {
 		{Address: "0xabc", Name: "Alice", BlobCount: 10, TotalCostETH: "1.5", LastTimestamp: time.Now()},
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/?limit=5", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=5", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
 
@@ -278,7 +280,7 @@ func TestGetTopBlobUsers_Success(t *testing.T) {
 
 func TestGetTopBlobUsers_InvalidLimit(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?limit=-1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=-1", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
 
@@ -289,7 +291,7 @@ func TestGetTopBlobUsers_InvalidLimit(t *testing.T) {
 
 func TestGetTopBlobUsers_BadNetwork(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?network=missing", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?network=missing", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
 
@@ -302,7 +304,7 @@ func TestGetTopBlobUsers_BadNetwork(t *testing.T) {
 
 func TestDevMetrics(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/api/dev/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/dev/metrics", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevMetrics(w, req)
 
@@ -315,7 +317,7 @@ func TestDevMetrics(t *testing.T) {
 
 func TestDevLogs_Default(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/api/dev/logs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/dev/logs", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
 
@@ -326,7 +328,7 @@ func TestDevLogs_Default(t *testing.T) {
 
 func TestDevLogs_FilterByLevel(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/api/dev/logs?level=error", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/dev/logs?level=error", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
 
@@ -337,7 +339,7 @@ func TestDevLogs_FilterByLevel(t *testing.T) {
 
 func TestDevLogs_InvalidLimit(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/api/dev/logs?limit=abc", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/dev/logs?limit=abc", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
 
@@ -350,7 +352,7 @@ func TestDevLogs_InvalidLimit(t *testing.T) {
 
 func TestDevQueries_Default(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/api/dev/queries", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/dev/queries", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevQueries(w, req)
 
@@ -361,7 +363,7 @@ func TestDevQueries_Default(t *testing.T) {
 
 func TestDevQueries_InvalidLimit(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/api/dev/queries?limit=0", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/dev/queries?limit=0", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevQueries(w, req)
 
@@ -374,7 +376,7 @@ func TestDevQueries_InvalidLimit(t *testing.T) {
 
 func TestDevDashboard(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/api/dev/dashboard", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/dev/dashboard", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevDashboard(w, req)
 
@@ -481,7 +483,7 @@ func TestGetLatestBlobs_Success(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
 
@@ -497,7 +499,7 @@ func TestGetLatestBlobs_Success(t *testing.T) {
 
 func TestGetLatestBlobs_InvalidLimit(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?limit=abc", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=abc", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
 
@@ -508,7 +510,7 @@ func TestGetLatestBlobs_InvalidLimit(t *testing.T) {
 
 func TestGetLatestBlobs_NegativeLimit(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?limit=-5", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=-5", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
 
@@ -524,7 +526,7 @@ func TestGetLatestBlobs_DBError(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
 
@@ -535,7 +537,7 @@ func TestGetLatestBlobs_DBError(t *testing.T) {
 
 func TestGetLatestBlobs_BadNetwork(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?network=unknown", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?network=unknown", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
 
@@ -553,7 +555,7 @@ func TestGetMempoolBlobs_Success(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)
 
@@ -564,7 +566,7 @@ func TestGetMempoolBlobs_Success(t *testing.T) {
 
 func TestGetMempoolBlobs_InvalidLimit(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?limit=0", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=0", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)
 
@@ -580,7 +582,7 @@ func TestGetMempoolBlobs_DBError(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)
 
@@ -613,7 +615,7 @@ func TestGetBlobByTxHash_Success(t *testing.T) {
 	r := chi.NewRouter()
 	r.Get("/blob/{txHash}", a.GetBlobByTxHash)
 
-	req := httptest.NewRequest(http.MethodGet, "/blob/0xabc", nil)
+	req := httptest.NewRequest(http.MethodGet, "/blob/0xabc", http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -633,7 +635,7 @@ func TestGetBlobByTxHash_NotFound(t *testing.T) {
 	r := chi.NewRouter()
 	r.Get("/blob/{txHash}", a.GetBlobByTxHash)
 
-	req := httptest.NewRequest(http.MethodGet, "/blob/0xnotfound", nil)
+	req := httptest.NewRequest(http.MethodGet, "/blob/0xnotfound", http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -649,7 +651,7 @@ func TestGetBlobByTxHash_EmptyHash(t *testing.T) {
 	r.Get("/blob/{txHash}", a.GetBlobByTxHash)
 
 	// Chi won't route empty param, so we test without chi routing
-	req := httptest.NewRequest(http.MethodGet, "/blob/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/blob/", http.NoBody)
 	w := httptest.NewRecorder()
 	// Call directly - txHash will be empty from chi.URLParam
 	a.GetBlobByTxHash(w, req)
@@ -667,7 +669,7 @@ func TestGetBlobStats_Success(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetBlobStats(w, req)
 
@@ -683,7 +685,7 @@ func TestGetBlobStats_DBError(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetBlobStats(w, req)
 
@@ -699,7 +701,7 @@ func TestGetIndexerStatus_Success(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetIndexerStatus(w, req)
 
@@ -715,7 +717,7 @@ func TestGetIndexerStatus_DBError(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetIndexerStatus(w, req)
 
@@ -731,7 +733,7 @@ func TestDevIndexers_Success(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevIndexers(w, req)
 
@@ -749,7 +751,7 @@ func TestDevDatabase_Success(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevDatabase(w, req)
 
@@ -777,7 +779,7 @@ func TestDevIndexers_CurrentBlockError(t *testing.T) {
 			Indexer: config.IndexerConfig{Version: "test-v1"},
 		},
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevIndexers(w, req)
 
@@ -806,7 +808,7 @@ func TestDevIndexers_BlobCountsError(t *testing.T) {
 			Indexer: config.IndexerConfig{Version: "test-v1"},
 		},
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevIndexers(w, req)
 
@@ -822,7 +824,7 @@ func TestDevDatabase_DBError(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevDatabase(w, req)
 
@@ -843,7 +845,7 @@ func TestGetTopBlobUsers_DBError(t *testing.T) {
 			Server: config.ServerConfig{Port: 8080, DevMode: true},
 		},
 	}
-	req := httptest.NewRequest(http.MethodGet, "/?network=42", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
 
@@ -866,7 +868,7 @@ func TestGetTopBlobUsers_CustomLimit(t *testing.T) {
 			Server: config.ServerConfig{Port: 8080, DevMode: true},
 		},
 	}
-	req := httptest.NewRequest(http.MethodGet, "/?network=42&limit=5", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42&limit=5", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
 
@@ -904,7 +906,7 @@ func TestGetLatestBlobs_ExcessiveLimit(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
 
@@ -916,7 +918,7 @@ func TestGetLatestBlobs_ExcessiveLimit(t *testing.T) {
 
 func TestGetMempoolBlobs_NegativeLimit(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?limit=-1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=-1", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)
 
@@ -934,7 +936,7 @@ func TestGetBlobByTxHash_DBError(t *testing.T) {
 	a, _ := newTestAPIWithDB(db)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("txHash", "0x1234")
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	w := httptest.NewRecorder()
 	a.GetBlobByTxHash(w, req)
@@ -947,7 +949,7 @@ func TestGetBlobByTxHash_DBError(t *testing.T) {
 
 func TestDevLogs_CustomLimit(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?limit=50", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=50", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
 
@@ -958,7 +960,7 @@ func TestDevLogs_CustomLimit(t *testing.T) {
 
 func TestDevQueries_CustomLimit(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?limit=50", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=50", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevQueries(w, req)
 
@@ -970,7 +972,7 @@ func TestDevQueries_CustomLimit(t *testing.T) {
 func TestDevQueries_LimitTruncation(t *testing.T) {
 	a, _ := newTestAPI()
 	// limit=2 should truncate the placeholder query list
-	req := httptest.NewRequest(http.MethodGet, "/?limit=2", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=2", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevQueries(w, req)
 
@@ -986,7 +988,7 @@ func TestDevQueries_LimitTruncation(t *testing.T) {
 
 func TestDevQueries_ExcessiveLimit(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevQueries(w, req)
 
@@ -1001,7 +1003,7 @@ func TestGetBlobStats_BadNetwork(t *testing.T) {
 		indexers: map[int]IndexerProvider{},
 		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
 	}
-	req := httptest.NewRequest(http.MethodGet, "/?network=999", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetBlobStats(w, req)
 
@@ -1016,7 +1018,7 @@ func TestGetIndexerStatus_BadNetwork(t *testing.T) {
 		indexers: map[int]IndexerProvider{},
 		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
 	}
-	req := httptest.NewRequest(http.MethodGet, "/?network=999", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetIndexerStatus(w, req)
 
@@ -1027,7 +1029,7 @@ func TestGetIndexerStatus_BadNetwork(t *testing.T) {
 
 func TestDevLogs_ExcessiveLimit(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
 
@@ -1043,7 +1045,7 @@ func TestGetMempoolBlobs_ExcessiveLimit(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)
 
@@ -1058,7 +1060,7 @@ func TestGetMempoolBlobs_BadNetwork(t *testing.T) {
 		indexers: map[int]IndexerProvider{},
 		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
 	}
-	req := httptest.NewRequest(http.MethodGet, "/?network=999", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)
 
@@ -1075,7 +1077,7 @@ func TestGetLatestBlobs_LargeLimit(t *testing.T) {
 	}
 	a, _ := newTestAPIWithDB(db)
 	// Test that limit > MaxQueryLimit gets capped
-	req := httptest.NewRequest(http.MethodGet, "/?limit=10000", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=10000", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetLatestBlobs(w, req)
 
@@ -1094,7 +1096,7 @@ func TestGetTopBlobUsers_ExcessiveLimit(t *testing.T) {
 		indexers: map[int]IndexerProvider{42: mock},
 		config:   &config.Config{Server: config.ServerConfig{Port: 8080}},
 	}
-	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
 
@@ -1118,7 +1120,7 @@ func TestDevDatabase_PartialErrors(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevDatabase(w, req)
 
@@ -1149,7 +1151,7 @@ func TestDevIndexers_DBTimestampError(t *testing.T) {
 			Indexer: config.IndexerConfig{Version: "test-v1"},
 		},
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevIndexers(w, req)
 
@@ -1180,7 +1182,7 @@ func TestGetBlobByTxHash_WithBlobData(t *testing.T) {
 	a, _ := newTestAPIWithDB(db)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("txHash", "0xabc123")
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	w := httptest.NewRecorder()
 	a.GetBlobByTxHash(w, req)
@@ -1193,7 +1195,7 @@ func TestGetBlobByTxHash_WithBlobData(t *testing.T) {
 func TestDevLogs_SmallLimit(t *testing.T) {
 	a, _ := newTestAPI()
 	// limit=2 should truncate placeholder logs (5 entries)
-	req := httptest.NewRequest(http.MethodGet, "/?limit=2", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=2", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
 
@@ -1204,7 +1206,7 @@ func TestDevLogs_SmallLimit(t *testing.T) {
 
 func TestDevLogs_NegativeLimit(t *testing.T) {
 	a, _ := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?limit=-5", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=-5", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
 
@@ -1221,7 +1223,7 @@ func TestGetBlobByTxHash_BadNetwork(t *testing.T) {
 	}
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("txHash", "0xabc")
-	req := httptest.NewRequest(http.MethodGet, "/?network=999", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	w := httptest.NewRecorder()
 	a.GetBlobByTxHash(w, req)
@@ -1252,7 +1254,7 @@ func TestGetMempoolBlobs_WithData(t *testing.T) {
 		},
 	}
 	a, _ := newTestAPIWithDB(db)
-	req := httptest.NewRequest(http.MethodGet, "/?limit=10", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=10", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetMempoolBlobs(w, req)
 

@@ -21,7 +21,7 @@ func TestLoggerMiddleware_SetsRequestID(t *testing.T) {
 	})
 
 	handler := LoggerMiddleware(inner)
-	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/test", http.NoBody)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
@@ -36,7 +36,7 @@ func TestLoggerMiddleware_PassesThrough(t *testing.T) {
 	})
 
 	handler := LoggerMiddleware(inner)
-	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/test", http.NoBody)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
