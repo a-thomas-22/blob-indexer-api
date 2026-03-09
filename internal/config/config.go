@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -380,6 +381,9 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 	}
 
 	logger.Debug("Database URL configured", zap.String("url", maskConnectionString(cfg.Database.URL)))
+	if err := validateDatabaseSSLMode(cfg); err != nil {
+		return err
+	}
 
 	// Validate networks
 	if len(cfg.Networks) == 0 {
@@ -424,6 +428,24 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 	}
 
 	logger.Info("Configuration validation successful")
+	return nil
+}
+
+func validateDatabaseSSLMode(cfg *Config) error {
+	dbURL, err := url.Parse(cfg.Database.URL)
+	if err != nil {
+		return fmt.Errorf("invalid database URL: %w", err)
+	}
+
+	sslMode := strings.ToLower(strings.TrimSpace(dbURL.Query().Get("sslmode")))
+	if sslMode == "disable" && !cfg.Server.DevMode {
+		return fmt.Errorf("database URL uses sslmode=disable while server.dev_mode=false")
+	}
+
+	if sslMode == "disable" && cfg.Server.DevMode {
+		logger.Warn("Database TLS is disabled because dev mode is enabled")
+	}
+
 	return nil
 }
 

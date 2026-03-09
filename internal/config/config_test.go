@@ -50,6 +50,34 @@ func TestValidateConfig_RequiresRPC(t *testing.T) {
 	}
 }
 
+func TestValidateDatabaseSSLMode_ProdRejectsDisable(t *testing.T) {
+	cfg := &Config{
+		Database: DatabaseConfig{URL: "postgres://localhost:5432/test?sslmode=disable"},
+		Server:   ServerConfig{DevMode: false},
+		Networks: []NetworkConfig{
+			{Name: "test", ChainID: 1, Enabled: true},
+		},
+	}
+
+	if err := ValidateForAPI(cfg); err == nil {
+		t.Fatal("expected validation error for sslmode=disable with dev_mode=false")
+	}
+}
+
+func TestValidateDatabaseSSLMode_DevAllowsDisable(t *testing.T) {
+	cfg := &Config{
+		Database: DatabaseConfig{URL: "postgres://localhost:5432/test?sslmode=disable"},
+		Server:   ServerConfig{DevMode: true},
+		Networks: []NetworkConfig{
+			{Name: "test", ChainID: 1, Enabled: true},
+		},
+	}
+
+	if err := ValidateForAPI(cfg); err != nil {
+		t.Fatalf("expected validation to pass in dev mode, got: %v", err)
+	}
+}
+
 func TestViperConfig(t *testing.T) {
 	t.Setenv("CONFIG_PATH", "../../config.yaml")
 	t.Setenv("DB_URL", "postgres://test:test@localhost:5432/testdb")
