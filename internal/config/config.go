@@ -42,6 +42,9 @@ type DatabaseConfig struct {
 type ServerConfig struct {
 	Port            int           `mapstructure:"port" yaml:"port"`
 	DevMode         bool          `mapstructure:"dev_mode" yaml:"dev_mode"`
+	ReadTimeout     time.Duration `mapstructure:"read_timeout" yaml:"read_timeout"`
+	WriteTimeout    time.Duration `mapstructure:"write_timeout" yaml:"write_timeout"`
+	IdleTimeout     time.Duration `mapstructure:"idle_timeout" yaml:"idle_timeout"`
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout" yaml:"shutdown_timeout"`
 }
 
@@ -94,6 +97,9 @@ func loadConfig() (*Config, error) {
 	// Set default values
 	v.SetDefault("server.port", 8080)
 	v.SetDefault("server.dev_mode", false)
+	v.SetDefault("server.read_timeout", "30s")
+	v.SetDefault("server.write_timeout", "30s")
+	v.SetDefault("server.idle_timeout", "120s")
 	v.SetDefault("server.shutdown_timeout", "15s")
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")
@@ -294,6 +300,24 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("invalid shutdown_timeout: %w", err)
 	}
 	cfg.Server.ShutdownTimeout = shutdownTimeout
+
+	readTimeout, err := time.ParseDuration(v.GetString("server.read_timeout"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid read_timeout: %w", err)
+	}
+	cfg.Server.ReadTimeout = readTimeout
+
+	writeTimeout, err := time.ParseDuration(v.GetString("server.write_timeout"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid write_timeout: %w", err)
+	}
+	cfg.Server.WriteTimeout = writeTimeout
+
+	idleTimeout, err := time.ParseDuration(v.GetString("server.idle_timeout"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid idle_timeout: %w", err)
+	}
+	cfg.Server.IdleTimeout = idleTimeout
 
 	connMaxLifetime, err := time.ParseDuration(v.GetString("database.conn_max_lifetime"))
 	if err != nil {
