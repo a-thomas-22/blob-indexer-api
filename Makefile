@@ -8,7 +8,8 @@ GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 API_BINARY=blob-indexer-api
 INDEXER_BINARY=blob-indexer
-COVERAGE_THRESHOLD ?= 50
+COVERAGE_THRESHOLD ?= 90
+COVERAGE_PACKAGES ?= ./internal/... ./docs
 COVERAGE_DIR=coverage
 COVERAGE_FILE=$(COVERAGE_DIR)/coverage.out
 COVERAGE_HTML=$(COVERAGE_DIR)/coverage.html
@@ -34,7 +35,7 @@ test:
 
 test-coverage:
 	@mkdir -p $(COVERAGE_DIR)
-	$(GOTEST) -v -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./...
+	$(GOTEST) -v -coverprofile=$(COVERAGE_FILE) -covermode=atomic $(COVERAGE_PACKAGES)
 	$(GOCMD) tool cover -html=$(COVERAGE_FILE) -o $(COVERAGE_HTML)
 	$(GOCMD) tool cover -func=$(COVERAGE_FILE)
 	@COVERAGE=$$($(GOCMD) tool cover -func=$(COVERAGE_FILE) | grep total | awk '{print $$NF}' | tr -d '%'); \

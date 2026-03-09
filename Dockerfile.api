@@ -20,7 +20,9 @@ RUN apk add --no-cache ca-certificates tzdata
 
 COPY --from=builder /app/blob-indexer-api .
 COPY --from=builder /app/internal/db/migrations ./internal/db/migrations
-COPY --from=builder /app/railway-config.yaml ./
+
+# Copy configuration files
+COPY --from=builder /app/config.yaml ./
 
 EXPOSE 8080
 

@@ -110,6 +110,8 @@ func main() {
 	}
 	logger.Info("HTTP server shutdown complete")
 
-	database.DB.Close()
+	if err := database.Close(); err != nil {
+		logger.Warn("Database close returned error", zap.Error(err))
+	}
 	logger.Info("API server shutdown complete")
 }
