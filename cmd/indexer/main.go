@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -53,7 +54,14 @@ func main() {
 
 	indexers := make([]*indexer.Indexer, 0, len(enabledNetworks))
 	for _, network := range enabledNetworks {
-		ethClient, err := ethereum.NewClient(network.RpcURL)
+		// Always enable 429 retry handling; proactive rate limiting is
+		// controlled by cfg.Indexer.RPCRateLimit (0 = disabled).
+		ethClient, err := ethereum.NewClient(network.RpcURL,
+			ethereum.WithRateLimit(ethereum.RateLimitConfig{
+				RequestsPerSecond: cfg.Indexer.RPCRateLimit,
+				MaxRetries:        3,
+				InitialBackoff:    time.Second,
+			}))
 		if err != nil {
 			logger.Fatal("Failed to initialize Ethereum client",
 				zap.String("network", network.Name),

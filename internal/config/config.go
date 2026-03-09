@@ -61,6 +61,7 @@ type IndexerConfig struct {
 	MaxBlockRetries        int           `mapstructure:"max_block_retries" yaml:"max_block_retries"`
 	GapScanInterval        time.Duration `mapstructure:"gap_scan_interval" yaml:"gap_scan_interval"`
 	MaxReorgDepth          int           `mapstructure:"max_reorg_depth" yaml:"max_reorg_depth"`
+	RPCRateLimit           float64       `mapstructure:"rpc_rate_limit" yaml:"rpc_rate_limit"` // requests per second; 0 = no proactive limiting
 }
 
 // Config holds the application configuration
@@ -108,6 +109,7 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("indexer.max_block_retries", 3)
 	v.SetDefault("indexer.gap_scan_interval", "5m")
 	v.SetDefault("indexer.max_reorg_depth", 64)
+	v.SetDefault("indexer.rpc_rate_limit", 0)
 	v.SetDefault("networks", []NetworkConfig{})
 
 	// Configure Viper to read from config file
