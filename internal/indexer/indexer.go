@@ -178,7 +178,7 @@ func (i *Indexer) Start() error {
 	// If websocket is available, subscribe to new blocks and pending transactions
 	if i.useWebsocket {
 		// Subscribe to new blocks
-		blockSub, err := i.ethClient.SubscribeToNewHeads(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+		blockSub, err := i.subscribeToNewBlocks()
 		if err != nil {
 			logger.Warn("Failed to subscribe to new blocks, falling back to polling",
 				zap.String("network", i.network.Name),
@@ -195,18 +195,13 @@ func (i *Indexer) Start() error {
 		}
 
 		// Subscribe to pending transactions
-		pendingTxSub, err := i.ethClient.SubscribeToPendingTransactions(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+		pendingTxSub, err := i.subscribeToPendingTransactions()
 		if err != nil {
 			logger.Warn("Failed to subscribe to pending transactions, falling back to polling",
 				zap.String("network", i.network.Name),
 				zap.Error(err))
 
-			// Start the mempool indexer with polling
-			i.wg.Add(1)
-			go func() {
-				defer i.wg.Done()
-				i.runMempoolIndexer()
-			}()
+			i.startMempoolIndexer()
 		} else {
 			i.pendingTxSub = pendingTxSub
 			i.wg.Add(1)
@@ -218,18 +213,29 @@ func (i *Indexer) Start() error {
 				zap.String("network", i.network.Name))
 		}
 	} else {
-		// Start the mempool indexer with polling
-		i.wg.Add(1)
-		go func() {
-			defer i.wg.Done()
-			i.runMempoolIndexer()
-		}()
+		i.startMempoolIndexer()
 	}
 
 	logger.Info("Indexer started",
 		zap.String("network", i.network.Name),
 		zap.Uint64("start_block", startBlock))
 	return nil
+}
+
+func (i *Indexer) subscribeToNewBlocks() (*ethereum.BlockSubscription, error) {
+	return i.ethClient.SubscribeToNewHeads(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+}
+
+func (i *Indexer) subscribeToPendingTransactions() (*ethereum.PendingTxSubscription, error) {
+	return i.ethClient.SubscribeToPendingTransactions(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+}
+
+func (i *Indexer) startMempoolIndexer() {
+	i.wg.Add(1)
+	go func() {
+		defer i.wg.Done()
+		i.runMempoolIndexer()
+	}()
 }
 
 // Stop stops the indexer
@@ -506,7 +512,7 @@ func (i *Indexer) handleNewBlockSubscription() {
 				zap.Error(err))
 
 			// Try to resubscribe
-			blockSub, err := i.ethClient.SubscribeToNewHeads(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+			blockSub, err := i.subscribeToNewBlocks()
 			if err != nil {
 				logger.Error("Failed to resubscribe to new blocks, falling back to polling",
 					zap.String("network", i.network.Name),
@@ -553,7 +559,7 @@ func (i *Indexer) handlePendingTransactionSubscription() {
 				zap.Error(err))
 
 			// Try to resubscribe
-			pendingTxSub, err := i.ethClient.SubscribeToPendingTransactions(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+			pendingTxSub, err := i.subscribeToPendingTransactions()
 			if err != nil {
 				logger.Error("Failed to resubscribe to pending transactions, falling back to polling",
 					zap.String("network", i.network.Name),
