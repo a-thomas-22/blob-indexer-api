@@ -39,17 +39,12 @@ func DevModeMiddleware(devMode bool) func(http.Handler) http.Handler {
 }
 
 // DevAPIKeyMiddleware protects dev endpoints with a static API key.
-// If no key is configured, the endpoints behave as not found.
+// If no key is configured, requests pass through without auth.
 func DevAPIKeyMiddleware(requiredAPIKey string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if strings.TrimSpace(requiredAPIKey) == "" {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusNotFound)
-				_ = json.NewEncoder(w).Encode(Response{
-					Success: false,
-					Error:   "Not found",
-				})
+				next.ServeHTTP(w, r)
 				return
 			}
 
