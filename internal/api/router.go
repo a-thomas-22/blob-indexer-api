@@ -132,6 +132,7 @@ func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Hand
 			// User endpoints
 			r.Route("/users", func(r chi.Router) {
 				r.Get("/", api.GetTopBlobUsers)
+				r.Get("/{address}", api.GetUserByAddress)
 			})
 
 			// Stats endpoints

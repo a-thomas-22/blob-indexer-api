@@ -58,6 +58,35 @@ const (
 		LIMIT $2
 	`
 
+	// queryLatestBlobsByAddress retrieves confirmed blobs for a specific sender address.
+	queryLatestBlobsByAddress = `
+		SELECT ` + blobSelectColumns + ` FROM blobs
+		WHERE confirmed = true AND network_id = $1 AND from_address = $2
+		ORDER BY block_number DESC, blob_index ASC
+		LIMIT $3 OFFSET $4
+	`
+
+	// queryMempoolBlobsByAddress retrieves unconfirmed blobs for a specific sender address.
+	queryMempoolBlobsByAddress = `
+		SELECT ` + blobSelectColumns + ` FROM blobs
+		WHERE confirmed = false AND network_id = $1 AND from_address = $2
+		ORDER BY timestamp DESC
+		LIMIT $3 OFFSET $4
+	`
+
+	// queryUserByAddress retrieves aggregated stats for a single sender address.
+	queryUserByAddress = `
+		SELECT
+			from_address,
+			user_attribution,
+			COUNT(*) as blob_count,
+			SUM(total_cost_eth::numeric) as total_cost_eth,
+			MAX(timestamp) as last_timestamp
+		FROM blobs
+		WHERE network_id = $1 AND from_address = $2
+		GROUP BY from_address, user_attribution
+	`
+
 	// queryLastIndexedTimeCoalesce retrieves the most recent confirmed blob timestamp,
 	// defaulting to epoch if no blobs exist.
 	queryLastIndexedTimeCoalesce = "SELECT COALESCE(MAX(timestamp), '1970-01-01'::timestamp) FROM blobs WHERE confirmed = true AND network_id = $1"
