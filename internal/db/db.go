@@ -168,28 +168,6 @@ func (db *DB) DeleteBlockMetricsFromBlock(ctx context.Context, networkID int, fr
 	return err
 }
 
-// DeletePendingBlobsByTxHashes removes pending blob rows (block_number < 0) whose tx_hash
-// matches any of the supplied hashes. This is used to promote pending blobs when their
-// transactions are confirmed in a block.
-func (db *DB) DeletePendingBlobsByTxHashes(ctx context.Context, networkID int, txHashes []string) (int64, error) {
-	if len(txHashes) == 0 {
-		return 0, nil
-	}
-	query, args, err := sqlx.In(
-		"DELETE FROM blobs WHERE network_id = ? AND block_number < 0 AND tx_hash IN (?)",
-		networkID, txHashes,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to build IN query: %w", err)
-	}
-	query = db.Rebind(query)
-	res, err := db.ExecContext(ctx, query, args...)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
-}
-
 // DeleteStalePendingBlobs removes pending blobs older than the given cutoff time.
 func (db *DB) DeleteStalePendingBlobs(ctx context.Context, networkID int, cutoff time.Time) (int64, error) {
 	query := "DELETE FROM blobs WHERE network_id = $1 AND block_number < 0 AND timestamp < $2"

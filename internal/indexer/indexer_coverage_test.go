@@ -1511,18 +1511,14 @@ func TestRunMempoolCleanup(t *testing.T) {
 	t.Run("stops on cancel", func(t *testing.T) {
 		idx := newTestIndexer()
 		idx.mempoolTTL = 30 * time.Minute
-		idx.mempoolCleanupInterval = 5 * time.Millisecond
+		// Use a longer interval so only one tick fires during the sleep window
+		idx.mempoolCleanupInterval = 50 * time.Millisecond
 
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
 
-		// Allow any number of cleanup DELETE calls
 		mock.ExpectExec("DELETE FROM blobs WHERE network_id = .*").
-			WillReturnResult(sqlmock.NewResult(0, 0)).
-			WillDelayFor(0)
-		mock.ExpectExec("DELETE FROM blobs WHERE network_id = .*").
-			WillReturnResult(sqlmock.NewResult(0, 3)).
-			WillDelayFor(0)
+			WillReturnResult(sqlmock.NewResult(0, 0))
 
 		done := make(chan struct{})
 		go func() {
@@ -1530,7 +1526,8 @@ func TestRunMempoolCleanup(t *testing.T) {
 			close(done)
 		}()
 
-		time.Sleep(20 * time.Millisecond)
+		// Wait for one tick to fire, then cancel
+		time.Sleep(80 * time.Millisecond)
 		idx.cancel()
 
 		select {
@@ -1543,7 +1540,7 @@ func TestRunMempoolCleanup(t *testing.T) {
 	t.Run("handles DB error gracefully", func(t *testing.T) {
 		idx := newTestIndexer()
 		idx.mempoolTTL = 30 * time.Minute
-		idx.mempoolCleanupInterval = 5 * time.Millisecond
+		idx.mempoolCleanupInterval = 50 * time.Millisecond
 
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
@@ -1557,7 +1554,7 @@ func TestRunMempoolCleanup(t *testing.T) {
 			close(done)
 		}()
 
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(80 * time.Millisecond)
 		idx.cancel()
 
 		select {

@@ -267,7 +267,7 @@ func (i *Indexer) Start() error {
 	}
 
 	// Start periodic cleanup of stale pending blobs
-	if i.mempoolTTL > 0 {
+	if i.mempoolTTL > 0 && i.mempoolCleanupInterval > 0 {
 		i.wg.Add(1)
 		go func() {
 			defer i.wg.Done()
@@ -1259,6 +1259,10 @@ func (i *Indexer) insertPendingBlob(blob models.Blob) error {
 		SELECT
 			$1, $3, chosen_index.blob_index, $2, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 		FROM chosen_index
+		WHERE NOT EXISTS (
+			SELECT 1 FROM blobs
+			WHERE network_id = $1 AND tx_hash = $2 AND block_number >= 0
+		)
 		ON CONFLICT (network_id, tx_hash) WHERE block_number < 0 DO UPDATE SET
 			blob_index = EXCLUDED.blob_index,
 			from_address = EXCLUDED.from_address,
