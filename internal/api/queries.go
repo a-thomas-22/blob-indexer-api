@@ -81,4 +81,12 @@ const (
 
 	// queryLastIndexedBlock retrieves the last indexed block number from indexer metadata.
 	queryLastIndexedBlock = "SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = 'last_indexed_block'"
+
+	// queryNewBlobsSinceBlock retrieves confirmed blobs after a given block number.
+	queryNewBlobsSinceBlock = `
+		SELECT ` + blobSelectColumns + ` FROM blobs
+		WHERE confirmed = true AND network_id = $1 AND block_number > $2
+		ORDER BY block_number ASC, blob_index ASC
+		LIMIT $3
+	`
 )

@@ -428,7 +428,9 @@ func TestNewRouter_ReturnsHandler(t *testing.T) {
 		Server:  config.ServerConfig{Port: 8080, DevMode: true},
 		Indexer: config.IndexerConfig{Version: "test"},
 	}
-	handler := NewRouter(nil, cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler := NewRouter(ctx, nil, cfg)
 	if handler == nil {
 		t.Fatal("expected non-nil handler")
 	}
@@ -439,7 +441,9 @@ func TestNewRouter_DevModeDisabled(t *testing.T) {
 		Server:  config.ServerConfig{Port: 8080, DevMode: false},
 		Indexer: config.IndexerConfig{Version: "test"},
 	}
-	handler := NewRouter(nil, cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler := NewRouter(ctx, nil, cfg)
 	if handler == nil {
 		t.Fatal("expected non-nil handler")
 	}
