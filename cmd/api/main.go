@@ -71,7 +71,7 @@ func main() {
 	logger.InitializeWithConfig(cfg.Logging.Level, cfg.Logging.Format)
 	defer cancel()
 
-	router := api.NewRouter(database, cfg)
+	router := api.NewRouter(ctx, database, cfg)
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:           router,
