@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -268,6 +270,7 @@ func (a *API) respondSuccess(w http.ResponseWriter, data interface{}) {
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
 // @Param limit query int false "Number of blobs to return (default: 10, max: 100)"
 // @Param offset query int false "Number of blobs to skip for pagination (default: 0, max: 10000)"
+// @Param from query string false "Filter by sender address"
 // @Success 200 {object} Response{data=[]BlobResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -299,7 +302,7 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 			a.respondError(w, http.StatusBadRequest, "Invalid address format")
 			return
 		}
-		fromAddress = strings.ToLower(fromAddress)
+		fromAddress = common.HexToAddress(fromAddress).Hex()
 		if err := a.db.SelectContext(r.Context(), &blobs, queryLatestBlobsByAddress, network.ChainID, fromAddress, limit, offset); err != nil {
 			logger.Error("Failed to get latest blobs by address",
 				zap.String("network", network.Name),
@@ -337,6 +340,7 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
 // @Param limit query int false "Number of blobs to return (default: 10, max: 100)"
 // @Param offset query int false "Number of blobs to skip for pagination (default: 0, max: 10000)"
+// @Param from query string false "Filter by sender address"
 // @Success 200 {object} Response{data=[]BlobResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -368,7 +372,7 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 			a.respondError(w, http.StatusBadRequest, "Invalid address format")
 			return
 		}
-		fromAddress = strings.ToLower(fromAddress)
+		fromAddress = common.HexToAddress(fromAddress).Hex()
 		if err := a.db.SelectContext(r.Context(), &blobs, queryMempoolBlobsByAddress, network.ChainID, fromAddress, limit, offset); err != nil {
 			logger.Error("Failed to get pending blobs by address",
 				zap.String("network", network.Name),
@@ -552,21 +556,32 @@ func (a *API) GetUserByAddress(w http.ResponseWriter, r *http.Request) {
 		a.respondError(w, http.StatusBadRequest, "Invalid address")
 		return
 	}
-	address = strings.ToLower(address)
+	address = common.HexToAddress(address).Hex()
+
+	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
+	defer cancel()
 
 	var user models.BlobUserStats
-	if err := a.db.GetContext(r.Context(), &user, queryUserByAddress, network.ChainID, address); err != nil {
-		a.respondError(w, http.StatusNotFound, "User not found")
+	if err := a.db.GetContext(queryCtx, &user, queryUserByAddress, network.ChainID, address); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			a.respondError(w, http.StatusNotFound, "User not found")
+			return
+		}
+		logger.Error("Failed to get user by address",
+			zap.String("network", network.Name),
+			zap.String("address", address),
+			zap.Error(err))
+		a.respondError(w, http.StatusInternalServerError, "Failed to get user")
 		return
 	}
 
 	a.respondSuccess(w, UserResponse{
-		NetworkID:     network.ChainID,
-		NetworkName:   network.Name,
-		Address:       user.Address,
-		Name:          user.Name,
-		BlobCount:     user.BlobCount,
-		TotalCostETH:  user.TotalCostETH,
+		NetworkID:    network.ChainID,
+		NetworkName:  network.Name,
+		Address:      user.Address,
+		Name:         user.Name,
+		BlobCount:    user.BlobCount,
+		TotalCostETH: user.TotalCostETH,
 		LastTimestamp: user.LastTimestamp,
 	})
 }

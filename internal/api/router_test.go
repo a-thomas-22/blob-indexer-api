@@ -1714,7 +1714,7 @@ func TestGetUserByAddress_EmptyAddress(t *testing.T) {
 func TestGetUserByAddress_NotFound(t *testing.T) {
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			return fmt.Errorf("sql: no rows in result set")
+			return sql.ErrNoRows
 		},
 	}
 	a := newTestAPIWithDB(db)
@@ -1727,6 +1727,25 @@ func TestGetUserByAddress_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestGetUserByAddress_DBError(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return fmt.Errorf("connection refused")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("address", validTestAddress)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	a.GetUserByAddress(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
 	}
 }
 

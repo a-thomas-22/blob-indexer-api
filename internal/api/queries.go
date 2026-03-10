@@ -78,13 +78,13 @@ const (
 	queryUserByAddress = `
 		SELECT
 			from_address,
-			user_attribution,
+			MAX(user_attribution) as user_attribution,
 			COUNT(*) as blob_count,
 			SUM(total_cost_eth::numeric) as total_cost_eth,
 			MAX(timestamp) as last_timestamp
 		FROM blobs
 		WHERE network_id = $1 AND from_address = $2
-		GROUP BY from_address, user_attribution
+		GROUP BY from_address
 	`
 
 	// queryLastIndexedTimeCoalesce retrieves the most recent confirmed blob timestamp,
