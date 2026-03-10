@@ -806,6 +806,9 @@ func TestInsertBlockData(t *testing.T) {
 		idx.db = idxDB
 
 		mock.ExpectBegin()
+		// Expect pending blob cleanup before confirmed insert
+		mock.ExpectExec("DELETE FROM blobs WHERE").
+			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectPrepare("INSERT INTO blobs")
 		mock.ExpectExec("INSERT INTO blobs").
 			WithArgs(blob.NetworkID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
@@ -828,6 +831,8 @@ func TestInsertBlockData(t *testing.T) {
 		idx.db = idxDB
 
 		mock.ExpectBegin()
+		mock.ExpectExec("DELETE FROM blobs WHERE").
+			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectPrepare("INSERT INTO blobs").WillReturnError(errors.New("prepare failed"))
 		mock.ExpectRollback()
 
@@ -843,6 +848,8 @@ func TestInsertBlockData(t *testing.T) {
 		idx.db = idxDB
 
 		mock.ExpectBegin()
+		mock.ExpectExec("DELETE FROM blobs WHERE").
+			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectPrepare("INSERT INTO blobs")
 		mock.ExpectExec("INSERT INTO blobs").
 			WillReturnError(errors.New("insert failed"))
@@ -980,6 +987,9 @@ func TestProcessBlock_WithBlobTransaction(t *testing.T) {
 		WithArgs(idx.network.ChainID, uint64(0)).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectBegin()
+	// Expect pending blob cleanup
+	mock.ExpectExec("DELETE FROM blobs WHERE").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectPrepare("INSERT INTO blobs")
 	mock.ExpectExec("INSERT INTO blobs").
 		WithArgs(
@@ -1493,6 +1503,67 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 		err := idx.processPendingTransactions()
 		if err == nil || !strings.Contains(err.Error(), "failed to get pending transactions") {
 			t.Fatalf("expected pending tx fetch error, got %v", err)
+		}
+	})
+}
+
+func TestRunMempoolCleanup(t *testing.T) {
+	t.Run("stops on cancel", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.mempoolTTL = 30 * time.Minute
+		idx.mempoolCleanupInterval = 5 * time.Millisecond
+
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		// Allow any number of cleanup DELETE calls
+		mock.ExpectExec("DELETE FROM blobs WHERE network_id = .*").
+			WillReturnResult(sqlmock.NewResult(0, 0)).
+			WillDelayFor(0)
+		mock.ExpectExec("DELETE FROM blobs WHERE network_id = .*").
+			WillReturnResult(sqlmock.NewResult(0, 3)).
+			WillDelayFor(0)
+
+		done := make(chan struct{})
+		go func() {
+			idx.runMempoolCleanup()
+			close(done)
+		}()
+
+		time.Sleep(20 * time.Millisecond)
+		idx.cancel()
+
+		select {
+		case <-done:
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("runMempoolCleanup did not stop")
+		}
+	})
+
+	t.Run("handles DB error gracefully", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.mempoolTTL = 30 * time.Minute
+		idx.mempoolCleanupInterval = 5 * time.Millisecond
+
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectExec("DELETE FROM blobs WHERE network_id = .*").
+			WillReturnError(errors.New("db connection lost"))
+
+		done := make(chan struct{})
+		go func() {
+			idx.runMempoolCleanup()
+			close(done)
+		}()
+
+		time.Sleep(20 * time.Millisecond)
+		idx.cancel()
+
+		select {
+		case <-done:
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("runMempoolCleanup did not stop after DB error")
 		}
 	})
 }

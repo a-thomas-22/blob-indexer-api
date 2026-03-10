@@ -256,6 +256,71 @@ func TestDeleteFromBlockMethods(t *testing.T) {
 	}
 }
 
+func TestDeletePendingBlobsByTxHashes(t *testing.T) {
+	t.Run("deletes matching pending blobs", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		// sqlx.In expands to ? placeholders; Rebind with sqlmock driver keeps them as ?
+		mock.ExpectExec("DELETE FROM blobs WHERE network_id = \\? AND block_number < 0 AND tx_hash IN \\(\\?, \\?\\)").
+			WithArgs(1, "0xaaa", "0xbbb").
+			WillReturnResult(sqlmock.NewResult(0, 2))
+
+		deleted, err := db.DeletePendingBlobsByTxHashes(context.Background(), 1, []string{"0xaaa", "0xbbb"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if deleted != 2 {
+			t.Errorf("expected 2 deleted, got %d", deleted)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("no-op for empty slice", func(t *testing.T) {
+		db, _ := newMockDB(t)
+
+		deleted, err := db.DeletePendingBlobsByTxHashes(context.Background(), 1, []string{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if deleted != 0 {
+			t.Errorf("expected 0 deleted, got %d", deleted)
+		}
+	})
+
+	t.Run("nil slice", func(t *testing.T) {
+		db, _ := newMockDB(t)
+
+		deleted, err := db.DeletePendingBlobsByTxHashes(context.Background(), 1, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if deleted != 0 {
+			t.Errorf("expected 0 deleted, got %d", deleted)
+		}
+	})
+}
+
+func TestDeleteStalePendingBlobs(t *testing.T) {
+	db, mock := newMockDB(t)
+	cutoff := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number < 0 AND timestamp < $2")).
+		WithArgs(1, cutoff).
+		WillReturnResult(sqlmock.NewResult(0, 5))
+
+	deleted, err := db.DeleteStalePendingBlobs(context.Background(), 1, cutoff)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if deleted != 5 {
+		t.Errorf("expected 5 deleted, got %d", deleted)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestConnectAndMigrations_InvalidURL(t *testing.T) {
 	ctx := context.Background()
 	dbCfg := config.DatabaseConfig{
