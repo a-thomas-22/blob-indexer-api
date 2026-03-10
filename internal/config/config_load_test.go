@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoad_WithEnvVars(t *testing.T) {
@@ -470,6 +471,94 @@ networks:
 	_, err := Load()
 	if err == nil {
 		t.Error("expected error for invalid mempool polling interval")
+	}
+}
+
+func TestLoad_InvalidMempoolTTL(t *testing.T) {
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "config.yaml")
+	configContent := `
+database:
+  url: "postgres://localhost:5432/db"
+indexer:
+  polling_interval: "10s"
+  mempool_ttl: "not-a-duration"
+networks:
+  - name: testnet
+    chain_id: 1
+    rpc_url: "http://localhost:8545"
+    start_block: "0"
+    enabled: true
+`
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CONFIG_PATH", configFile)
+
+	_, err := Load()
+	if err == nil {
+		t.Error("expected error for invalid mempool TTL")
+	}
+}
+
+func TestLoad_InvalidMempoolCleanupInterval(t *testing.T) {
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "config.yaml")
+	configContent := `
+database:
+  url: "postgres://localhost:5432/db"
+indexer:
+  polling_interval: "10s"
+  mempool_cleanup_interval: "not-a-duration"
+networks:
+  - name: testnet
+    chain_id: 1
+    rpc_url: "http://localhost:8545"
+    start_block: "0"
+    enabled: true
+`
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CONFIG_PATH", configFile)
+
+	_, err := Load()
+	if err == nil {
+		t.Error("expected error for invalid mempool cleanup interval")
+	}
+}
+
+func TestLoad_MempoolTTLDefaults(t *testing.T) {
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "config.yaml")
+	configContent := `
+database:
+  url: "postgres://localhost:5432/db"
+networks:
+  - name: testnet
+    chain_id: 1
+    rpc_url: "http://localhost:8545"
+    start_block: "0"
+    enabled: true
+`
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CONFIG_PATH", configFile)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Indexer.MempoolTTL != 30*time.Minute {
+		t.Errorf("expected default mempool TTL 30m, got %s", cfg.Indexer.MempoolTTL)
+	}
+	if cfg.Indexer.MempoolCleanupInterval != 5*time.Minute {
+		t.Errorf("expected default mempool cleanup interval 5m, got %s", cfg.Indexer.MempoolCleanupInterval)
 	}
 }
 
