@@ -20,13 +20,13 @@ func testNetworks() map[int]config.NetworkConfig {
 }
 
 // collectBroadcasts drains the hub's broadcast channel for a duration and
-// returns all events received by a test client on the given network.
-func collectBroadcasts(t *testing.T, hub *Hub, networkName string, wait time.Duration) []WSEvent {
+// returns all events received by a test client on the "sepolia" network.
+func collectBroadcasts(t *testing.T, hub *Hub, wait time.Duration) []WSEvent {
 	t.Helper()
 	client := &Client{
 		hub:         hub,
 		send:        make(chan []byte, 256),
-		networkName: networkName,
+		networkName: "sepolia",
 	}
 	hub.register <- client
 	time.Sleep(20 * time.Millisecond)
@@ -102,7 +102,7 @@ func TestPoller_DetectsNewBlock(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go poller.Run(ctx)
 
-	events := collectBroadcasts(t, hub, "sepolia", 200*time.Millisecond)
+	events := collectBroadcasts(t, hub, 200*time.Millisecond)
 	cancel()
 
 	foundNewBlock := false
@@ -152,7 +152,7 @@ func TestPoller_NoChange_NoBroadcast(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go poller.Run(ctx)
 
-	events := collectBroadcasts(t, hub, "sepolia", 200*time.Millisecond)
+	events := collectBroadcasts(t, hub, 200*time.Millisecond)
 	cancel()
 
 	for _, e := range events {
@@ -222,7 +222,7 @@ func TestPoller_UsersThrottle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go poller.Run(ctx)
 
-	events := collectBroadcasts(t, hub, "sepolia", 300*time.Millisecond)
+	events := collectBroadcasts(t, hub, 300*time.Millisecond)
 	cancel()
 
 	usersCount := 0
@@ -315,7 +315,7 @@ func TestPoller_MempoolDiff_AddAndRemove(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go poller.Run(ctx)
 
-	events := collectBroadcasts(t, hub, "sepolia", 250*time.Millisecond)
+	events := collectBroadcasts(t, hub, 250*time.Millisecond)
 	cancel()
 
 	addCount := 0
@@ -505,8 +505,10 @@ func TestPoller_BroadcastNewBlocks_Error(t *testing.T) {
 
 	network := config.NetworkConfig{Name: "sepolia", ChainID: 11155111}
 	poller := NewPoller(db, hub, testNetworks(), time.Second, time.Second)
-	// Should not panic on error.
-	poller.broadcastNewBlocks(context.Background(), network, 99, 100)
+	// Should return false on error.
+	if poller.broadcastNewBlocks(context.Background(), network, 99) {
+		t.Error("expected broadcastNewBlocks to return false on error")
+	}
 }
 
 func TestPoller_BroadcastNewBlocks_EmptyResult(t *testing.T) {
@@ -528,7 +530,9 @@ func TestPoller_BroadcastNewBlocks_EmptyResult(t *testing.T) {
 
 	network := config.NetworkConfig{Name: "sepolia", ChainID: 11155111}
 	poller := NewPoller(db, hub, testNetworks(), time.Second, time.Second)
-	poller.broadcastNewBlocks(context.Background(), network, 99, 100)
+	if !poller.broadcastNewBlocks(context.Background(), network, 99) {
+		t.Error("expected broadcastNewBlocks to return true for empty result")
+	}
 
 	time.Sleep(50 * time.Millisecond)
 	select {
@@ -553,6 +557,27 @@ func TestPoller_PollMempool_Error(t *testing.T) {
 	poller := NewPoller(db, hub, testNetworks(), time.Second, time.Second)
 	// Should not panic on error.
 	poller.pollMempool(context.Background(), network)
+}
+
+func TestPoller_NilDB_ReturnsImmediately(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	poller := NewPoller(nil, hub, testNetworks(), 10*time.Millisecond, time.Hour)
+
+	done := make(chan struct{})
+	go func() {
+		poller.Run(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// OK — returned immediately because db is nil.
+	case <-time.After(time.Second):
+		t.Fatal("poller with nil db should return immediately")
+	}
 }
 
 func TestNewPoller_DefaultIntervals(t *testing.T) {

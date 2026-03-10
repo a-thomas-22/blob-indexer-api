@@ -48,8 +48,13 @@ func (a *API) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		networkName:    network.Name,
 	}
 
-	a.hub.register <- client
-
-	go client.writePump()
-	go client.readPump()
+	select {
+	case a.hub.register <- client:
+		go client.writePump()
+		go client.readPump()
+	case <-a.hub.done:
+		logger.Error("WebSocket registration failed: hub is shutting down",
+			zap.String("network", network.Name))
+		_ = conn.Close()
+	}
 }

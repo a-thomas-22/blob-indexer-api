@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 
@@ -12,12 +13,13 @@ import (
 // Hub maintains the set of active WebSocket clients and broadcasts
 // events to the ones whose network and subscription filters match.
 type Hub struct {
-	clients    map[*Client]struct{}
-	broadcast  chan broadcastMessage
-	register   chan *Client
-	unregister chan *Client
-	done       chan struct{}
-	mu         sync.RWMutex // protects ClientCount reads from outside Run
+	clients     map[*Client]struct{}
+	broadcast   chan broadcastMessage
+	register    chan *Client
+	unregister  chan *Client
+	done        chan struct{}
+	stopOnce    sync.Once
+	clientCount atomic.Int64
 }
 
 // broadcastMessage carries a pre-marshaled event plus its metadata so
@@ -45,6 +47,7 @@ func (h *Hub) Run() {
 		select {
 		case client := <-h.register:
 			h.clients[client] = struct{}{}
+			h.clientCount.Store(int64(len(h.clients)))
 			logger.Debug("WebSocket client registered",
 				zap.String("network", client.networkName),
 				zap.Int("total_clients", len(h.clients)))
@@ -53,6 +56,7 @@ func (h *Hub) Run() {
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
+				h.clientCount.Store(int64(len(h.clients)))
 				logger.Debug("WebSocket client unregistered",
 					zap.String("network", client.networkName),
 					zap.Int("total_clients", len(h.clients)))
@@ -69,6 +73,7 @@ func (h *Hub) Run() {
 					// Slow client — drop it.
 					delete(h.clients, client)
 					close(client.send)
+					h.clientCount.Store(int64(len(h.clients)))
 					logger.Warn("Dropping slow WebSocket client",
 						zap.String("network", client.networkName))
 				}
@@ -79,6 +84,7 @@ func (h *Hub) Run() {
 				close(client.send)
 				delete(h.clients, client)
 			}
+			h.clientCount.Store(0)
 			return
 		}
 	}
@@ -105,14 +111,14 @@ func (h *Hub) BroadcastEvent(networkName string, event WSEvent) {
 	}
 }
 
-// Stop signals the hub to shut down.
+// Stop signals the hub to shut down. It is safe to call multiple times.
 func (h *Hub) Stop() {
-	close(h.done)
+	h.stopOnce.Do(func() {
+		close(h.done)
+	})
 }
 
 // ClientCount returns the number of connected clients. Safe for concurrent use.
 func (h *Hub) ClientCount() int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return len(h.clients)
+	return int(h.clientCount.Load())
 }

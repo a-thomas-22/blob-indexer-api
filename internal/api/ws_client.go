@@ -58,7 +58,10 @@ func (c *Client) wantsEvent(eventType WSEventType, networkName string) bool {
 // It handles subscription control messages and closes on any error.
 func (c *Client) readPump() {
 	defer func() {
-		c.hub.unregister <- c
+		select {
+		case c.hub.unregister <- c:
+		default:
+		}
 		c.conn.Close()
 	}()
 	c.conn.SetReadLimit(wsMaxMessageSize)

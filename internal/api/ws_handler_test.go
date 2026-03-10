@@ -48,6 +48,9 @@ func TestHandleWebSocket_Success(t *testing.T) {
 		t.Fatalf("dial failed: %v", err)
 	}
 	defer conn.Close()
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
 
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Errorf("got status %d, want %d", resp.StatusCode, http.StatusSwitchingProtocols)
@@ -93,8 +96,13 @@ func TestHandleWebSocket_InvalidNetwork(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected dial to fail for invalid network")
 	}
-	if resp != nil && resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("got status %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	if resp != nil {
+		if resp.Body != nil {
+			resp.Body.Close()
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("got status %d, want %d", resp.StatusCode, http.StatusBadRequest)
+		}
 	}
 }
 
@@ -109,9 +117,12 @@ func TestHandleWebSocket_DefaultNetwork(t *testing.T) {
 
 	// No ?network= param — should default to first enabled.
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
+	}
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
 	}
 	conn.Close()
 }
@@ -138,8 +149,13 @@ func TestHandleWebSocket_NilHub(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected dial to fail when hub is nil")
 	}
-	if resp != nil && resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("got status %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	if resp != nil {
+		if resp.Body != nil {
+			resp.Body.Close()
+		}
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("got status %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+		}
 	}
 }
 
@@ -164,9 +180,12 @@ func TestHandleWebSocket_ViaFullRouter(t *testing.T) {
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/ws?network=sepolia"
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial through full router failed: %v", err)
 	}
-	defer conn.Close()
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
+	conn.Close()
 }

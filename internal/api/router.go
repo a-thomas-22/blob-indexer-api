@@ -57,7 +57,7 @@ func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Hand
 	poller := NewPoller(db, hub, networks, cfg.WebSocket.PollInterval, cfg.WebSocket.UsersThrottleInterval)
 	go poller.Run(ctx)
 
-	// Stop hub when context is cancelled.
+	// Stop hub when context is canceled.
 	go func() {
 		<-ctx.Done()
 		hub.Stop()

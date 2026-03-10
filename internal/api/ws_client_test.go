@@ -39,9 +39,12 @@ func newTestWSServer(t *testing.T, hub *Hub) (*httptest.Server, *websocket.Conn)
 	}))
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
 	}
 
 	return server, conn
@@ -153,11 +156,14 @@ func TestClient_ReceivesPing(t *testing.T) {
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
 
 	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatal(err)
@@ -199,30 +205,32 @@ func TestClient_WritePump_ChannelClose(t *testing.T) {
 	hub := NewHub()
 	go hub.Run()
 
-	var testClient *Client
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
-		testClient = &Client{
+		client := &Client{
 			hub:         hub,
 			conn:        conn,
 			send:        make(chan []byte, wsSendBufferSize),
 			networkName: "sepolia",
 		}
-		hub.register <- testClient
-		go testClient.writePump()
+		hub.register <- client
+		go client.writePump()
 	}))
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
 
 	time.Sleep(50 * time.Millisecond)
 

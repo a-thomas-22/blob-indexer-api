@@ -53,8 +53,13 @@ func NewPoller(db DBProvider, hub *Hub, networks map[int]config.NetworkConfig, p
 	}
 }
 
-// Run starts the polling loop. It blocks until ctx is cancelled.
+// Run starts the polling loop. It blocks until ctx is canceled.
 func (p *Poller) Run(ctx context.Context) {
+	if p.db == nil {
+		logger.Info("WebSocket poller not started: no database connection")
+		return
+	}
+
 	ticker := time.NewTicker(p.pollInterval)
 	defer ticker.Stop()
 
@@ -90,15 +95,19 @@ func (p *Poller) pollNetwork(ctx context.Context, network config.NetworkConfig) 
 	lastSeen := p.lastSeenBlocks[chainID]
 
 	if currentBlock > lastSeen && lastSeen > 0 {
-		// New block(s) detected.
-		p.broadcastNewBlocks(ctx, network, lastSeen, currentBlock)
+		// New block(s) detected. Only advance lastSeenBlocks if
+		// broadcastNewBlocks succeeds, so we retry on next tick.
+		if p.broadcastNewBlocks(ctx, network, lastSeen) {
+			p.lastSeenBlocks[chainID] = currentBlock
+		}
 		p.broadcastStatsUpdate(ctx, network)
 		if time.Since(p.lastUsersUpdate[chainID]) >= p.usersThrottle {
 			p.broadcastUsersUpdate(ctx, network)
 			p.lastUsersUpdate[chainID] = time.Now()
 		}
+	} else {
+		p.lastSeenBlocks[chainID] = currentBlock
 	}
-	p.lastSeenBlocks[chainID] = currentBlock
 
 	// Check mempool changes.
 	p.pollMempool(ctx, network)
@@ -120,9 +129,9 @@ func (p *Poller) queryLastIndexedBlock(ctx context.Context, chainID int) uint64 
 	return block
 }
 
-// broadcastNewBlocks queries blobs between lastSeen and currentBlock, groups them
-// by block, and broadcasts a new_block event for each block.
-func (p *Poller) broadcastNewBlocks(ctx context.Context, network config.NetworkConfig, lastSeen, currentBlock uint64) {
+// broadcastNewBlocks queries blobs since lastSeen, groups them by block,
+// and broadcasts a new_block event for each block. Returns true on success.
+func (p *Poller) broadcastNewBlocks(ctx context.Context, network config.NetworkConfig, lastSeen uint64) bool {
 	queryCtx, cancel := context.WithTimeout(ctx, pollerQueryTimeout)
 	defer cancel()
 
@@ -131,11 +140,11 @@ func (p *Poller) broadcastNewBlocks(ctx context.Context, network config.NetworkC
 		logger.Error("Poller: failed to query new blobs",
 			zap.String("network", network.Name),
 			zap.Error(err))
-		return
+		return false
 	}
 
 	if len(blobs) == 0 {
-		return
+		return true
 	}
 
 	// Group blobs by block number.
@@ -170,6 +179,8 @@ func (p *Poller) broadcastNewBlocks(ctx context.Context, network config.NetworkC
 		zap.String("network", network.Name),
 		zap.Int("blocks", len(blockOrder)),
 		zap.Int("blobs", len(blobs)))
+
+	return true
 }
 
 // broadcastStatsUpdate queries aggregate stats and broadcasts a stats_update event.
