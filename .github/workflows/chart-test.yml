@@ -36,7 +36,7 @@ jobs:
         with:
           version: v3.14.0
 
-      - uses: helm/chart-testing-action@v2.7.0
+      - uses: helm/chart-testing-action@v2.8.0
 
       - name: Add Bitnami repo
         run: helm repo add bitnami https://charts.bitnami.com/bitnami
@@ -57,7 +57,7 @@ jobs:
         with:
           version: v3.14.0
 
-      - uses: helm/chart-testing-action@v2.7.0
+      - uses: helm/chart-testing-action@v2.8.0
 
       - name: Add Bitnami repo
         run: helm repo add bitnami https://charts.bitnami.com/bitnami
