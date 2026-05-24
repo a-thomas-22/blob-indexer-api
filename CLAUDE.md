@@ -15,7 +15,7 @@ make run-api        # Build and run API server
 make run-indexer    # Build and run indexer
 make test           # Run all tests
 make docker-build   # Build both Docker images
-make swagger        # Generate Swagger docs (swag init)
+make swagger        # Generate local Swagger docs (ignored by Git)
 make seed-data      # Seed test data via cmd/testdata
 make db-migrate     # Run database migrations
 make db-rollback    # Rollback one migration
@@ -74,13 +74,14 @@ The API uses `config.LoadForAPI()` (RPC URLs optional). The indexer uses `config
 Run `make ci` to execute all checks locally. GHA CI is a backstop — catch issues here first.
 
 `make ci` runs these in order:
-1. **Format** (`make fmt`): `gofmt -s` + `goimports` (auto-fixes in place)
-2. **Vet** (`make vet`): `go vet ./...`
-3. **Lint** (`make lint`): `golangci-lint run ./...` (config in `.golangci.yml`)
-4. **Staticcheck** (`make staticcheck`): `staticcheck ./...`
-5. **Test + Coverage** (`make test-coverage`): tests with 90% coverage threshold enforced
-6. **Build** (`make build`): compiles both binaries
-7. **Module verify**: `go mod verify`
+1. **Swagger** (`make swagger`): generates local OpenAPI artifacts used by the API build
+2. **Format** (`make fmt`): `gofmt -s` + `goimports` (auto-fixes in place)
+3. **Vet** (`make vet`): `go vet ./...`
+4. **Lint** (`make lint`): `golangci-lint run ./...` (config in `.golangci.yml`)
+5. **Staticcheck** (`make staticcheck`): `staticcheck ./...`
+6. **Test + Coverage** (`make test-coverage`): tests with 90% coverage threshold enforced
+7. **Build** (`make build`): compiles both binaries
+8. **Module verify**: `go mod verify`
 
 Individual checks you can run:
 - `make test` — quick test run (no coverage threshold)

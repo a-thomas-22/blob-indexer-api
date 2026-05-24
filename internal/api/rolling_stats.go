@@ -23,7 +23,7 @@ const (
 var defaultRollingStatsWindows = []statsWindowSpec{
 	{Label: "5m", Duration: 5 * time.Minute},
 	{Label: "1h", Duration: time.Hour},
-	{Label: "24h", Duration: 24 * time.Hour},
+	{Label: apiWindow24h, Duration: 24 * time.Hour},
 	{Label: "7d", Duration: 7 * 24 * time.Hour},
 }
 
