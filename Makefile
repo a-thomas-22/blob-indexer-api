@@ -1,4 +1,4 @@
-.PHONY: build build-api build-indexer build-migrate run-api run-indexer test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall ci staticcheck chart-lint chart-test chart-test-run kind-create kind-delete
+.PHONY: build build-api build-indexer build-migrate run-api run-indexer test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall ci staticcheck chart-template-test chart-lint chart-test chart-test-run kind-create kind-delete
 
 # Go parameters
 GOCMD=go
@@ -127,6 +127,9 @@ helm-uninstall:
 
 # Chart testing
 KIND_CLUSTER_NAME ?= blob-indexer-test
+
+chart-template-test:
+	bash charts/blob-indexer/tests/database-secret-template-test.sh
 
 chart-lint:
 	ct lint --config charts/ct.yaml

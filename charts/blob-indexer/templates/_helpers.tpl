@@ -62,14 +62,39 @@ Service account name
 {{- end }}
 
 {{/*
-Database URL used by migration containers.
+Database Secret name used by the API and indexer.
 */}}
-{{- define "blob-indexer.migrationDatabaseURL" -}}
-{{- $dbURL := .Values.appConfig.database.url -}}
-{{- if .Values.externalDatabase.url -}}
-{{- $dbURL = .Values.externalDatabase.url -}}
+{{- define "blob-indexer.applicationDatabaseSecretName" -}}
+{{- if .Values.databaseSecret.name -}}
+{{- .Values.databaseSecret.name -}}
+{{- else -}}
+{{ include "blob-indexer.fullname" . }}-db
 {{- end -}}
-{{- $dbURL -}}
+{{- end }}
+
+{{/*
+Database Secret key used by the API and indexer.
+*/}}
+{{- define "blob-indexer.applicationDatabaseSecretKey" -}}
+{{- default "DB_URL" .Values.databaseSecret.key -}}
+{{- end }}
+
+{{/*
+Database Secret name used by migration containers.
+*/}}
+{{- define "blob-indexer.databaseSecretName" -}}
+{{- if .Values.migrations.databaseSecret.name -}}
+{{- .Values.migrations.databaseSecret.name -}}
+{{- else -}}
+{{ include "blob-indexer.applicationDatabaseSecretName" . }}
+{{- end -}}
+{{- end }}
+
+{{/*
+Database Secret key used by migration containers.
+*/}}
+{{- define "blob-indexer.databaseSecretKey" -}}
+{{- default (include "blob-indexer.applicationDatabaseSecretKey" .) .Values.migrations.databaseSecret.key -}}
 {{- end }}
 
 {{/*
