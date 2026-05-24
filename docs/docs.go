@@ -1066,6 +1066,17 @@ const docTemplate = `{
                 }
             }
         },
+        "api.FeeEstimateRangeResponse": {
+            "type": "object",
+            "properties": {
+                "high": {
+                    "type": "string"
+                },
+                "low": {
+                    "type": "string"
+                }
+            }
+        },
         "api.IndexerMetrics": {
             "type": "object",
             "properties": {
@@ -1112,6 +1123,26 @@ const docTemplate = `{
                 }
             }
         },
+        "api.MarketPressureResponse": {
+            "type": "object",
+            "properties": {
+                "consecutive_full_blocks": {
+                    "type": "integer"
+                },
+                "next_block_fee_estimate": {
+                    "$ref": "#/definitions/api.FeeEstimateRangeResponse"
+                },
+                "percent_recent_blocks_at_max_blobs": {
+                    "type": "number"
+                },
+                "predicted_direction": {
+                    "type": "string"
+                },
+                "recent_blocks_above_target": {
+                    "type": "integer"
+                }
+            }
+        },
         "api.PricingResponse": {
             "type": "object",
             "properties": {
@@ -1129,6 +1160,9 @@ const docTemplate = `{
                 },
                 "fork_stage": {
                     "type": "string"
+                },
+                "market_pressure": {
+                    "$ref": "#/definitions/api.MarketPressureResponse"
                 },
                 "network_id": {
                     "type": "integer"
