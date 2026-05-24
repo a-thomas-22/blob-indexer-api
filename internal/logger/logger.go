@@ -14,6 +14,17 @@ type contextKey string
 // RequestIDKey is the context key used to store and retrieve request IDs.
 const RequestIDKey contextKey = "requestID"
 
+const (
+	levelDebug = "debug"
+	levelInfo  = "info"
+	levelWarn  = "warn"
+	levelError = "error"
+	levelFatal = "fatal"
+
+	formatJSON    = "json"
+	formatConsole = "console"
+)
+
 var (
 	// Global logger instance
 	log = zap.NewNop()
@@ -21,11 +32,11 @@ var (
 
 // Log levels mapped from string to zapcore.Level
 var levelMap = map[string]zapcore.Level{
-	"debug": zapcore.DebugLevel,
-	"info":  zapcore.InfoLevel,
-	"warn":  zapcore.WarnLevel,
-	"error": zapcore.ErrorLevel,
-	"fatal": zapcore.FatalLevel,
+	levelDebug: zapcore.DebugLevel,
+	levelInfo:  zapcore.InfoLevel,
+	levelWarn:  zapcore.WarnLevel,
+	levelError: zapcore.ErrorLevel,
+	levelFatal: zapcore.FatalLevel,
 }
 
 // Initialize sets up the logger with JSON encoding and the appropriate level
@@ -36,10 +47,10 @@ func Initialize() {
 // InitializeWithConfig sets up the logger with explicit level/format settings.
 func InitializeWithConfig(levelStr, format string) {
 	if levelStr == "" {
-		levelStr = "info"
+		levelStr = levelInfo
 	}
 	if format == "" {
-		format = "json"
+		format = formatJSON
 	}
 
 	level, exists := levelMap[levelStr]
@@ -51,9 +62,9 @@ func InitializeWithConfig(levelStr, format string) {
 	encoderConfig.TimeKey = "timestamp"
 	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 
-	encoding := "json"
-	if format == "console" {
-		encoding = "console"
+	encoding := formatJSON
+	if format == formatConsole {
+		encoding = formatConsole
 	}
 
 	config := zap.Config{

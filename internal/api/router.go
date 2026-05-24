@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,20 +27,52 @@ type API struct {
 	startTime      time.Time
 	totalRequests  int64 // accessed via sync/atomic
 	activeRequests int64 // accessed via sync/atomic
+	cacheMu        sync.RWMutex
+	statsCache     map[int]statsCacheEntry
+	topUsersCache  map[string]topUsersCacheEntry
+	hub            *Hub
+	poller         *Poller
 }
 
-// NewRouter creates a new API router
-func NewRouter(db DBProvider, cfg *config.Config) http.Handler {
+type statsCacheEntry struct {
+	response  StatsResponse
+	expiresAt time.Time
+}
+
+type topUsersCacheEntry struct {
+	response  []UserResponse
+	expiresAt time.Time
+}
+
+// NewRouter creates a new API router. The provided context controls the
+// lifetime of background goroutines (WebSocket hub and poller).
+func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Handler {
 	networks := make(map[int]config.NetworkConfig)
 	for _, n := range cfg.GetEnabledNetworks() {
 		networks[n.ChainID] = n
 	}
 
+	hub := NewHub()
+	go hub.Run()
+
+	poller := NewPoller(db, hub, networks, cfg.WebSocket.PollInterval, cfg.WebSocket.UsersThrottleInterval)
+	go poller.Run(ctx)
+
+	// Stop hub when context is canceled.
+	go func() {
+		<-ctx.Done()
+		hub.Stop()
+	}()
+
 	api := &API{
-		db:        db,
-		networks:  networks,
-		config:    cfg,
-		startTime: time.Now(),
+		db:            db,
+		networks:      networks,
+		config:        cfg,
+		startTime:     time.Now(),
+		statsCache:    make(map[int]statsCacheEntry),
+		topUsersCache: make(map[string]topUsersCacheEntry),
+		hub:           hub,
+		poller:        poller,
 	}
 
 	r := chi.NewRouter()
@@ -46,16 +80,15 @@ func NewRouter(db DBProvider, cfg *config.Config) http.Handler {
 	// Rate limiter: 100 requests/second per IP with burst of 200
 	rateLimiter := NewRateLimiter(100, 200)
 
-	// Middleware
+	// Middleware — applied to all routes (including WebSocket upgrade).
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	r.Use(middleware.ClientIPFromRemoteAddr)
 	r.Use(SecurityHeadersMiddleware)
 	r.Use(MaxBytesMiddleware)
 	r.Use(RateLimitMiddleware(rateLimiter))
 	r.Use(LoggerMiddleware)
 	r.Use(ContentTypeJSON)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
 	r.Use(api.requestCounterMiddleware)
 
 	// CORS — AllowCredentials is false since this is a public read API.
@@ -76,64 +109,69 @@ func NewRouter(db DBProvider, cfg *config.Config) http.Handler {
 
 	// Versioned API routes under /api/v1
 	r.Route("/api/v1", func(r chi.Router) {
-		// Networks endpoint
-		r.Route("/networks", func(r chi.Router) {
-			r.Get("/", api.GetNetworks)
-			r.Get("/{chainId}", api.GetNetworkStatus)
-		})
+		// WebSocket endpoint — no request timeout so connections persist.
+		r.Get("/ws", api.HandleWebSocket)
 
-		// Blob endpoints
-		r.Route("/blob", func(r chi.Router) {
-			r.Get("/latest", api.GetLatestBlobs)
-			r.Get("/mempool", api.GetMempoolBlobs)
-			r.Get("/pricing", api.GetBlobPricing)
-			r.Get("/{txHash}", api.GetBlobByTxHash)
-		})
+		// REST endpoints — with request timeout.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Timeout(60 * time.Second))
 
-		// User endpoints
-		r.Route("/users", func(r chi.Router) {
-			r.Get("/", api.GetTopBlobUsers)
-		})
+			// Networks endpoint
+			r.Route("/networks", func(r chi.Router) {
+				r.Get("/", api.GetNetworks)
+				r.Get("/{chainId}", api.GetNetworkStatus)
+			})
 
-		// Stats endpoints
-		r.Route("/stats", func(r chi.Router) {
-			r.Get("/", api.GetBlobStats)
-		})
+			// Blob endpoints
+			r.Route("/blob", func(r chi.Router) {
+				r.Get("/latest", api.GetLatestBlobs)
+				r.Get("/mempool", api.GetMempoolBlobs)
+				r.Get("/pricing", api.GetBlobPricing)
+				r.Get("/{txHash}", api.GetBlobByTxHash)
+			})
 
-		// Status endpoint
-		r.Get("/status", api.GetIndexerStatus)
+			// User endpoints
+			r.Route("/users", func(r chi.Router) {
+				r.Get("/", api.GetTopBlobUsers)
+				r.Get("/{address}", api.GetUserByAddress)
+			})
 
-		// Development endpoints — all gated behind dev mode
-		r.Route("/dev", func(r chi.Router) {
-			r.Use(DevModeMiddleware(cfg.Server.DevMode))
-			r.Use(DevAPIKeyMiddleware(cfg.Server.DevAPIKey))
+			// Stats endpoints
+			r.Route("/stats", func(r chi.Router) {
+				r.Get("/", api.GetBlobStats)
+			})
 
-			r.Get("/metrics", api.DevMetrics)
-			r.Get("/indexers", api.DevIndexers)
-			r.Get("/database", api.DevDatabase)
-			r.Get("/logs", api.DevLogs)
-			r.Get("/queries", api.DevQueries)
-			r.Get("/dashboard", api.DevDashboard)
+			// Status endpoint
+			r.Get("/status", api.GetIndexerStatus)
+
+			// Development endpoints — all gated behind dev mode
+			r.Route("/dev", func(r chi.Router) {
+				r.Use(DevModeMiddleware(cfg.Server.DevMode))
+				r.Use(DevAPIKeyMiddleware(cfg.Server.DevAPIKey))
+
+				r.Get("/metrics", api.DevMetrics)
+				r.Get("/indexers", api.DevIndexers)
+				r.Get("/database", api.DevDatabase)
+				r.Get("/logs", api.DevLogs)
+				r.Get("/queries", api.DevQueries)
+				r.Get("/dashboard", api.DevDashboard)
+			})
 		})
 	})
 
 	// Backward compatibility: redirect /api/* to /api/v1/* with 301 Moved Permanently
 	r.HandleFunc("/api/*", func(w http.ResponseWriter, r *http.Request) {
 		// Strip the "/api" prefix and prepend "/api/v1"
-		newPath := "/api/v1" + r.URL.Path[len("/api"):]
-		if r.URL.RawQuery != "" {
-			newPath += "?" + r.URL.RawQuery
-		}
-		http.Redirect(w, r, newPath, http.StatusMovedPermanently)
+		location := (&url.URL{Path: "/api/v1" + r.URL.Path[len("/api"):], RawQuery: r.URL.RawQuery}).String()
+		w.Header().Set("Location", location)
+		w.WriteHeader(http.StatusMovedPermanently)
 	})
 
 	// Also handle the exact /api path (without trailing slash or sub-paths)
 	r.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
-		newPath := "/api/v1"
-		if r.URL.RawQuery != "" {
-			newPath += "?" + r.URL.RawQuery
-		}
-		http.Redirect(w, r, newPath, http.StatusMovedPermanently)
+		location := (&url.URL{Path: "/api/v1", RawQuery: r.URL.RawQuery}).String()
+		w.Header().Set("Location", location)
+		w.WriteHeader(http.StatusMovedPermanently)
 	})
 
 	logger.Info("API routes initialized",
@@ -272,8 +310,7 @@ func (a *API) requestCounterMiddleware(next http.Handler) http.Handler {
 // getLastIndexedBlockFromDB reads the last indexed block from the indexer_metadata table.
 func (a *API) getLastIndexedBlockFromDB(ctx context.Context, networkID int) uint64 {
 	var value string
-	query := "SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = 'last_indexed_block'"
-	if err := a.db.GetContext(ctx, &value, query, networkID); err != nil {
+	if err := a.db.GetContext(ctx, &value, queryLastIndexedBlock, networkID); err != nil {
 		return 0
 	}
 	block, err := strconv.ParseUint(value, 10, 64)

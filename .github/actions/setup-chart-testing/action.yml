@@ -1,0 +1,81 @@
+name: Setup chart-testing
+description: Install the pinned chart-testing binary and Python lint dependencies.
+
+inputs:
+  version:
+    description: chart-testing version to install.
+    required: false
+    default: "3.14.0"
+  yamllint-version:
+    description: yamllint version to install.
+    required: false
+    default: "1.33.0"
+  yamale-version:
+    description: Yamale version to install.
+    required: false
+    default: "6.0.0"
+
+runs:
+  using: composite
+  steps:
+    - name: Install chart-testing
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        version="${{ inputs.version }}"
+        version="${version#v}"
+        yamllint_version="${{ inputs.yamllint-version }}"
+        yamale_version="${{ inputs.yamale-version }}"
+
+        case "$(uname -m)" in
+          aarch64|arm64)
+            arch="arm64"
+            ;;
+          x86_64|amd64)
+            arch="amd64"
+            ;;
+          *)
+            echo "Unsupported architecture: $(uname -m)" >&2
+            exit 1
+            ;;
+        esac
+
+        cache_dir="${RUNNER_TOOL_CACHE}/ct/${version}/${arch}"
+        venv_dir="${cache_dir}/venv"
+
+        if [[ ! -x "${cache_dir}/ct" || ! -x "${venv_dir}/bin/yamllint" || ! -x "${venv_dir}/bin/yamale" ]]; then
+          rm -rf "${cache_dir}"
+          mkdir -p "${cache_dir}"
+
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "${tmp_dir}"' EXIT
+
+          asset="chart-testing_${version}_linux_${arch}.tar.gz"
+          base_url="https://github.com/helm/chart-testing/releases/download/v${version}"
+
+          curl --fail --location --retry 5 --retry-delay 1 --silent --show-error \
+            --output "${tmp_dir}/${asset}" "${base_url}/${asset}"
+          curl --fail --location --retry 5 --retry-delay 1 --silent --show-error \
+            --output "${tmp_dir}/checksums.txt" "${base_url}/checksums.txt"
+
+          (
+            cd "${tmp_dir}"
+            grep "  ${asset}$" checksums.txt | sha256sum --check -
+          )
+
+          tar -xzf "${tmp_dir}/${asset}" -C "${cache_dir}"
+
+          python3 -m venv "${venv_dir}"
+          "${venv_dir}/bin/python" -m pip install --upgrade pip
+          "${venv_dir}/bin/pip" install \
+            "yamllint==${yamllint_version}" \
+            "yamale==${yamale_version}"
+        fi
+
+        echo "${cache_dir}" >> "${GITHUB_PATH}"
+        echo "${venv_dir}/bin" >> "${GITHUB_PATH}"
+        echo "CT_CONFIG_DIR=${cache_dir}/etc" >> "${GITHUB_ENV}"
+        echo "VIRTUAL_ENV=${venv_dir}" >> "${GITHUB_ENV}"
+
+        "${cache_dir}/ct" version

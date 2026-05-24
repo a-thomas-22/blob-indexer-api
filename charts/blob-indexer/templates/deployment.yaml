@@ -34,7 +34,7 @@ spec:
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}-api
-          image: "{{ .Values.api.image.repository | default .Values.image.repository }}:{{ .Values.api.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ include "blob-indexer.image" (list . .Values.api.image) }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.containerSecurityContext }}
           securityContext:
@@ -74,6 +74,7 @@ spec:
           configMap:
             name: {{ include "blob-indexer.fullname" . }}-config
 ---
+{{ if .Values.indexer.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -110,7 +111,7 @@ spec:
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}-indexer
-          image: "{{ .Values.indexer.image.repository | default .Values.image.repository }}:{{ .Values.indexer.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ include "blob-indexer.image" (list . .Values.indexer.image) }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.containerSecurityContext }}
           securityContext:
@@ -133,3 +134,4 @@ spec:
         - name: config-volume
           configMap:
             name: {{ include "blob-indexer.fullname" . }}-config
+{{- end }}

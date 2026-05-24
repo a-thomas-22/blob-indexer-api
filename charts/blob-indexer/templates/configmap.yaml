@@ -1,5 +1,4 @@
 {{- if .Values.configMap.create }}
-{{- $sslMode := .Values.database.sslMode | default "require" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -10,6 +9,7 @@ data:
   config.yaml: |
     database:
       url: ""
+      run_migrations: {{ .Values.appConfig.database.run_migrations | default false }}
     server:
       port: {{ .Values.appConfig.server.port }}
       dev_mode: {{ .Values.appConfig.server.dev_mode }}

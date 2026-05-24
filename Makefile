@@ -1,4 +1,4 @@
-.PHONY: build build-api build-indexer run-api run-indexer test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall ci staticcheck chart-lint chart-test chart-test-run kind-create kind-delete
+.PHONY: build build-api build-indexer build-migrate run-api run-indexer test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall ci staticcheck chart-lint chart-test chart-test-run kind-create kind-delete
 
 # Go parameters
 GOCMD=go
@@ -13,6 +13,7 @@ COVERAGE_PACKAGES ?= ./internal/... ./docs
 COVERAGE_DIR=coverage
 COVERAGE_FILE=$(COVERAGE_DIR)/coverage.out
 COVERAGE_HTML=$(COVERAGE_DIR)/coverage.html
+SWAG_VERSION=v1.16.6
 
 all: test build
 
@@ -23,6 +24,9 @@ build-api:
 
 build-indexer:
 	$(GOBUILD) -o $(INDEXER_BINARY) -v ./cmd/indexer
+
+build-migrate:
+	$(GOBUILD) -o blob-indexer-migrate -v ./cmd/migrate
 
 run-api: build-api
 	./$(API_BINARY)
@@ -99,7 +103,7 @@ seed-data:
 
 # Swagger documentation
 swagger:
-	swag init -g cmd/api/main.go -o docs
+	$(GOCMD) run github.com/swaggo/swag/cmd/swag@$(SWAG_VERSION) init -g cmd/api/main.go -o docs
 
 # Helm commands
 helm-dep-update:
@@ -111,8 +115,7 @@ helm-install-dev:
 
 helm-install-prod:
 	helm install blob-indexer ./charts/blob-indexer \
-		-f ./charts/blob-indexer/values-prod.yaml \
-		--set externalDatabase.url="$(DB_URL)" \
+		--set appConfig.database.url="$(DB_URL)" \
 		--set appConfig.networks[0].rpc_url="$(RPC_URL)"
 
 helm-upgrade:
@@ -136,7 +139,13 @@ chart-test-run:
 	kind load docker-image blob-indexer-api:test --name $(KIND_CLUSTER_NAME)
 	kind load docker-image blob-indexer-indexer:test --name $(KIND_CLUSTER_NAME)
 	helm repo add bitnami https://charts.bitnami.com/bitnami || true
-	helm dependency update ./charts/blob-indexer
+	helm upgrade --install blob-indexer-postgresql bitnami/postgresql \
+		--set auth.username=testuser \
+		--set auth.password=testpass \
+		--set auth.database=blobindexer \
+		--set primary.persistence.enabled=false \
+		--wait \
+		--timeout 300s
 	ct install \
 		--config charts/ct.yaml \
 		--helm-extra-set-args "--values charts/blob-indexer/values-test.yaml --set appConfig.networks[0].rpc_url=$(SEPOLIA_RPC_URL)" \

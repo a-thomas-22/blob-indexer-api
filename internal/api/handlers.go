@@ -2,12 +2,16 @@ package api
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -62,57 +66,16 @@ const blockMetricsSelectColumns = `
 	update_fraction
 `
 
+const aggregateCacheTTL = 30 * time.Second
+const aggregateQueryTimeout = 5 * time.Second
+
 const (
-	queryLatestBlobs = `
-		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = true AND network_id = $1
-		ORDER BY block_number DESC, blob_index ASC
-		LIMIT $2 OFFSET $3
-	`
-	queryMempoolBlobs = `
-		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = false AND network_id = $1
-		ORDER BY timestamp DESC
-		LIMIT $2 OFFSET $3
-	`
-	queryTopBlobUsers = `
-		SELECT
-			from_address,
-			user_attribution,
-			COUNT(*) as blob_count,
-			SUM(total_cost_eth::numeric) as total_cost_eth,
-			MAX(timestamp) as last_timestamp
-		FROM blobs
-		WHERE network_id = $1
-		GROUP BY from_address, user_attribution
-		ORDER BY blob_count DESC
-		LIMIT $2 OFFSET $3
-	`
-	queryBlobStats = `
-		SELECT
-			COUNT(*) as total_blobs,
-			COALESCE(SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END), 0) as total_confirmed_blobs,
-			COALESCE(SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END), 0) as total_pending_blobs,
-			COALESCE(AVG(base_fee_per_blob_gas::numeric), '0'::numeric) as average_base_fee,
-			COALESCE(AVG(tip_per_blob_gas::numeric), '0'::numeric) as average_tip,
-			COALESCE(AVG(total_cost_eth::numeric), '0'::numeric) as average_total_cost,
-			COALESCE(MAX(timestamp), '1970-01-01'::timestamp) as last_indexed_time
-		FROM blobs
-		WHERE network_id = $1
-	`
-	queryBlockMetrics = `
-		SELECT ` + blockMetricsSelectColumns + ` FROM block_metrics
-		WHERE network_id = $1
-		ORDER BY block_number DESC
-		LIMIT $2
-	`
 	queryDevIndexerCounts = `
 			SELECT
 				COALESCE(SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END), 0) as confirmed_count,
 				COALESCE(SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END), 0) as pending_count
 			FROM blobs WHERE network_id = $1
 		`
-	queryDevIndexerLastIndexedTime = "SELECT COALESCE(MAX(timestamp), '1970-01-01'::timestamp) FROM blobs WHERE confirmed = true AND network_id = $1"
 )
 
 // Response is a generic API response
@@ -307,6 +270,7 @@ func (a *API) respondSuccess(w http.ResponseWriter, data interface{}) {
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
 // @Param limit query int false "Number of blobs to return (default: 10, max: 100)"
 // @Param offset query int false "Number of blobs to skip for pagination (default: 0, max: 10000)"
+// @Param from query string false "Filter by sender address"
 // @Success 200 {object} Response{data=[]BlobResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -324,14 +288,30 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fromAddress := r.URL.Query().Get("from")
+
 	logger.Debug("Getting latest blobs",
 		zap.String("network", network.Name),
 		zap.Int("limit", limit),
 		zap.Int("offset", offset))
 
-	// Get the latest blobs
+	// Get the latest blobs, optionally filtered by sender address
 	var blobs []models.Blob
-	if err := a.db.SelectContext(r.Context(), &blobs, queryLatestBlobs, network.ChainID, limit, offset); err != nil {
+	if fromAddress != "" {
+		if !common.IsHexAddress(fromAddress) {
+			a.respondError(w, http.StatusBadRequest, "Invalid address format")
+			return
+		}
+		fromAddress = common.HexToAddress(fromAddress).Hex()
+		if err := a.db.SelectContext(r.Context(), &blobs, queryLatestBlobsByAddress, network.ChainID, fromAddress, limit, offset); err != nil {
+			logger.Error("Failed to get latest blobs by address",
+				zap.String("network", network.Name),
+				zap.String("from", fromAddress),
+				zap.Error(err))
+			a.respondError(w, http.StatusInternalServerError, "Failed to get latest blobs")
+			return
+		}
+	} else if err := a.db.SelectContext(r.Context(), &blobs, queryLatestBlobs, network.ChainID, limit, offset); err != nil {
 		logger.Error("Failed to get latest blobs",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -360,6 +340,7 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
 // @Param limit query int false "Number of blobs to return (default: 10, max: 100)"
 // @Param offset query int false "Number of blobs to skip for pagination (default: 0, max: 10000)"
+// @Param from query string false "Filter by sender address"
 // @Success 200 {object} Response{data=[]BlobResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -377,14 +358,30 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fromAddress := r.URL.Query().Get("from")
+
 	logger.Debug("Getting mempool blobs",
 		zap.String("network", network.Name),
 		zap.Int("limit", limit),
 		zap.Int("offset", offset))
 
-	// Get the pending blobs
+	// Get the pending blobs, optionally filtered by sender address
 	var blobs []models.Blob
-	if err := a.db.SelectContext(r.Context(), &blobs, queryMempoolBlobs, network.ChainID, limit, offset); err != nil {
+	if fromAddress != "" {
+		if !common.IsHexAddress(fromAddress) {
+			a.respondError(w, http.StatusBadRequest, "Invalid address format")
+			return
+		}
+		fromAddress = common.HexToAddress(fromAddress).Hex()
+		if err := a.db.SelectContext(r.Context(), &blobs, queryMempoolBlobsByAddress, network.ChainID, fromAddress, limit, offset); err != nil {
+			logger.Error("Failed to get pending blobs by address",
+				zap.String("network", network.Name),
+				zap.String("from", fromAddress),
+				zap.Error(err))
+			a.respondError(w, http.StatusInternalServerError, "Failed to get pending blobs")
+			return
+		}
+	} else if err := a.db.SelectContext(r.Context(), &blobs, queryMempoolBlobs, network.ChainID, limit, offset); err != nil {
 		logger.Error("Failed to get pending blobs",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -441,7 +438,7 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 
 	// Get the blob
 	var blob models.Blob
-	query := "SELECT " + blobSelectColumns + " FROM blobs WHERE tx_hash = $1 AND network_id = $2"
+	query := queryBlobByTxHash
 	if err := a.db.GetContext(r.Context(), &blob, query, txHash, network.ChainID); err != nil {
 		logger.Warn("Blob not found",
 			zap.String("network", network.Name),
@@ -486,8 +483,22 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 		zap.Int("limit", limit),
 		zap.Int("offset", offset))
 
+	cacheKey := fmt.Sprintf("%d:%d:%d", network.ChainID, limit, offset)
+	a.cacheMu.RLock()
+	if cached, ok := a.topUsersCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+		a.cacheMu.RUnlock()
+		a.respondJSON(w, http.StatusOK, Response{
+			Success: true,
+			Data:    cached.response,
+		})
+		return
+	}
+	a.cacheMu.RUnlock()
+
 	var users []models.BlobUserStats
-	if err := a.db.SelectContext(r.Context(), &users, queryTopBlobUsers, network.ChainID, limit, offset); err != nil {
+	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
+	defer cancel()
+	if err := a.db.SelectContext(queryCtx, &users, queryTopBlobUsers, network.ChainID, limit, offset); err != nil {
 		logger.Error("Failed to get top blob users",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -511,7 +522,68 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Returning top blob users",
 		zap.String("network", network.Name),
 		zap.Int("count", len(response)))
+	a.cacheMu.Lock()
+	a.topUsersCache[cacheKey] = topUsersCacheEntry{
+		response:  response,
+		expiresAt: time.Now().Add(aggregateCacheTTL),
+	}
+	a.cacheMu.Unlock()
 	a.respondSuccess(w, response)
+}
+
+// GetUserByAddress godoc
+// @Summary Get user by address
+// @Description Retrieve aggregated blob statistics for a specific sender address
+// @Tags users
+// @Accept json
+// @Produce json
+// @Param network query string false "Network name or chain ID (default: first enabled network)"
+// @Param address path string true "Ethereum address"
+// @Success 200 {object} Response{data=UserResponse} "Success"
+// @Failure 400 {object} Response "Bad request"
+// @Failure 404 {object} Response "User not found"
+// @Failure 500 {object} Response "Internal server error"
+// @Router /users/{address} [get]
+func (a *API) GetUserByAddress(w http.ResponseWriter, r *http.Request) {
+	network, err := a.getNetworkFromRequest(r)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	address := chi.URLParam(r, "address")
+	if address == "" || !common.IsHexAddress(address) {
+		a.respondError(w, http.StatusBadRequest, "Invalid address")
+		return
+	}
+	address = common.HexToAddress(address).Hex()
+
+	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
+	defer cancel()
+
+	var user models.BlobUserStats
+	if err := a.db.GetContext(queryCtx, &user, queryUserByAddress, network.ChainID, address); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			a.respondError(w, http.StatusNotFound, "User not found")
+			return
+		}
+		logger.Error("Failed to get user by address",
+			zap.String("network", network.Name),
+			zap.String("address", address),
+			zap.Error(err))
+		a.respondError(w, http.StatusInternalServerError, "Failed to get user")
+		return
+	}
+
+	a.respondSuccess(w, UserResponse{
+		NetworkID:     network.ChainID,
+		NetworkName:   network.Name,
+		Address:       user.Address,
+		Name:          user.Name,
+		BlobCount:     user.BlobCount,
+		TotalCostETH:  user.TotalCostETH,
+		LastTimestamp: user.LastTimestamp,
+	})
 }
 
 // GetBlobStats godoc
@@ -533,9 +605,30 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 
 	logger.Debug("Getting blob statistics", zap.String("network", network.Name))
 
-	var stats models.BlobStatsAggregate
+	a.cacheMu.RLock()
+	if cached, ok := a.statsCache[network.ChainID]; ok && time.Now().Before(cached.expiresAt) {
+		a.cacheMu.RUnlock()
+		a.respondJSON(w, http.StatusOK, Response{
+			Success: true,
+			Data:    cached.response,
+		})
+		return
+	}
+	a.cacheMu.RUnlock()
 
-	if err := a.db.GetContext(r.Context(), &stats, queryBlobStats, network.ChainID); err != nil {
+	var stats struct {
+		TotalBlobs          int       `db:"total_blobs"`
+		TotalConfirmedBlobs int       `db:"total_confirmed_blobs"`
+		TotalPendingBlobs   int       `db:"total_pending_blobs"`
+		AverageBaseFee      string    `db:"average_base_fee"`
+		AverageTip          string    `db:"average_tip"`
+		AverageTotalCost    string    `db:"average_total_cost"`
+		LastIndexedTime     time.Time `db:"last_indexed_time"`
+	}
+
+	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
+	defer cancel()
+	if err := a.db.GetContext(queryCtx, &stats, queryBlobStats, network.ChainID); err != nil {
 		logger.Error("Failed to get blob statistics",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -556,6 +649,12 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 		LastIndexedTime:     stats.LastIndexedTime,
 	}
 
+	a.cacheMu.Lock()
+	a.statsCache[network.ChainID] = statsCacheEntry{
+		response:  response,
+		expiresAt: time.Now().Add(aggregateCacheTTL),
+	}
+	a.cacheMu.Unlock()
 	a.respondSuccess(w, response)
 }
 
@@ -773,11 +872,19 @@ type LogEntry struct {
 
 // QueryStat represents statistics for a database query
 type QueryStat struct {
-	Query         string    `json:"query"`
-	ExecutionTime float64   `json:"execution_time"`
-	Calls         int       `json:"calls"`
-	RowsReturned  int       `json:"rows_returned"`
-	LastExecuted  time.Time `json:"last_executed"`
+	Query         string    `db:"query" json:"query"`
+	ExecutionTime float64   `db:"execution_time" json:"execution_time"`
+	Calls         int       `db:"calls" json:"calls"`
+	RowsReturned  int       `db:"rows_returned" json:"rows_returned"`
+	LastExecuted  time.Time `db:"last_executed" json:"last_executed"`
+}
+
+type devDashboardResponse struct {
+	CurrentTime     time.Time `json:"current_time"`
+	EnabledNetworks int       `json:"enabled_networks"`
+	TotalRequests   int64     `json:"total_requests"`
+	ActiveRequests  int64     `json:"active_requests"`
+	Uptime          string    `json:"uptime"`
 }
 
 // DevMetrics godoc
@@ -849,7 +956,7 @@ func (a *API) DevIndexers(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var lastIndexedTime time.Time
-		if err := a.db.GetContext(r.Context(), &lastIndexedTime, queryDevIndexerLastIndexedTime, network.ChainID); err != nil {
+		if err := a.db.GetContext(r.Context(), &lastIndexedTime, queryLastIndexedTimeCoalesce, network.ChainID); err != nil {
 			logger.Error("Failed to get last indexed time",
 				zap.String("network", network.Name),
 				zap.Error(err))
@@ -919,10 +1026,7 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 
 		// Get table size
 		var sizeBytes int64
-		query = `
-			SELECT pg_total_relation_size($1)
-		`
-		if err := a.db.GetContext(r.Context(), &sizeBytes, query, table); err != nil {
+		if err := a.db.GetContext(r.Context(), &sizeBytes, queryTableSize, table); err != nil {
 			logger.Error("Failed to get table size",
 				zap.String("table", table),
 				zap.Error(err))
@@ -931,12 +1035,7 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 
 		// Get index count
 		var indexCount int
-		query = `
-			SELECT COUNT(*)
-			FROM pg_indexes
-			WHERE tablename = $1
-		`
-		if err := a.db.GetContext(r.Context(), &indexCount, query, table); err != nil {
+		if err := a.db.GetContext(r.Context(), &indexCount, queryIndexCount, table); err != nil {
 			logger.Error("Failed to get index count",
 				zap.String("table", table),
 				zap.Error(err))
@@ -954,10 +1053,7 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 
 	// Get total database size
 	var totalSize int64
-	query := `
-		SELECT pg_database_size(current_database())
-	`
-	if err := a.db.GetContext(r.Context(), &totalSize, query); err != nil {
+	if err := a.db.GetContext(r.Context(), &totalSize, queryDatabaseSize); err != nil {
 		logger.Error("Failed to get database size", zap.Error(err))
 		totalSize = 0 // Fallback
 	}
@@ -1016,70 +1112,21 @@ func (a *API) DevLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	level := r.URL.Query().Get("level")
-
-	// This is a placeholder implementation
-	// In a real implementation, you would retrieve logs from a log store
-	logs := []LogEntry{
-		{
-			Timestamp: time.Now().Add(-5 * time.Minute),
-			Level:     "info",
-			Message:   "API server started",
-			Fields: map[string]string{
-				"port": "8080",
-			},
-		},
-		{
-			Timestamp: time.Now().Add(-4 * time.Minute),
-			Level:     "info",
-			Message:   "Connected to database",
-			Fields: map[string]string{
-				"db_name": "blobindexer",
-			},
-		},
-		{
-			Timestamp: time.Now().Add(-3 * time.Minute),
-			Level:     "info",
-			Message:   "Indexer started",
-			Fields: map[string]string{
-				"network": "mainnet",
-			},
-		},
-		{
-			Timestamp: time.Now().Add(-2 * time.Minute),
-			Level:     "warn",
-			Message:   "Slow query detected",
-			Fields: map[string]string{
-				"query":          "SELECT * FROM blobs WHERE...",
-				"execution_time": "1.5s",
-			},
-		},
-		{
-			Timestamp: time.Now().Add(-1 * time.Minute),
-			Level:     "error",
-			Message:   "Failed to connect to Ethereum node",
-			Fields: map[string]string{
-				"network": "sepolia",
-				"error":   "connection refused",
-			},
-		},
-	}
-
-	// Filter by level if specified
 	if level != "" {
-		var filtered []LogEntry
-		for _, log := range logs {
-			if log.Level == level {
-				filtered = append(filtered, log)
-			}
+		switch level {
+		case "debug", "info", "warn", "error":
+		default:
+			a.respondError(w, http.StatusBadRequest, "Invalid level parameter")
+			return
 		}
-		logs = filtered
 	}
 
-	// Limit the number of logs
-	if len(logs) > limit {
-		logs = logs[:limit]
+	// Log ingestion is not wired to a persistent store yet; return an explicit empty set.
+	logs := make([]LogEntry, 0, limit)
+	if level != "" {
+		logger.Debug("Dev log level filter requested without backing log store",
+			zap.String("level", level))
 	}
-
 	a.respondSuccess(w, logs)
 }
 
@@ -1103,46 +1150,23 @@ func (a *API) DevQueries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// This is a placeholder implementation
-	// In a real implementation, you would retrieve query statistics from pg_stat_statements
-	queries := []QueryStat{
-		{
-			Query:         "SELECT * FROM blobs WHERE confirmed = true AND network_id = $1 ORDER BY block_number DESC, blob_index ASC LIMIT $2",
-			ExecutionTime: 0.05,
-			Calls:         1000,
-			RowsReturned:  10,
-			LastExecuted:  time.Now().Add(-5 * time.Minute),
-		},
-		{
-			Query:         "SELECT * FROM blobs WHERE confirmed = false AND network_id = $1 ORDER BY timestamp DESC LIMIT $2",
-			ExecutionTime: 0.03,
-			Calls:         500,
-			RowsReturned:  5,
-			LastExecuted:  time.Now().Add(-10 * time.Minute),
-		},
-		{
-			Query:         "SELECT * FROM blobs WHERE tx_hash = $1 AND network_id = $2",
-			ExecutionTime: 0.01,
-			Calls:         200,
-			RowsReturned:  1,
-			LastExecuted:  time.Now().Add(-15 * time.Minute),
-		},
-		{
-			Query:         "SELECT COUNT(*) FROM blobs WHERE network_id = $1",
-			ExecutionTime: 0.1,
-			Calls:         100,
-			RowsReturned:  1,
-			LastExecuted:  time.Now().Add(-20 * time.Minute),
-		},
-		{
-			Query:         "SELECT MAX(timestamp) FROM blobs WHERE confirmed = true AND network_id = $1",
-			ExecutionTime: 0.02,
-			Calls:         300,
-			RowsReturned:  1,
-			LastExecuted:  time.Now().Add(-25 * time.Minute),
-		},
+	queries := make([]QueryStat, 0, limit)
+	query := `
+		SELECT
+			query,
+			mean_exec_time AS execution_time,
+			calls,
+			rows::int AS rows_returned,
+			COALESCE(last_exec_time, NOW()) AS last_executed
+		FROM pg_stat_statements
+		ORDER BY mean_exec_time DESC
+		LIMIT $1
+	`
+	if err := a.db.SelectContext(r.Context(), &queries, query, limit); err != nil {
+		// pg_stat_statements may be unavailable in development/test DBs.
+		logger.Warn("Failed to load pg_stat_statements data, returning empty query stats",
+			zap.Error(err))
 	}
-
 	// Limit the number of queries
 	if len(queries) > limit {
 		queries = queries[:limit]
@@ -1162,7 +1186,13 @@ func (a *API) DevQueries(w http.ResponseWriter, r *http.Request) {
 func (a *API) DevDashboard(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Accessing development dashboard")
 
-	// This is a placeholder for a development dashboard
-	// In a real implementation, you would render an HTML page with charts and stats
-	a.respondSuccess(w, "Development dashboard")
+	uptime := time.Since(a.startTime).Truncate(time.Second).String()
+	resp := devDashboardResponse{
+		CurrentTime:     time.Now(),
+		EnabledNetworks: len(a.networks),
+		TotalRequests:   atomic.LoadInt64(&a.totalRequests),
+		ActiveRequests:  atomic.LoadInt64(&a.activeRequests),
+		Uptime:          uptime,
+	}
+	a.respondSuccess(w, resp)
 }

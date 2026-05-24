@@ -46,8 +46,20 @@ const docTemplate = `{
                     },
                     {
                         "type": "integer",
-                        "description": "Number of blobs to return (default: 10)",
+                        "description": "Number of blobs to return (default: 10, max: 100)",
                         "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Number of blobs to skip for pagination (default: 0, max: 10000)",
+                        "name": "offset",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by sender address",
+                        "name": "from",
                         "in": "query"
                     }
                 ],
@@ -110,8 +122,20 @@ const docTemplate = `{
                     },
                     {
                         "type": "integer",
-                        "description": "Number of blobs to return (default: 10)",
+                        "description": "Number of blobs to return (default: 10, max: 100)",
                         "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Number of blobs to skip for pagination (default: 0, max: 10000)",
+                        "name": "offset",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by sender address",
+                        "name": "from",
                         "in": "query"
                     }
                 ],
@@ -131,6 +155,67 @@ const docTemplate = `{
                                             "items": {
                                                 "$ref": "#/definitions/api.BlobResponse"
                                             }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/blob/pricing": {
+            "get": {
+                "description": "Retrieve current and historical blob pricing with utilization metrics and fork parameters",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "blobs"
+                ],
+                "summary": "Get blob pricing data",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Network name or chain ID (default: first enabled network)",
+                        "name": "network",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Number of recent blocks to include (default: 20, max: 100)",
+                        "name": "blocks",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/api.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/api.PricingResponse"
                                         }
                                     }
                                 }
@@ -285,6 +370,12 @@ const docTemplate = `{
                                     }
                                 }
                             ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
                         }
                     },
                     "500": {
@@ -503,64 +594,6 @@ const docTemplate = `{
                 }
             }
         },
-        "/dev/reindex": {
-            "post": {
-                "description": "Reindex a range of blocks (only available in dev mode)",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "dev"
-                ],
-                "summary": "Trigger a reindex of blocks",
-                "parameters": [
-                    {
-                        "description": "Reindex request",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/api.ReindexRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "Success",
-                        "schema": {
-                            "allOf": [
-                                {
-                                    "$ref": "#/definitions/api.Response"
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "data": {
-                                            "type": "string"
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    "400": {
-                        "description": "Bad request",
-                        "schema": {
-                            "$ref": "#/definitions/api.Response"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal server error",
-                        "schema": {
-                            "$ref": "#/definitions/api.Response"
-                        }
-                    }
-                }
-            }
-        },
         "/stats": {
             "get": {
                 "description": "Retrieve statistics about blob transactions",
@@ -681,8 +714,14 @@ const docTemplate = `{
                     },
                     {
                         "type": "integer",
-                        "description": "Number of users to return (default: 10)",
+                        "description": "Number of users to return (default: 10, max: 100)",
                         "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Number of users to skip for pagination (default: 0, max: 10000)",
+                        "name": "offset",
                         "in": "query"
                     }
                 ],
@@ -722,14 +761,105 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/users/{address}": {
+            "get": {
+                "description": "Retrieve aggregated blob statistics for a specific sender address",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "Get user by address",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Network name or chain ID (default: first enabled network)",
+                        "name": "network",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Ethereum address",
+                        "name": "address",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Success",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/api.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/api.UserResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "User not found",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
+        "api.BlobParamsResponse": {
+            "type": "object",
+            "properties": {
+                "max": {
+                    "type": "integer"
+                },
+                "max_gas": {
+                    "type": "integer"
+                },
+                "target": {
+                    "type": "integer"
+                },
+                "target_gas": {
+                    "type": "integer"
+                },
+                "update_fraction": {
+                    "type": "integer"
+                }
+            }
+        },
         "api.BlobResponse": {
             "type": "object",
             "properties": {
                 "base_fee_per_blob_gas": {
                     "type": "string"
+                },
+                "blob_gas_used": {
+                    "type": "integer"
                 },
                 "blob_index": {
                     "type": "integer"
@@ -744,6 +874,9 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "from_address": {
+                    "type": "string"
+                },
+                "max_fee_per_blob_gas": {
                     "type": "string"
                 },
                 "network_id": {
@@ -765,6 +898,47 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "user_attribution": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.BlockPricingResponse": {
+            "type": "object",
+            "properties": {
+                "blob_base_fee": {
+                    "type": "string"
+                },
+                "blob_count": {
+                    "type": "integer"
+                },
+                "blob_gas_limit": {
+                    "type": "integer"
+                },
+                "blob_gas_target": {
+                    "type": "integer"
+                },
+                "blob_gas_used": {
+                    "type": "integer"
+                },
+                "blob_params_max": {
+                    "type": "integer"
+                },
+                "blob_params_target": {
+                    "type": "integer"
+                },
+                "block_number": {
+                    "type": "integer"
+                },
+                "block_timestamp": {
+                    "type": "string"
+                },
+                "excess_blob_gas": {
+                    "type": "integer"
+                },
+                "update_fraction": {
+                    "type": "integer"
+                },
+                "utilization_ratio": {
                     "type": "string"
                 }
             }
@@ -804,26 +978,8 @@ const docTemplate = `{
         "api.IndexerMetrics": {
             "type": "object",
             "properties": {
-                "blocks_behind": {
-                    "type": "integer"
-                },
                 "confirmed_blobs_count": {
                     "type": "integer"
-                },
-                "current_block": {
-                    "type": "integer"
-                },
-                "error_count": {
-                    "type": "integer"
-                },
-                "indexing_rate": {
-                    "type": "number"
-                },
-                "last_error": {
-                    "type": "string"
-                },
-                "last_error_time": {
-                    "type": "string"
                 },
                 "last_indexed_block": {
                     "type": "integer"
@@ -839,9 +995,6 @@ const docTemplate = `{
                 },
                 "pending_blobs_count": {
                     "type": "integer"
-                },
-                "status": {
-                    "type": "string"
                 },
                 "total_blobs_indexed": {
                     "type": "integer"
@@ -868,6 +1021,41 @@ const docTemplate = `{
                 }
             }
         },
+        "api.PricingResponse": {
+            "type": "object",
+            "properties": {
+                "blob_params": {
+                    "$ref": "#/definitions/api.BlobParamsResponse"
+                },
+                "current_base_fee": {
+                    "type": "string"
+                },
+                "current_excess_gas": {
+                    "type": "integer"
+                },
+                "current_utilization": {
+                    "type": "string"
+                },
+                "fork_stage": {
+                    "type": "string"
+                },
+                "network_id": {
+                    "type": "integer"
+                },
+                "network_name": {
+                    "type": "string"
+                },
+                "predicted_next_fee": {
+                    "type": "string"
+                },
+                "recent_blocks": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.BlockPricingResponse"
+                    }
+                }
+            }
+        },
         "api.QueryStat": {
             "type": "object",
             "properties": {
@@ -884,20 +1072,6 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "rows_returned": {
-                    "type": "integer"
-                }
-            }
-        },
-        "api.ReindexRequest": {
-            "type": "object",
-            "properties": {
-                "end_block": {
-                    "type": "integer"
-                },
-                "network_id": {
-                    "type": "integer"
-                },
-                "start_block": {
                     "type": "integer"
                 }
             }

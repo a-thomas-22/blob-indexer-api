@@ -9,9 +9,20 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: test-connection
       image: curlimages/curl:8.5.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
       command:
         - /bin/sh
         - -c
@@ -19,16 +30,6 @@ spec:
           set -e
           echo "=== Connection Test ==="
           echo "Testing API at {{ include "blob-indexer.fullname" . }}:{{ .Values.service.port }}"
-
-          # Wait for DNS to resolve
-          for i in $(seq 1 30); do
-            if nslookup {{ include "blob-indexer.fullname" . }} >/dev/null 2>&1; then
-              echo "DNS resolved on attempt $i"
-              break
-            fi
-            echo "Waiting for DNS... attempt $i/30"
-            sleep 2
-          done
 
           # Test status endpoint returns 200
           HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \

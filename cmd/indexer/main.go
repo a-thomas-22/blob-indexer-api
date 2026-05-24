@@ -19,6 +19,10 @@ import (
 var version = "dev"
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	logger.Initialize()
 	defer func() { _ = logger.Sync() }()
 
@@ -64,14 +68,16 @@ func main() {
 		idx := indexer.New(ctx, database, ethClient, cfg, network)
 		indexers = append(indexers, idx)
 
-		go func(networkName string, idx *indexer.Indexer) {
-			logger.Info("Starting indexer", zap.String("network", networkName))
-			if err := idx.Start(); err != nil {
-				logger.Error("Indexer error",
-					zap.String("network", networkName),
-					zap.Error(err))
+		logger.Info("Starting indexer", zap.String("network", network.Name))
+		if err := idx.Start(); err != nil {
+			logger.Error("Indexer failed to start",
+				zap.String("network", network.Name),
+				zap.Error(err))
+			for _, started := range indexers[:len(indexers)-1] {
+				started.Stop()
 			}
-		}(network.Name, idx)
+			return 1
+		}
 	}
 
 	shutdown := make(chan os.Signal, 1)
@@ -89,4 +95,5 @@ func main() {
 	}
 
 	logger.Info("Indexer shutdown complete")
+	return 0
 }

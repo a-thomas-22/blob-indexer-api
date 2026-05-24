@@ -76,14 +76,16 @@ func newTestAPIWithDB(db DBProvider) *API {
 			Server:  config.ServerConfig{Port: 8080, DevMode: true},
 			Indexer: config.IndexerConfig{Version: "test-v1"},
 		},
-		startTime: time.Now(),
+		startTime:     time.Now(),
+		statsCache:    make(map[int]statsCacheEntry),
+		topUsersCache: make(map[string]topUsersCacheEntry),
 	}
 }
 
 // setSliceResult is a helper to assign mock data to a dest pointer via reflection.
 func setSliceResult(dest, src interface{}) {
 	dv := reflect.ValueOf(dest)
-	if dv.Kind() == reflect.Ptr {
+	if dv.Kind() == reflect.Pointer {
 		dv = dv.Elem()
 	}
 	sv := reflect.ValueOf(src)
@@ -93,11 +95,11 @@ func setSliceResult(dest, src interface{}) {
 // setStructResult copies a struct value into the dest pointer.
 func setStructResult(dest, src interface{}) {
 	dv := reflect.ValueOf(dest)
-	if dv.Kind() == reflect.Ptr {
+	if dv.Kind() == reflect.Pointer {
 		dv = dv.Elem()
 	}
 	sv := reflect.ValueOf(src)
-	if sv.Kind() == reflect.Ptr {
+	if sv.Kind() == reflect.Pointer {
 		sv = sv.Elem()
 	}
 	dv.Set(sv)
@@ -294,6 +296,35 @@ func TestGetTopBlobUsers_BadNetwork(t *testing.T) {
 	}
 }
 
+func TestGetTopBlobUsers_InvalidOffset(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?offset=-5", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetTopBlobUsers_ExcessiveOffset(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(_ context.Context, dest interface{}, _ string, _ ...interface{}) error {
+			users := dest.(*[]models.BlobUserStats)
+			*users = []models.BlobUserStats{}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/?offset=%d", MaxQueryOffset+1), http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
 // --- DevMetrics ---
 
 func TestDevMetrics(t *testing.T) {
@@ -334,6 +365,17 @@ func TestDevLogs_FilterByLevel(t *testing.T) {
 func TestDevLogs_InvalidLimit(t *testing.T) {
 	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/api/dev/logs?limit=abc", http.NoBody)
+	w := httptest.NewRecorder()
+	a.DevLogs(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestDevLogs_InvalidLevel(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/api/dev/logs?level=critical", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevLogs(w, req)
 
@@ -386,7 +428,9 @@ func TestNewRouter_ReturnsHandler(t *testing.T) {
 		Server:  config.ServerConfig{Port: 8080, DevMode: true},
 		Indexer: config.IndexerConfig{Version: "test"},
 	}
-	handler := NewRouter(nil, cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler := NewRouter(ctx, nil, cfg)
 	if handler == nil {
 		t.Fatal("expected non-nil handler")
 	}
@@ -397,7 +441,9 @@ func TestNewRouter_DevModeDisabled(t *testing.T) {
 		Server:  config.ServerConfig{Port: 8080, DevMode: false},
 		Indexer: config.IndexerConfig{Version: "test"},
 	}
-	handler := NewRouter(nil, cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler := NewRouter(ctx, nil, cfg)
 	if handler == nil {
 		t.Fatal("expected non-nil handler")
 	}
@@ -974,6 +1020,49 @@ func TestGetTopBlobUsers_ExcessiveLimit(t *testing.T) {
 	}
 }
 
+func TestGetTopBlobUsers_CacheHit(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(_ context.Context, _ interface{}, _ string, _ ...interface{}) error {
+			t.Fatal("DB should not be called on cache hit")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	cacheKey := fmt.Sprintf("%d:%d:%d", 42, 10, 0)
+	a.topUsersCache[cacheKey] = topUsersCacheEntry{
+		response:  []UserResponse{{Address: "0xcached"}},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetBlobStats_CacheHit(t *testing.T) {
+	db := &mockDB{
+		getFn: func(_ context.Context, _ interface{}, _ string, _ ...interface{}) error {
+			t.Fatal("DB should not be called on cache hit")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	a.statsCache[42] = statsCacheEntry{
+		response:  StatsResponse{NetworkID: 42, TotalBlobs: 5},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobStats(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
 func TestDevDatabase_PartialErrors(t *testing.T) {
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
@@ -1173,8 +1262,8 @@ func TestDevAPIKeyMiddleware_KeyMissing(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 when dev API key is not configured, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 when dev API key is not configured (skip auth), got %d", w.Code)
 	}
 }
 
@@ -1434,5 +1523,242 @@ func TestCalcNextExcessBlobGas(t *testing.T) {
 					tt.excess, tt.gasUsed, tt.targetGas, got, tt.want)
 			}
 		})
+	}
+}
+
+// --- GetLatestBlobs address filter tests ---
+
+const validTestAddress = "0x1234567890abcdef1234567890abcdef12345678"
+
+func TestGetLatestBlobs_WithAddressFilter(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if !strings.Contains(query, "from_address") {
+				t.Error("expected address-filtered query")
+			}
+			blobs := dest.(*[]models.Blob)
+			*blobs = []models.Blob{
+				{
+					NetworkID:         42,
+					BlockNumber:       100,
+					BlobIndex:         0,
+					TxHash:            "0xabc",
+					FromAddress:       validTestAddress,
+					BlobSizeBytes:     131072,
+					BaseFeePerBlobGas: "1000",
+					TipPerBlobGas:     "100",
+					TotalCostETH:      "0.001",
+					Timestamp:         time.Now(),
+					Confirmed:         true,
+				},
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?from="+validTestAddress, http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetLatestBlobs(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp Response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success {
+		t.Error("expected Success=true")
+	}
+}
+
+func TestGetLatestBlobs_InvalidAddress(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?from=notanaddress", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetLatestBlobs(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetLatestBlobs_AddressFilterDBError(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return fmt.Errorf("db error")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?from="+validTestAddress, http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetLatestBlobs(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
+// --- GetMempoolBlobs address filter tests ---
+
+func TestGetMempoolBlobs_WithAddressFilter(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if !strings.Contains(query, "from_address") {
+				t.Error("expected address-filtered query")
+			}
+			blobs := dest.(*[]models.Blob)
+			*blobs = []models.Blob{}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?from="+validTestAddress, http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetMempoolBlobs(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetMempoolBlobs_InvalidAddress(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?from=xyz", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetMempoolBlobs(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetMempoolBlobs_AddressFilterDBError(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return fmt.Errorf("db error")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?from="+validTestAddress, http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetMempoolBlobs(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
+// --- GetUserByAddress tests ---
+
+func TestGetUserByAddress_Success(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			user := dest.(*models.BlobUserStats)
+			*user = models.BlobUserStats{
+				Address:       validTestAddress,
+				Name:          "TestRollup",
+				BlobCount:     42,
+				TotalCostETH:  "1.5",
+				LastTimestamp: time.Now(),
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("address", validTestAddress)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	a.GetUserByAddress(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp Response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success {
+		t.Error("expected Success=true")
+	}
+}
+
+func TestGetUserByAddress_InvalidAddress(t *testing.T) {
+	a := newTestAPI()
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("address", "notanaddress")
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	a.GetUserByAddress(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetUserByAddress_EmptyAddress(t *testing.T) {
+	a := newTestAPI()
+	// No chi route context → address will be empty
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetUserByAddress(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetUserByAddress_NotFound(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return sql.ErrNoRows
+		},
+	}
+	a := newTestAPIWithDB(db)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("address", validTestAddress)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	a.GetUserByAddress(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestGetUserByAddress_DBError(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return fmt.Errorf("connection refused")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("address", validTestAddress)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	a.GetUserByAddress(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
+func TestGetUserByAddress_BadNetwork(t *testing.T) {
+	a := newTestAPI()
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("address", validTestAddress)
+	req := httptest.NewRequest(http.MethodGet, "/?network=unknown", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	a.GetUserByAddress(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }

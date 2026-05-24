@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 type visitor struct {
@@ -78,10 +80,7 @@ func (rl *RateLimiter) allow(ip string) bool {
 func RateLimitMiddleware(rl *RateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := strings.TrimSpace(r.RemoteAddr)
-			if host, _, err := net.SplitHostPort(ip); err == nil {
-				ip = host
-			}
+			ip := clientIP(r)
 
 			if !rl.allow(ip) {
 				w.Header().Set("Content-Type", "application/json")
@@ -97,4 +96,18 @@ func RateLimitMiddleware(rl *RateLimiter) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func clientIP(r *http.Request) string {
+	ip := strings.TrimSpace(middleware.GetClientIP(r.Context()))
+	if ip != "" {
+		return ip
+	}
+
+	ip = strings.TrimSpace(r.RemoteAddr)
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
+
+	return ip
 }

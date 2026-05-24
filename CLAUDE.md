@@ -10,6 +10,7 @@ Blob Indexer — a Go backend that indexes Ethereum blob transactions (EIP-4844)
 make build          # Build both binaries → ./blob-indexer-api + ./blob-indexer
 make build-api      # Build API server only
 make build-indexer  # Build indexer only
+make build-migrate  # Build migration runner only
 make run-api        # Build and run API server
 make run-indexer    # Build and run indexer
 make test           # Run all tests
@@ -26,7 +27,7 @@ Two separate binaries:
 - **API server** (`cmd/api/main.go`): HTTP server serving REST endpoints. Reads blob data and indexer status from PostgreSQL.
 - **Indexer** (`cmd/indexer/main.go`): Connects to Ethereum RPC nodes, indexes blob transactions, writes to PostgreSQL.
 
-Both share the same database and run migrations on startup.
+Both share the same database. Production deployments run migrations with the dedicated migration runner: Helm uses a pre-install/pre-upgrade hook for external databases and init containers when the chart owns PostgreSQL. Runtime binaries only run migrations when `database.run_migrations: true` is explicitly configured, which is intended for local development.
 
 ### Key Packages
 
@@ -43,20 +44,21 @@ Both share the same database and run migrations on startup.
 ### Database
 
 - PostgreSQL with golang-migrate (migrations in `internal/db/migrations/`)
-- Migrations run automatically on startup
-- Key tables: `blobs`, `networks`, `blob_users`, `indexer_metadata`, `indexed_blocks`
+- Migrations run via `cmd/migrate`, `make db-migrate`, Helm-managed migration containers, or local `database.run_migrations: true`
+- Key tables: `blobs`, `networks`, `blob_users`, `indexer_metadata`, `indexed_blocks`, `block_metrics`
 - Connection pooling: 25 max open, 10 idle
 
 ### API Routes
 
-All routes under `/api`. Network selected via `?network=` query param (name or chain ID).
+Canonical routes are under `/api/v1`. Legacy `/api/*` paths redirect to `/api/v1/*`. Network selected via `?network=` query param (name or chain ID).
 
-- `/api/networks`, `/api/networks/{chainId}` — network listing and status
-- `/api/blob/latest`, `/api/blob/mempool`, `/api/blob/{txHash}` — blob queries
-- `/api/users` — top blob users
-- `/api/stats` — historical stats
-- `/api/status` — indexer status
-- `/api/dev/*` — development/debug endpoints (metrics, dashboard, logs, queries)
+- `/api/v1/ws` — WebSocket updates
+- `/api/v1/networks`, `/api/v1/networks/{chainId}` — network listing and status
+- `/api/v1/blob/latest`, `/api/v1/blob/mempool`, `/api/v1/blob/pricing`, `/api/v1/blob/{txHash}` — blob queries
+- `/api/v1/users` — top blob users
+- `/api/v1/stats` — historical stats
+- `/api/v1/status` — indexer status
+- `/api/v1/dev/*` — development/debug endpoints (metrics, dashboard, logs, queries), gated by `server.dev_mode` and optional `server.dev_api_key`
 - `/swagger/*` — Swagger UI
 
 ### Configuration
@@ -87,12 +89,12 @@ Individual checks you can run:
 
 After any code change, at minimum run: `make fmt && make lint && make test`
 
-PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, `style:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`, `chore:`, `revert:`.
+PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `deps:`, `docs:`, `style:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`, `chore:`, `revert:`. Do not add assistant or tooling prefixes such as `[codex]`.
 
 ## Code Conventions
 
 - Go module: `github.com/a-thomas-22/blob-indexer-api`
-- Go 1.24
+- Go 1.26.1
 - HTTP framework: Chi v5 with middleware stack (RequestID, RealIP, rate limit, logging, recovery, timeout, CORS)
 - Database queries: sqlx with `lib/pq` driver
 - Logging: use `logger.Info/Error/Fatal/Debug` (Zap wrapper in `internal/logger/`)
@@ -103,15 +105,15 @@ PR titles must follow [Conventional Commits](https://www.conventionalcommits.org
 
 Managed by **release-please** (`.github/workflows/release-please.yml`). The app and Helm chart are versioned independently.
 
-- PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `chore:`, etc.) — enforced by CI
+- PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `deps:`, `chore:`, etc.) without assistant/tooling prefixes such as `[codex]` — enforced by CI
 - On merge to `main`, release-please maintains a running release PR with changelog
 - Merging the release PR creates a GitHub Release + tag, which triggers Docker/Helm publish workflows
 - Config: `release-please-config.json`, `.release-please-manifest.json`
-- Docker images: `ghcr.io/<owner>/blob-indexer-api-api`, `ghcr.io/<owner>/blob-indexer-api-indexer`
-- Helm charts: `ghcr.io/<owner>/charts/blob-indexer` (OCI)
+- Docker images: `registry.ahkc.win/public/blob-indexer-api-api`, `registry.ahkc.win/public/blob-indexer-api-indexer`
+- Helm charts: `oci://registry.ahkc.win/public/charts/blob-indexer`
 
 ## Deployment
 
 - **Docker**: Two images — `Dockerfile.api` (exposes port 8080) and `Dockerfile.indexer` (no exposed port)
-- **Kubernetes**: Helm chart in `charts/blob-indexer/` with separate API and indexer deployments, PostgreSQL dependency (Bitnami)
+- **Kubernetes**: Helm chart in `charts/blob-indexer/` with separate API and indexer deployments; PostgreSQL is provided externally
 - **Tilt**: local K8s dev with hot reload (`Tiltfile` + `tilt-config.yaml`)
