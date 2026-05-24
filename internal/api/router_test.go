@@ -726,6 +726,52 @@ func TestGetMempoolPressure_NoBlockMetrics(t *testing.T) {
 	}
 }
 
+func TestGetMempoolPressure_BaseFeeDBError(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if strings.Contains(query, "FROM block_metrics") {
+				return fmt.Errorf("base fee query failed")
+			}
+			t.Fatalf("unexpected query after base fee failure: %s", query)
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetMempoolPressure(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
+func TestGetMempoolPressure_AggregateDBError(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			switch {
+			case strings.Contains(query, "FROM block_metrics"):
+				baseFee := dest.(*string)
+				*baseFee = "1000"
+				return nil
+			case strings.Contains(query, "limited_pending"):
+				return fmt.Errorf("pressure query failed")
+			default:
+				t.Fatalf("unexpected query: %s", query)
+				return nil
+			}
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetMempoolPressure(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
 func TestGetBlobByTxHash_Success(t *testing.T) {
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
@@ -1542,12 +1588,24 @@ func TestGetBlobPricing_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	var resp Response
+	var resp struct {
+		Success bool            `json:"success"`
+		Data    PricingResponse `json:"data"`
+	}
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 	if !resp.Success {
 		t.Error("expected Success=true")
+	}
+	if resp.Data.MarketPressure.PredictedDirection != marketPressureDirectionFlat {
+		t.Errorf("expected flat market pressure direction, got %q", resp.Data.MarketPressure.PredictedDirection)
+	}
+	if resp.Data.MarketPressure.NextBlockFeeEstimate.Low == "" {
+		t.Error("expected low next-block fee estimate")
+	}
+	if resp.Data.MarketPressure.NextBlockFeeEstimate.High == "" {
+		t.Error("expected high next-block fee estimate")
 	}
 }
 

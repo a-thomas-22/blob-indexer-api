@@ -698,6 +698,67 @@ const docTemplate = `{
                 }
             }
         },
+        "/stats/windows": {
+            "get": {
+                "description": "Retrieve rolling time-window statistics for blob market dashboards",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "stats"
+                ],
+                "summary": "Get rolling blob market statistics",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Network name or chain ID (default: first enabled network)",
+                        "name": "network",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Comma-separated rolling windows using m/h/d units (default: 5m,1h,24h,7d; max 8 windows, max 30d each)",
+                        "name": "windows",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Success",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/api.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/api.RollingStatsResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    }
+                }
+            }
+        },
         "/status": {
             "get": {
                 "description": "Retrieve the current status of the indexer",
@@ -1060,6 +1121,17 @@ const docTemplate = `{
                 }
             }
         },
+        "api.FeeEstimateRangeResponse": {
+            "type": "object",
+            "properties": {
+                "high": {
+                    "type": "string"
+                },
+                "low": {
+                    "type": "string"
+                }
+            }
+        },
         "api.IndexerMetrics": {
             "type": "object",
             "properties": {
@@ -1103,6 +1175,26 @@ const docTemplate = `{
                 },
                 "timestamp": {
                     "type": "string"
+                }
+            }
+        },
+        "api.MarketPressureResponse": {
+            "type": "object",
+            "properties": {
+                "consecutive_full_blocks": {
+                    "type": "integer"
+                },
+                "next_block_fee_estimate": {
+                    "$ref": "#/definitions/api.FeeEstimateRangeResponse"
+                },
+                "percent_recent_blocks_at_max_blobs": {
+                    "type": "number"
+                },
+                "predicted_direction": {
+                    "type": "string"
+                },
+                "recent_blocks_above_target": {
+                    "type": "integer"
                 }
             }
         },
@@ -1222,6 +1314,9 @@ const docTemplate = `{
                 "fork_stage": {
                     "type": "string"
                 },
+                "market_pressure": {
+                    "$ref": "#/definitions/api.MarketPressureResponse"
+                },
                 "network_id": {
                     "type": "integer"
                 },
@@ -1268,6 +1363,67 @@ const docTemplate = `{
                 },
                 "success": {
                     "type": "boolean"
+                }
+            }
+        },
+        "api.RollingStatsResponse": {
+            "type": "object",
+            "properties": {
+                "generated_at": {
+                    "type": "string"
+                },
+                "network_id": {
+                    "type": "integer"
+                },
+                "network_name": {
+                    "type": "string"
+                },
+                "windows": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.RollingWindowStats"
+                    }
+                }
+            }
+        },
+        "api.RollingWindowStats": {
+            "type": "object",
+            "properties": {
+                "average_blob_base_fee": {
+                    "type": "string"
+                },
+                "average_utilization": {
+                    "type": "string"
+                },
+                "duration_seconds": {
+                    "type": "integer"
+                },
+                "end_time": {
+                    "type": "string"
+                },
+                "median_blob_base_fee": {
+                    "type": "string"
+                },
+                "p95_blob_base_fee": {
+                    "type": "string"
+                },
+                "start_time": {
+                    "type": "string"
+                },
+                "total_blob_gas_used": {
+                    "type": "integer"
+                },
+                "total_blobs": {
+                    "type": "integer"
+                },
+                "total_cost_eth": {
+                    "type": "string"
+                },
+                "unique_senders": {
+                    "type": "integer"
+                },
+                "window": {
+                    "type": "string"
                 }
             }
         },

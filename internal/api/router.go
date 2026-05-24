@@ -140,6 +140,7 @@ func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Hand
 			// Stats endpoints
 			r.Route("/stats", func(r chi.Router) {
 				r.Get("/", api.GetBlobStats)
+				r.Get("/windows", api.GetRollingStatsWindows)
 			})
 
 			// Status endpoint

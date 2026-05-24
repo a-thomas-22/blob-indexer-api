@@ -17,8 +17,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
-	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
@@ -70,7 +69,6 @@ const blockMetricsSelectColumns = `
 
 const aggregateCacheTTL = 30 * time.Second
 const aggregateQueryTimeout = 5 * time.Second
-const blobGasPerBlob = 131072
 const mempoolPressureSampleLimit = 10000
 
 const (
@@ -143,6 +141,21 @@ type BlobParamsResponse struct {
 	MaxGas         uint64 `json:"max_gas"`
 }
 
+// FeeEstimateRangeResponse represents a low/high blob fee estimate range.
+type FeeEstimateRangeResponse struct {
+	Low  string `json:"low"`
+	High string `json:"high"`
+}
+
+// MarketPressureResponse summarizes recent blob market pressure indicators.
+type MarketPressureResponse struct {
+	RecentBlocksAboveTarget  int                      `json:"recent_blocks_above_target"`
+	ConsecutiveFullBlocks    int                      `json:"consecutive_full_blocks"`
+	PercentRecentBlocksAtMax float64                  `json:"percent_recent_blocks_at_max_blobs"`
+	PredictedDirection       string                   `json:"predicted_direction"`
+	NextBlockFeeEstimate     FeeEstimateRangeResponse `json:"next_block_fee_estimate"`
+}
+
 // PricingResponse is the top-level pricing API response
 type PricingResponse struct {
 	NetworkID          int                    `json:"network_id"`
@@ -153,6 +166,7 @@ type PricingResponse struct {
 	PredictedNextFee   string                 `json:"predicted_next_fee"`
 	ForkStage          string                 `json:"fork_stage"`
 	BlobParams         BlobParamsResponse     `json:"blob_params"`
+	MarketPressure     MarketPressureResponse `json:"market_pressure"`
 	RecentBlocks       []BlockPricingResponse `json:"recent_blocks"`
 }
 
@@ -379,7 +393,7 @@ func blobSpaceLimit(paramsBlobs int, gasLimit int64) int {
 	if gasLimit <= 0 {
 		return 0
 	}
-	return int(gasLimit / blobGasPerBlob)
+	return int(gasLimit / params.BlobTxBlobGasPerBlob)
 }
 
 func nullTimePtr(t sql.NullTime) *time.Time {
@@ -996,39 +1010,38 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 		recentBlocks = append(recentBlocks, toBlockPricingResponse(m))
 	}
 
+	cfg := blobparams.ChainConfigForID(network.ChainID)
+
 	// Use the most recent block for current state
 	resp := PricingResponse{
-		NetworkID:    network.ChainID,
-		NetworkName:  network.Name,
-		RecentBlocks: recentBlocks,
+		NetworkID:      network.ChainID,
+		NetworkName:    network.Name,
+		MarketPressure: buildMarketPressure(metrics, cfg),
+		RecentBlocks:   recentBlocks,
 	}
 
 	if len(metrics) > 0 {
 		latest := metrics[0]
+		latestTime := uint64(latest.BlockTimestamp.Unix())
+		bp := blobparams.GetBlobParams(cfg, latestTime)
+
 		resp.CurrentBaseFee = latest.BlobBaseFee
 		resp.CurrentExcessGas = latest.ExcessBlobGas
 		resp.CurrentUtilization = latest.UtilizationRatio
 		resp.ForkStage = blobparams.ForkName(
-			blobparams.ChainConfigForID(network.ChainID),
-			uint64(latest.BlockTimestamp.Unix()),
+			cfg,
+			latestTime,
 		)
 		resp.BlobParams = BlobParamsResponse{
 			Target:         latest.BlobParamsTarget,
 			Max:            latest.BlobParamsMax,
 			UpdateFraction: uint64(latest.UpdateFraction),
-			TargetGas:      uint64(latest.BlobParamsTarget) * blobGasPerBlob,
-			MaxGas:         uint64(latest.BlobParamsMax) * blobGasPerBlob,
+			TargetGas:      uint64(latest.BlobParamsTarget) * params.BlobTxBlobGasPerBlob,
+			MaxGas:         uint64(latest.BlobParamsMax) * params.BlobTxBlobGasPerBlob,
 		}
 
 		// Predict next base fee
-		cfg := blobparams.ChainConfigForID(network.ChainID)
-		bp := blobparams.GetBlobParams(cfg, uint64(latest.BlockTimestamp.Unix()))
-		nextExcess := calcNextExcessBlobGas(uint64(latest.ExcessBlobGas), uint64(latest.BlobGasUsed), bp.TargetGas)
-		nextHeader := &types.Header{
-			Time:          uint64(latest.BlockTimestamp.Unix()) + 12,
-			ExcessBlobGas: &nextExcess,
-		}
-		resp.PredictedNextFee = eip4844.CalcBlobFee(cfg, nextHeader).String()
+		resp.PredictedNextFee = predictNextBlockBlobFee(cfg, latest, effectiveBlobTargetGas(latest, bp)).String()
 	}
 
 	a.respondSuccess(w, resp)
