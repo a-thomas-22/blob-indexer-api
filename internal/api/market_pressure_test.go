@@ -70,6 +70,75 @@ func TestBuildMarketPressure_EmptyMetrics(t *testing.T) {
 	}
 }
 
+func TestBuildMarketPressure_FallbacksAndDirections(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	metrics := []models.BlockMetrics{
+		{
+			NetworkID:      42,
+			BlockNumber:    3,
+			BlockTimestamp: now,
+			BlobGasUsed:    2,
+			BlobGasTarget:  4,
+			BlobGasLimit:   8,
+			ExcessBlobGas:  6,
+		},
+		{
+			NetworkID:      42,
+			BlockNumber:    2,
+			BlockTimestamp: now.Add(-12 * time.Second),
+			BlobGasUsed:    -1,
+			BlobGasTarget:  4,
+			BlobGasLimit:   8,
+			ExcessBlobGas:  -1,
+		},
+	}
+
+	got := buildMarketPressure(metrics, nil)
+
+	if got.PredictedDirection != marketPressureDirectionDown {
+		t.Fatalf("PredictedDirection = %q, want %q", got.PredictedDirection, marketPressureDirectionDown)
+	}
+	if got.RecentBlocksAboveTarget != 0 {
+		t.Fatalf("RecentBlocksAboveTarget = %d, want 0", got.RecentBlocksAboveTarget)
+	}
+	if got.ConsecutiveFullBlocks != 0 {
+		t.Fatalf("ConsecutiveFullBlocks = %d, want 0", got.ConsecutiveFullBlocks)
+	}
+	if got.PercentRecentBlocksAtMax != 0 {
+		t.Fatalf("PercentRecentBlocksAtMax = %f, want 0", got.PercentRecentBlocksAtMax)
+	}
+	if got.NextBlockFeeEstimate.Low == "" || got.NextBlockFeeEstimate.High == "" {
+		t.Fatalf("NextBlockFeeEstimate = %+v, want populated range", got.NextBlockFeeEstimate)
+	}
+}
+
+func TestMarketPressureHelpers(t *testing.T) {
+	metric := models.BlockMetrics{BlobParamsTarget: 3, BlobParamsMax: 6}
+	if got := effectiveBlobTargetGas(metric, blobparams.BlobParams{}); got != 393216 {
+		t.Fatalf("effectiveBlobTargetGas = %d, want 393216", got)
+	}
+	if got := effectiveBlobMaxGas(metric, blobparams.BlobParams{}); got != 786432 {
+		t.Fatalf("effectiveBlobMaxGas = %d, want 786432", got)
+	}
+
+	if got := predictedMarketDirection(models.BlockMetrics{BlobGasUsed: 4}, 4); got != marketPressureDirectionFlat {
+		t.Fatalf("predictedMarketDirection = %q, want flat", got)
+	}
+	if got := predictedMarketDirection(models.BlockMetrics{BlobGasUsed: 5}, 4); got != marketPressureDirectionUp {
+		t.Fatalf("predictedMarketDirection = %q, want up", got)
+	}
+	if got := predictedMarketDirection(models.BlockMetrics{BlobGasUsed: 0}, 0); got != marketPressureDirectionFlat {
+		t.Fatalf("predictedMarketDirection = %q, want flat for zero target", got)
+	}
+
+	if got := percentage(1, 3); got != 33.33 {
+		t.Fatalf("percentage = %f, want 33.33", got)
+	}
+	if got := nextBlockFeeEstimateRange(nil, blobparams.ChainConfigForID(42), 0); got.Low != "0" || got.High != "0" {
+		t.Fatalf("nextBlockFeeEstimateRange = %+v, want zero range", got)
+	}
+}
+
 func testPressureMetric(blockNumber int64, timestamp time.Time, blobGasUsed, excessBlobGas int64) models.BlockMetrics {
 	return models.BlockMetrics{
 		NetworkID:        42,
