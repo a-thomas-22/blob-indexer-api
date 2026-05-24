@@ -116,7 +116,7 @@ helm-install-dev:
 helm-install-prod:
 	helm install blob-indexer ./charts/blob-indexer \
 		-f ./charts/blob-indexer/values-prod.yaml \
-		--set externalDatabase.url="$(DB_URL)" \
+		--set appConfig.database.url="$(DB_URL)" \
 		--set appConfig.networks[0].rpc_url="$(RPC_URL)"
 
 helm-upgrade:
@@ -140,7 +140,13 @@ chart-test-run:
 	kind load docker-image blob-indexer-api:test --name $(KIND_CLUSTER_NAME)
 	kind load docker-image blob-indexer-indexer:test --name $(KIND_CLUSTER_NAME)
 	helm repo add bitnami https://charts.bitnami.com/bitnami || true
-	helm dependency update ./charts/blob-indexer
+	helm upgrade --install blob-indexer-postgresql bitnami/postgresql \
+		--set auth.username=testuser \
+		--set auth.password=testpass \
+		--set auth.database=blobindexer \
+		--set primary.persistence.enabled=false \
+		--wait \
+		--timeout 300s
 	ct install \
 		--config charts/ct.yaml \
 		--helm-extra-set-args "--values charts/blob-indexer/values-test.yaml --set appConfig.networks[0].rpc_url=$(SEPOLIA_RPC_URL)" \

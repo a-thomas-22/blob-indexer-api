@@ -18,10 +18,9 @@ resources:
     cpu: 100m
     memory: 128Mi
 
-database:
-  sslMode: disable
-
 appConfig:
+  database:
+    url: "postgres://postgres:postgres@blob-indexer-postgresql:5432/blobindexer?sslmode=disable"
   server:
     dev_mode: true
   logging:
@@ -41,13 +40,3 @@ appConfig:
 healthCheck:
   initialDelaySeconds: 10
   periodSeconds: 5
-
-postgresql:
-  enabled: true
-  auth:
-    username: postgres
-    password: postgres
-    database: blobindexer
-  primary:
-    persistence:
-      enabled: false

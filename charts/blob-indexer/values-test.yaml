@@ -28,10 +28,9 @@ resources:
     cpu: 100m
     memory: 128Mi
 
-database:
-  sslMode: disable
-
 appConfig:
+  database:
+    url: "postgres://testuser:testpass@blob-indexer-postgresql.default.svc.cluster.local:5432/blobindexer?sslmode=disable"
   server:
     port: 8080
     dev_mode: true
@@ -54,13 +53,3 @@ healthCheck:
   path: /api/v1/status
   initialDelaySeconds: 15
   periodSeconds: 5
-
-postgresql:
-  enabled: true
-  auth:
-    username: testuser
-    password: testpass
-    database: blobindexer
-  primary:
-    persistence:
-      enabled: false

@@ -73,9 +73,6 @@ jobs:
 
       - uses: ./.github/actions/setup-chart-testing
 
-      - name: Add Bitnami repo
-        run: helm repo add bitnami https://charts.bitnami.com/bitnami
-
       - name: Run ct lint
         run: ct lint --config charts/ct.yaml
 
@@ -119,8 +116,15 @@ jobs:
           kind load docker-image blob-indexer-api:test --name chart-testing
           kind load docker-image blob-indexer-indexer:test --name chart-testing
 
-      - name: Update chart dependencies
-        run: helm dependency update charts/blob-indexer
+      - name: Install test PostgreSQL
+        run: |
+          helm upgrade --install blob-indexer-postgresql bitnami/postgresql \
+            --set auth.username=testuser \
+            --set auth.password=testpass \
+            --set auth.database=blobindexer \
+            --set primary.persistence.enabled=false \
+            --wait \
+            --timeout 300s
 
       - name: Install chart and run tests
         env:

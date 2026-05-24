@@ -4,8 +4,3 @@ description: Ethereum blob transaction indexer API
 type: application
 version: 0.2.0
 appVersion: "0.1.0"
-dependencies:
-  - name: postgresql
-    version: 18.6.7
-    repository: https://charts.bitnami.com/bitnami
-    condition: postgresql.enabled

@@ -36,6 +36,52 @@ local_resource(
     deps=['tilt-config.yaml'],
 )
 
+# === Local PostgreSQL (dev-only, outside the Helm chart) ===
+k8s_yaml("""
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blob-indexer-postgresql
+  labels:
+    app.kubernetes.io/name: blob-indexer-postgresql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: blob-indexer-postgresql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: blob-indexer-postgresql
+    spec:
+      containers:
+        - name: postgresql
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              value: postgres
+            - name: POSTGRES_DB
+              value: blobindexer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blob-indexer-postgresql
+  labels:
+    app.kubernetes.io/name: blob-indexer-postgresql
+spec:
+  selector:
+    app.kubernetes.io/name: blob-indexer-postgresql
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+""")
+
 # === Blob Indexer (via Helm chart) ===
 # Render the Helm chart with dev values. ConfigMap is managed separately above
 # for live-reload, so disable it in the chart.
@@ -89,4 +135,3 @@ local_resource(
     'echo "Development dashboard available at: http://localhost:' + port + '/api/dev/dashboard"',
     labels=['dev-tools'],
 )
-

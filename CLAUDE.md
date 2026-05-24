@@ -115,5 +115,5 @@ Managed by **release-please** (`.github/workflows/release-please.yml`). The app 
 ## Deployment
 
 - **Docker**: Two images — `Dockerfile.api` (exposes port 8080) and `Dockerfile.indexer` (no exposed port)
-- **Kubernetes**: Helm chart in `charts/blob-indexer/` with separate API and indexer deployments, PostgreSQL dependency (Bitnami)
+- **Kubernetes**: Helm chart in `charts/blob-indexer/` with separate API and indexer deployments; PostgreSQL is provided externally
 - **Tilt**: local K8s dev with hot reload (`Tiltfile` + `tilt-config.yaml`)
