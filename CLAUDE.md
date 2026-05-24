@@ -89,7 +89,7 @@ Individual checks you can run:
 
 After any code change, at minimum run: `make fmt && make lint && make test`
 
-PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `deps:`, `docs:`, `style:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`, `chore:`, `revert:`.
+PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `deps:`, `docs:`, `style:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`, `chore:`, `revert:`. Do not add assistant or tooling prefixes such as `[codex]`.
 
 ## Code Conventions
 
@@ -105,7 +105,7 @@ PR titles must follow [Conventional Commits](https://www.conventionalcommits.org
 
 Managed by **release-please** (`.github/workflows/release-please.yml`). The app and Helm chart are versioned independently.
 
-- PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `deps:`, `chore:`, etc.) — enforced by CI
+- PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `deps:`, `chore:`, etc.) without assistant/tooling prefixes such as `[codex]` — enforced by CI
 - On merge to `main`, release-please maintains a running release PR with changelog
 - Merging the release PR creates a GitHub Release + tag, which triggers Docker/Helm publish workflows
 - Config: `release-please-config.json`, `.release-please-manifest.json`
