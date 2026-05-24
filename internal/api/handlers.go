@@ -104,25 +104,31 @@ type Response struct {
 
 // BlobResponse is a response containing blob data
 type BlobResponse struct {
-	NetworkID         int       `json:"network_id"`
-	NetworkName       string    `json:"network_name,omitempty"`
-	BlockNumber       int64     `json:"block_number"`
-	BlobIndex         int       `json:"blob_index"`
-	TxHash            string    `json:"tx_hash"`
-	FromAddress       string    `json:"from_address"`
-	UserAttribution   string    `json:"user_attribution,omitempty"`
-	BlobSizeBytes     int64     `json:"blob_size_bytes"`
-	BaseFeePerBlobGas string    `json:"base_fee_per_blob_gas"`
-	TipPerBlobGas     string    `json:"tip_per_blob_gas"`
-	TotalCostETH      string    `json:"total_cost_eth"`
-	Timestamp         time.Time `json:"timestamp"`
-	Confirmed         bool      `json:"confirmed"`
-	MaxFeePerBlobGas  *string   `json:"max_fee_per_blob_gas,omitempty"`
-	BlobGasUsed       *int64    `json:"blob_gas_used,omitempty"`
-	RealizedCostWei   *string   `json:"realized_cost_wei,omitempty"`
-	MaxCostWei        *string   `json:"max_cost_wei,omitempty"`
-	HeadroomWei       *string   `json:"fee_cap_headroom_wei,omitempty"`
-	HeadroomPercent   *string   `json:"fee_cap_headroom_percent,omitempty"`
+	NetworkID             int       `json:"network_id"`
+	NetworkName           string    `json:"network_name,omitempty"`
+	BlockNumber           int64     `json:"block_number"`
+	BlobIndex             int       `json:"blob_index"`
+	TxHash                string    `json:"tx_hash"`
+	TransactionURL        string    `json:"transaction_url,omitempty"`
+	FromAddress           string    `json:"from_address"`
+	FromAddressURL        string    `json:"from_address_url,omitempty"`
+	BlockURL              string    `json:"block_url,omitempty"`
+	UserAttribution       string    `json:"user_attribution,omitempty"`
+	BlobSizeBytes         int64     `json:"blob_size_bytes"`
+	BaseFeePerBlobGas     string    `json:"base_fee_per_blob_gas"`
+	BaseFeePerBlobGasGwei string    `json:"base_fee_per_blob_gas_gwei,omitempty"`
+	TipPerBlobGas         string    `json:"tip_per_blob_gas"`
+	TipPerBlobGasGwei     string    `json:"tip_per_blob_gas_gwei,omitempty"`
+	TotalCostETH          string    `json:"total_cost_eth"`
+	Timestamp             time.Time `json:"timestamp"`
+	Confirmed             bool      `json:"confirmed"`
+	MaxFeePerBlobGas      *string   `json:"max_fee_per_blob_gas,omitempty"`
+	MaxFeePerBlobGasGwei  string    `json:"max_fee_per_blob_gas_gwei,omitempty"`
+	BlobGasUsed           *int64    `json:"blob_gas_used,omitempty"`
+	RealizedCostWei       *string   `json:"realized_cost_wei,omitempty"`
+	MaxCostWei            *string   `json:"max_cost_wei,omitempty"`
+	HeadroomWei           *string   `json:"fee_cap_headroom_wei,omitempty"`
+	HeadroomPercent       *string   `json:"fee_cap_headroom_percent,omitempty"`
 }
 
 // BlockPricingResponse represents block-level blob pricing data
@@ -135,6 +141,7 @@ type BlockPricingResponse struct {
 	BlobGasLimit       int64   `json:"blob_gas_limit"`
 	ExcessBlobGas      int64   `json:"excess_blob_gas"`
 	BlobBaseFee        string  `json:"blob_base_fee"`
+	BlobBaseFeeGwei    string  `json:"blob_base_fee_gwei,omitempty"`
 	UtilizationRatio   string  `json:"utilization_ratio"`
 	BlobParamsTarget   int     `json:"blob_params_target"`
 	BlobParamsMax      int     `json:"blob_params_max"`
@@ -173,16 +180,18 @@ type MarketPressureResponse struct {
 
 // PricingResponse is the top-level pricing API response
 type PricingResponse struct {
-	NetworkID          int                    `json:"network_id"`
-	NetworkName        string                 `json:"network_name"`
-	CurrentBaseFee     string                 `json:"current_base_fee"`
-	CurrentExcessGas   int64                  `json:"current_excess_gas"`
-	CurrentUtilization string                 `json:"current_utilization"`
-	PredictedNextFee   string                 `json:"predicted_next_fee"`
-	ForkStage          string                 `json:"fork_stage"`
-	BlobParams         BlobParamsResponse     `json:"blob_params"`
-	MarketPressure     MarketPressureResponse `json:"market_pressure"`
-	RecentBlocks       []BlockPricingResponse `json:"recent_blocks"`
+	NetworkID            int                    `json:"network_id"`
+	NetworkName          string                 `json:"network_name"`
+	CurrentBaseFee       string                 `json:"current_base_fee"`
+	CurrentBaseFeeGwei   string                 `json:"current_base_fee_gwei,omitempty"`
+	CurrentExcessGas     int64                  `json:"current_excess_gas"`
+	CurrentUtilization   string                 `json:"current_utilization"`
+	PredictedNextFee     string                 `json:"predicted_next_fee"`
+	PredictedNextFeeGwei string                 `json:"predicted_next_fee_gwei,omitempty"`
+	ForkStage            string                 `json:"fork_stage"`
+	BlobParams           BlobParamsResponse     `json:"blob_params"`
+	MarketPressure       MarketPressureResponse `json:"market_pressure"`
+	RecentBlocks         []BlockPricingResponse `json:"recent_blocks"`
 }
 
 // MempoolFeeDistributionResponse represents pending max fee distribution.
@@ -304,22 +313,30 @@ type StatusResponse struct {
 
 // toBlobResponse converts a models.Blob to a BlobResponse.
 func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
+	explorerURLs := explorerURLsForBlob(blob.NetworkID, blob.TxHash, blob.FromAddress, blob.BlockNumber, blob.Confirmed)
+
 	response := BlobResponse{
-		NetworkID:         blob.NetworkID,
-		NetworkName:       networkName,
-		BlockNumber:       blob.BlockNumber,
-		BlobIndex:         blob.BlobIndex,
-		TxHash:            blob.TxHash,
-		FromAddress:       blob.FromAddress,
-		UserAttribution:   blob.UserAttribution,
-		BlobSizeBytes:     blob.BlobSizeBytes,
-		BaseFeePerBlobGas: blob.BaseFeePerBlobGas,
-		TipPerBlobGas:     blob.TipPerBlobGas,
-		TotalCostETH:      blob.TotalCostETH,
-		Timestamp:         blob.Timestamp,
-		Confirmed:         blob.Confirmed,
-		MaxFeePerBlobGas:  blob.MaxFeePerBlobGas,
-		BlobGasUsed:       blob.BlobGasUsed,
+		NetworkID:             blob.NetworkID,
+		NetworkName:           networkName,
+		BlockNumber:           blob.BlockNumber,
+		BlobIndex:             blob.BlobIndex,
+		TxHash:                blob.TxHash,
+		TransactionURL:        explorerURLs.Transaction,
+		FromAddress:           blob.FromAddress,
+		FromAddressURL:        explorerURLs.Address,
+		BlockURL:              explorerURLs.Block,
+		UserAttribution:       blob.UserAttribution,
+		BlobSizeBytes:         blob.BlobSizeBytes,
+		BaseFeePerBlobGas:     blob.BaseFeePerBlobGas,
+		BaseFeePerBlobGasGwei: formatWeiAsGwei(blob.BaseFeePerBlobGas),
+		TipPerBlobGas:         blob.TipPerBlobGas,
+		TipPerBlobGasGwei:     formatWeiAsGwei(blob.TipPerBlobGas),
+		TotalCostETH:          blob.TotalCostETH,
+		Timestamp:             blob.Timestamp,
+		Confirmed:             blob.Confirmed,
+		MaxFeePerBlobGas:      blob.MaxFeePerBlobGas,
+		MaxFeePerBlobGasGwei:  formatOptionalWeiAsGwei(blob.MaxFeePerBlobGas),
+		BlobGasUsed:           blob.BlobGasUsed,
 	}
 	response.RealizedCostWei, response.MaxCostWei, response.HeadroomWei, response.HeadroomPercent = deriveBlobCostFields(blob)
 	return response
@@ -408,6 +425,7 @@ func toBlockPricingResponse(m models.BlockMetrics) BlockPricingResponse {
 		BlobGasLimit:       m.BlobGasLimit,
 		ExcessBlobGas:      m.ExcessBlobGas,
 		BlobBaseFee:        m.BlobBaseFee,
+		BlobBaseFeeGwei:    formatWeiAsGwei(m.BlobBaseFee),
 		UtilizationRatio:   m.UtilizationRatio,
 		BlobParamsTarget:   m.BlobParamsTarget,
 		BlobParamsMax:      m.BlobParamsMax,
@@ -1167,6 +1185,7 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 		bp := blobparams.GetBlobParams(cfg, latestTime)
 
 		resp.CurrentBaseFee = latest.BlobBaseFee
+		resp.CurrentBaseFeeGwei = formatWeiAsGwei(latest.BlobBaseFee)
 		resp.CurrentExcessGas = latest.ExcessBlobGas
 		resp.CurrentUtilization = latest.UtilizationRatio
 		resp.ForkStage = blobparams.ForkName(
@@ -1183,6 +1202,7 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 
 		// Predict next base fee
 		resp.PredictedNextFee = predictNextBlockBlobFee(cfg, latest, effectiveBlobTargetGas(latest, bp)).String()
+		resp.PredictedNextFeeGwei = formatWeiAsGwei(resp.PredictedNextFee)
 	}
 
 	a.respondSuccess(w, resp)

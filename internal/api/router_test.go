@@ -1744,6 +1744,18 @@ func TestGetBlobPricing_Success(t *testing.T) {
 	if !resp.Success {
 		t.Error("expected Success=true")
 	}
+	if got := resp.Data.CurrentBaseFeeGwei; got != "0.000000001" {
+		t.Fatalf("current_base_fee_gwei = %v, want 0.000000001", got)
+	}
+	if got := resp.Data.PredictedNextFeeGwei; got == "" {
+		t.Fatalf("predicted_next_fee_gwei = %v, want non-empty", got)
+	}
+	if len(resp.Data.RecentBlocks) == 0 {
+		t.Fatal("expected at least one recent block")
+	}
+	if got := resp.Data.RecentBlocks[0].BlobBaseFeeGwei; got != "0.000000001" {
+		t.Fatalf("blob_base_fee_gwei = %v, want 0.000000001", got)
+	}
 	if resp.Data.MarketPressure.PredictedDirection != marketPressureDirectionFlat {
 		t.Errorf("expected flat market pressure direction, got %q", resp.Data.MarketPressure.PredictedDirection)
 	}

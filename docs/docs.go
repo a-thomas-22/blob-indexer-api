@@ -1061,6 +1061,9 @@ const docTemplate = `{
                 "base_fee_per_blob_gas": {
                     "type": "string"
                 },
+                "base_fee_per_blob_gas_gwei": {
+                    "type": "string"
+                },
                 "blob_gas_used": {
                     "type": "integer"
                 },
@@ -1072,6 +1075,9 @@ const docTemplate = `{
                 },
                 "block_number": {
                     "type": "integer"
+                },
+                "block_url": {
+                    "type": "string"
                 },
                 "confirmed": {
                     "type": "boolean"
@@ -1085,10 +1091,16 @@ const docTemplate = `{
                 "from_address": {
                     "type": "string"
                 },
+                "from_address_url": {
+                    "type": "string"
+                },
                 "max_cost_wei": {
                     "type": "string"
                 },
                 "max_fee_per_blob_gas": {
+                    "type": "string"
+                },
+                "max_fee_per_blob_gas_gwei": {
                     "type": "string"
                 },
                 "network_id": {
@@ -1106,7 +1118,13 @@ const docTemplate = `{
                 "tip_per_blob_gas": {
                     "type": "string"
                 },
+                "tip_per_blob_gas_gwei": {
+                    "type": "string"
+                },
                 "total_cost_eth": {
+                    "type": "string"
+                },
+                "transaction_url": {
                     "type": "string"
                 },
                 "tx_hash": {
@@ -1124,6 +1142,9 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "blob_base_fee": {
+                    "type": "string"
+                },
+                "blob_base_fee_gwei": {
                     "type": "string"
                 },
                 "blob_count": {
@@ -1412,6 +1433,9 @@ const docTemplate = `{
                 "current_base_fee": {
                     "type": "string"
                 },
+                "current_base_fee_gwei": {
+                    "type": "string"
+                },
                 "current_excess_gas": {
                     "type": "integer"
                 },
@@ -1431,6 +1455,9 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "predicted_next_fee": {
+                    "type": "string"
+                },
+                "predicted_next_fee_gwei": {
                     "type": "string"
                 },
                 "recent_blocks": {
