@@ -8,17 +8,18 @@ indexer:
   replicaCount: 1
 
 image:
-  repository: ghcr.io/a-thomas-22/blob-indexer-api-api
+  registry: registry.ahkc.win
+  repository: a-thomas-22/blob-indexer-api-api
   pullPolicy: Always
   tag: ""  # Set via --set image.tag=<sha> in CI
 
 api:
   image:
-    repository: ghcr.io/a-thomas-22/blob-indexer-api-api
+    repository: a-thomas-22/blob-indexer-api-api
 
 indexer:
   image:
-    repository: ghcr.io/a-thomas-22/blob-indexer-api-indexer
+    repository: a-thomas-22/blob-indexer-api-indexer
 
 resources:
   limits:
