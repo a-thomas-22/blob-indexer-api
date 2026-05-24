@@ -18,6 +18,64 @@ const (
 		LIMIT $2 OFFSET $3
 	`
 
+	// queryMempoolPressure computes bounded aggregate pressure metrics for pending blobs.
+	queryMempoolPressure = `
+		WITH limited_pending AS (
+			SELECT
+				from_address,
+				timestamp,
+				max_fee_per_blob_gas,
+				COALESCE(blob_gas_used, blob_size_bytes / 128, 0) AS blob_gas_used
+			FROM blobs
+			WHERE confirmed = false AND network_id = $1
+			ORDER BY timestamp DESC
+			LIMIT $2
+		),
+		pending AS (
+			SELECT * FROM limited_pending
+			ORDER BY timestamp DESC
+			LIMIT $3
+		)
+		SELECT
+			COUNT(*) AS pending_blob_count,
+			COALESCE(SUM(blob_gas_used), 0)::bigint AS pending_blob_gas,
+			COUNT(DISTINCT from_address) AS pending_unique_senders,
+			COALESCE(MIN(max_fee_per_blob_gas::numeric) FILTER (WHERE max_fee_per_blob_gas IS NOT NULL), 0::numeric) AS max_fee_min,
+			COALESCE(AVG(max_fee_per_blob_gas::numeric) FILTER (WHERE max_fee_per_blob_gas IS NOT NULL), 0::numeric) AS max_fee_avg,
+			COALESCE(PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY max_fee_per_blob_gas::numeric) FILTER (WHERE max_fee_per_blob_gas IS NOT NULL), 0::numeric) AS max_fee_median,
+			COALESCE(PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY max_fee_per_blob_gas::numeric) FILTER (WHERE max_fee_per_blob_gas IS NOT NULL), 0::numeric) AS max_fee_p95,
+			COALESCE(MAX(max_fee_per_blob_gas::numeric) FILTER (WHERE max_fee_per_blob_gas IS NOT NULL), 0::numeric) AS max_fee_max,
+			COALESCE(GREATEST(EXTRACT(EPOCH FROM (statement_timestamp() - MIN(timestamp))), 0), 0)::double precision AS oldest_age_seconds,
+			COALESCE(GREATEST(EXTRACT(EPOCH FROM (statement_timestamp() - MAX(timestamp))), 0), 0)::double precision AS newest_age_seconds,
+			COALESCE(AVG(GREATEST(EXTRACT(EPOCH FROM (statement_timestamp() - timestamp)), 0)), 0)::double precision AS average_age_seconds,
+			MIN(timestamp) AS oldest_timestamp,
+			MAX(timestamp) AS newest_timestamp,
+			COUNT(*) FILTER (
+				WHERE $4::numeric IS NOT NULL
+					AND max_fee_per_blob_gas IS NOT NULL
+					AND max_fee_per_blob_gas::numeric >= $4::numeric
+			) AS likely_includable_count,
+			COUNT(*) FILTER (
+				WHERE $4::numeric IS NOT NULL
+					AND max_fee_per_blob_gas IS NOT NULL
+					AND max_fee_per_blob_gas::numeric < $4::numeric
+			) AS underpriced_count,
+			COUNT(*) FILTER (
+				WHERE $4::numeric IS NULL
+					OR max_fee_per_blob_gas IS NULL
+			) AS unknown_pricing_count,
+			EXISTS (SELECT 1 FROM limited_pending OFFSET $3) AS sample_truncated
+		FROM pending
+	`
+
+	// queryLatestBlobBaseFee retrieves the newest indexed blob base fee for includability estimates.
+	queryLatestBlobBaseFee = `
+		SELECT blob_base_fee FROM block_metrics
+		WHERE network_id = $1
+		ORDER BY block_number DESC
+		LIMIT 1
+	`
+
 	// queryBlobByTxHash retrieves a single blob by transaction hash and network.
 	queryBlobByTxHash = "SELECT " + blobSelectColumns + " FROM blobs WHERE tx_hash = $1 AND network_id = $2"
 
