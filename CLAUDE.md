@@ -27,7 +27,7 @@ Two separate binaries:
 - **API server** (`cmd/api/main.go`): HTTP server serving REST endpoints. Reads blob data and indexer status from PostgreSQL.
 - **Indexer** (`cmd/indexer/main.go`): Connects to Ethereum RPC nodes, indexes blob transactions, writes to PostgreSQL.
 
-Both share the same database. Production deployments run migrations with the dedicated migration runner/Helm hook before app pods start. Runtime binaries only run migrations when `database.run_migrations: true` is explicitly configured, which is intended for local development.
+Both share the same database. Production deployments run migrations with the dedicated migration runner: Helm uses a pre-install/pre-upgrade hook for external databases and init containers when the chart owns PostgreSQL. Runtime binaries only run migrations when `database.run_migrations: true` is explicitly configured, which is intended for local development.
 
 ### Key Packages
 
@@ -44,7 +44,7 @@ Both share the same database. Production deployments run migrations with the ded
 ### Database
 
 - PostgreSQL with golang-migrate (migrations in `internal/db/migrations/`)
-- Migrations run via `cmd/migrate`, `make db-migrate`, the Helm migration hook, or local `database.run_migrations: true`
+- Migrations run via `cmd/migrate`, `make db-migrate`, Helm-managed migration containers, or local `database.run_migrations: true`
 - Key tables: `blobs`, `networks`, `blob_users`, `indexer_metadata`, `indexed_blocks`, `block_metrics`
 - Connection pooling: 25 max open, 10 idle
 
