@@ -189,7 +189,7 @@ const (
 				b.user_attribution,
 				b.total_cost_eth,
 				b.timestamp,
-				bu.name AS known_name
+				bu.id AS known_user_id
 			FROM blobs b
 			LEFT JOIN blob_users bu
 				ON bu.network_id = b.network_id
@@ -211,7 +211,8 @@ const (
 				MAX(timestamp) AS last_timestamp
 			FROM filtered_blobs
 			GROUP BY from_address
-			HAVING COALESCE(NULLIF(MAX(BTRIM(user_attribution)), ''), NULLIF(MAX(BTRIM(known_name)), ''), '') = ''
+			HAVING NULLIF(MAX(BTRIM(user_attribution)), '') IS NULL
+				AND MAX(known_user_id) IS NULL
 		),
 		totals AS (
 			SELECT

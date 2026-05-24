@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,6 +143,18 @@ func TestGetTopUnattributedBlobUsers_SortSpendWindow(t *testing.T) {
 	}
 	if resp.Data[0].Address != "0xunknown" || resp.Data[0].Name != "" || resp.Data[0].BlobCount != 12 {
 		t.Fatalf("unexpected unattributed user: %+v", resp.Data[0])
+	}
+}
+
+func TestTopUnattributedBlobUsersQueryUsesKnownUserRowExistence(t *testing.T) {
+	if !strings.Contains(queryTopUnattributedBlobUsersWithOptions, "bu.id AS known_user_id") {
+		t.Fatal("expected unattributed query to select a known user row marker")
+	}
+	if !strings.Contains(queryTopUnattributedBlobUsersWithOptions, "MAX(known_user_id) IS NULL") {
+		t.Fatal("expected unattributed query to filter by known user row existence")
+	}
+	if strings.Contains(queryTopUnattributedBlobUsersWithOptions, "known_name") {
+		t.Fatal("unattributed query should not use known user name content as the row-existence check")
 	}
 }
 
