@@ -1407,6 +1407,18 @@ func TestGetBlobPricing_Success(t *testing.T) {
 	if !resp.Success {
 		t.Error("expected Success=true")
 	}
+	data := resp.Data.(map[string]interface{})
+	if got := data["current_base_fee_gwei"]; got != "0.000000001" {
+		t.Fatalf("current_base_fee_gwei = %v, want 0.000000001", got)
+	}
+	if got := data["predicted_next_fee_gwei"]; got == "" || got == nil {
+		t.Fatalf("predicted_next_fee_gwei = %v, want non-empty", got)
+	}
+	recentBlocks := data["recent_blocks"].([]interface{})
+	block := recentBlocks[0].(map[string]interface{})
+	if got := block["blob_base_fee_gwei"]; got != "0.000000001" {
+		t.Fatalf("blob_base_fee_gwei = %v, want 0.000000001", got)
+	}
 }
 
 func TestGetBlobPricing_EmptyMetrics(t *testing.T) {
