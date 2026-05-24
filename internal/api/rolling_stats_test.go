@@ -1,0 +1,189 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
+)
+
+func TestParseRollingStatsWindows_Defaults(t *testing.T) {
+	windows, err := parseRollingStatsWindows("")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	wantLabels := []string{"5m", "1h", "24h", "7d"}
+	if len(windows) != len(wantLabels) {
+		t.Fatalf("expected %d windows, got %d", len(wantLabels), len(windows))
+	}
+	for i, want := range wantLabels {
+		if windows[i].Label != want {
+			t.Errorf("window %d label = %q, want %q", i, windows[i].Label, want)
+		}
+	}
+}
+
+func TestParseRollingStatsWindows_Custom(t *testing.T) {
+	windows, err := parseRollingStatsWindows(" 15M,2h,3d ")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	want := []statsWindowSpec{
+		{Label: "15m", Duration: 15 * time.Minute},
+		{Label: "2h", Duration: 2 * time.Hour},
+		{Label: "3d", Duration: 3 * 24 * time.Hour},
+	}
+	if len(windows) != len(want) {
+		t.Fatalf("expected %d windows, got %d", len(want), len(windows))
+	}
+	for i := range want {
+		if windows[i] != want[i] {
+			t.Errorf("window %d = %+v, want %+v", i, windows[i], want[i])
+		}
+	}
+}
+
+func TestParseRollingStatsWindows_Invalid(t *testing.T) {
+	tests := []string{
+		"0m",
+		"5x",
+		"1.5h",
+		"31d",
+		"5m,5m",
+		"1m,2m,3m,4m,5m,6m,7m,8m,9m",
+	}
+
+	for _, tt := range tests {
+		t.Run(tt, func(t *testing.T) {
+			if _, err := parseRollingStatsWindows(tt); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
+func TestGetRollingStatsWindows_Success(t *testing.T) {
+	now := time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC)
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if query != queryRollingStatsWindows {
+				t.Fatalf("unexpected query: %s", query)
+			}
+			if len(args) != 4 {
+				t.Fatalf("expected 4 args, got %d", len(args))
+			}
+			if args[0] != 42 {
+				t.Fatalf("expected network arg 42, got %v", args[0])
+			}
+			setSliceResult(dest, []rollingStatsWindowRow{
+				{
+					Window:             "1h",
+					DurationSeconds:    3600,
+					StartTime:          now.Add(-time.Hour),
+					EndTime:            now,
+					AverageBlobBaseFee: "100",
+					MedianBlobBaseFee:  "90",
+					P95BlobBaseFee:     "150",
+					TotalBlobs:         12,
+					TotalBlobGasUsed:   1572864,
+					AverageUtilization: "0.750000",
+					TotalCostETH:       "0.0123",
+					UniqueSenders:      3,
+				},
+			})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=testnet&windows=1h", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetRollingStatsWindows(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Success bool                 `json:"success"`
+		Data    RollingStatsResponse `json:"data"`
+		Error   string               `json:"error,omitempty"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("expected success response, got error %q", resp.Error)
+	}
+	if resp.Data.NetworkID != 42 || resp.Data.NetworkName != "testnet" {
+		t.Fatalf("unexpected network in response: %+v", resp.Data)
+	}
+	if len(resp.Data.Windows) != 1 {
+		t.Fatalf("expected 1 window, got %d", len(resp.Data.Windows))
+	}
+	window := resp.Data.Windows[0]
+	if window.Window != "1h" || window.TotalBlobs != 12 || window.TotalBlobGasUsed != 1572864 {
+		t.Fatalf("unexpected window response: %+v", window)
+	}
+	if window.AverageBlobBaseFee != "100" || window.MedianBlobBaseFee != "90" || window.P95BlobBaseFee != "150" {
+		t.Fatalf("unexpected base fee stats: %+v", window)
+	}
+	if window.AverageUtilization != "0.750000" || window.TotalCostETH != "0.0123" || window.UniqueSenders != 3 {
+		t.Fatalf("unexpected market stats: %+v", window)
+	}
+}
+
+func TestGetRollingStatsWindows_InvalidWindows(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			t.Fatal("database should not be queried for invalid windows")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?windows=0m", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetRollingStatsWindows(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetRollingStatsWindows_BadNetwork(t *testing.T) {
+	a := newTestAPI()
+	a.networks = map[int]config.NetworkConfig{}
+	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetRollingStatsWindows(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetRollingStatsWindows_DBError(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return fmt.Errorf("db error")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetRollingStatsWindows(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
