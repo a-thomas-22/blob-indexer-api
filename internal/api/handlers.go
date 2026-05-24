@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -104,6 +105,10 @@ type BlobResponse struct {
 	Confirmed         bool      `json:"confirmed"`
 	MaxFeePerBlobGas  *string   `json:"max_fee_per_blob_gas,omitempty"`
 	BlobGasUsed       *int64    `json:"blob_gas_used,omitempty"`
+	RealizedCostWei   *string   `json:"realized_cost_wei,omitempty"`
+	MaxCostWei        *string   `json:"max_cost_wei,omitempty"`
+	HeadroomWei       *string   `json:"fee_cap_headroom_wei,omitempty"`
+	HeadroomPercent   *string   `json:"fee_cap_headroom_percent,omitempty"`
 }
 
 // BlockPricingResponse represents block-level blob pricing data
@@ -187,7 +192,7 @@ type StatusResponse struct {
 
 // toBlobResponse converts a models.Blob to a BlobResponse.
 func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
-	return BlobResponse{
+	response := BlobResponse{
 		NetworkID:         blob.NetworkID,
 		NetworkName:       networkName,
 		BlockNumber:       blob.BlockNumber,
@@ -204,6 +209,61 @@ func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
 		MaxFeePerBlobGas:  blob.MaxFeePerBlobGas,
 		BlobGasUsed:       blob.BlobGasUsed,
 	}
+	response.RealizedCostWei, response.MaxCostWei, response.HeadroomWei, response.HeadroomPercent = deriveBlobCostFields(blob)
+	return response
+}
+
+func deriveBlobCostFields(blob models.Blob) (realizedCostWei, maxCostWei, headroomWei, headroomPercent *string) {
+	if blob.BlobGasUsed == nil || *blob.BlobGasUsed < 0 {
+		return nil, nil, nil, nil
+	}
+
+	blobGasUsed := big.NewInt(*blob.BlobGasUsed)
+
+	var realizedCost *big.Int
+	if baseFeePerBlobGas, ok := parseNonNegativeDecimalInt(blob.BaseFeePerBlobGas); ok {
+		realizedCost = new(big.Int).Mul(baseFeePerBlobGas, blobGasUsed)
+		realizedCostStr := realizedCost.String()
+		realizedCostWei = &realizedCostStr
+	}
+
+	if blob.MaxFeePerBlobGas == nil {
+		return realizedCostWei, nil, nil, nil
+	}
+	maxFeePerBlobGas, ok := parseNonNegativeDecimalInt(*blob.MaxFeePerBlobGas)
+	if !ok {
+		return realizedCostWei, nil, nil, nil
+	}
+
+	maxCost := new(big.Int).Mul(maxFeePerBlobGas, blobGasUsed)
+	maxCostStr := maxCost.String()
+	maxCostWei = &maxCostStr
+
+	if realizedCost == nil {
+		return realizedCostWei, maxCostWei, nil, nil
+	}
+
+	headroom := new(big.Int).Sub(maxCost, realizedCost)
+	headroomStr := headroom.String()
+	headroomWei = &headroomStr
+
+	if maxCost.Sign() == 0 {
+		return realizedCostWei, maxCostWei, headroomWei, nil
+	}
+	percentNumerator := new(big.Int).Mul(headroom, big.NewInt(100))
+	percent := new(big.Rat).SetFrac(percentNumerator, maxCost)
+	percentStr := percent.FloatString(6)
+	headroomPercent = &percentStr
+
+	return realizedCostWei, maxCostWei, headroomWei, headroomPercent
+}
+
+func parseNonNegativeDecimalInt(value string) (*big.Int, bool) {
+	rat, ok := new(big.Rat).SetString(strings.TrimSpace(value))
+	if !ok || rat.Sign() < 0 || rat.Denom().Cmp(big.NewInt(1)) != 0 {
+		return nil, false
+	}
+	return new(big.Int).Set(rat.Num()), true
 }
 
 func toBlockPricingResponse(m models.BlockMetrics) BlockPricingResponse {
