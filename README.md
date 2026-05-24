@@ -233,6 +233,17 @@ helm install blob-indexer ./charts/blob-indexer \
   --set appConfig.networks[0].enabled=true
 ```
 
+For GitOps installs with an externally managed database Secret, disable Secret creation and point the chart at the existing key. The API, indexer, and migration Job all use the same Secret by default:
+
+```yaml
+migrations:
+  enabled: true
+databaseSecret:
+  create: false
+  name: prod-blob-indexer-blob-indexer-db
+  key: DB_URL
+```
+
 For multi-replica deployments, configure edge rate limiting on Ingress so limits are enforced across all pods. Set `ingress.annotations` in Helm values (for example with NGINX: `nginx.ingress.kubernetes.io/limit-rps` and `nginx.ingress.kubernetes.io/limit-burst-multiplier`).
 
 ## Releases
