@@ -44,19 +44,20 @@ Both share the same database and run migrations on startup.
 
 - PostgreSQL with golang-migrate (migrations in `internal/db/migrations/`)
 - Migrations run automatically on startup
-- Key tables: `blobs`, `networks`, `blob_users`, `indexer_metadata`, `indexed_blocks`
+- Key tables: `blobs`, `networks`, `blob_users`, `indexer_metadata`, `indexed_blocks`, `block_metrics`
 - Connection pooling: 25 max open, 10 idle
 
 ### API Routes
 
-All routes under `/api`. Network selected via `?network=` query param (name or chain ID).
+Canonical routes are under `/api/v1`. Legacy `/api/*` paths redirect to `/api/v1/*`. Network selected via `?network=` query param (name or chain ID).
 
-- `/api/networks`, `/api/networks/{chainId}` — network listing and status
-- `/api/blob/latest`, `/api/blob/mempool`, `/api/blob/{txHash}` — blob queries
-- `/api/users` — top blob users
-- `/api/stats` — historical stats
-- `/api/status` — indexer status
-- `/api/dev/*` — development/debug endpoints (metrics, dashboard, logs, queries)
+- `/api/v1/ws` — WebSocket updates
+- `/api/v1/networks`, `/api/v1/networks/{chainId}` — network listing and status
+- `/api/v1/blob/latest`, `/api/v1/blob/mempool`, `/api/v1/blob/pricing`, `/api/v1/blob/{txHash}` — blob queries
+- `/api/v1/users` — top blob users
+- `/api/v1/stats` — historical stats
+- `/api/v1/status` — indexer status
+- `/api/v1/dev/*` — development/debug endpoints (metrics, dashboard, logs, queries), gated by `server.dev_mode` and optional `server.dev_api_key`
 - `/swagger/*` — Swagger UI
 
 ### Configuration
@@ -92,7 +93,7 @@ PR titles must follow [Conventional Commits](https://www.conventionalcommits.org
 ## Code Conventions
 
 - Go module: `github.com/a-thomas-22/blob-indexer-api`
-- Go 1.24
+- Go 1.26.1
 - HTTP framework: Chi v5 with middleware stack (RequestID, RealIP, rate limit, logging, recovery, timeout, CORS)
 - Database queries: sqlx with `lib/pq` driver
 - Logging: use `logger.Info/Error/Fatal/Debug` (Zap wrapper in `internal/logger/`)
