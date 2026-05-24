@@ -30,14 +30,20 @@ def find_doc(docs, kind, name)
 end
 
 def db_url_ref(doc)
-  containers = doc.dig("spec", "template", "spec", "containers") || []
-  env = containers.flat_map { |container| container["env"] || [] }.find { |item| item["name"] == "DB_URL" }
-  raise "DB_URL env var missing in #{doc.dig("kind")} #{doc.dig("metadata", "name")}" unless env
+  env = db_url_env(doc)
 
   ref = env.dig("valueFrom", "secretKeyRef")
   raise "DB_URL is not sourced from a Secret in #{doc.dig("kind")} #{doc.dig("metadata", "name")}" unless ref
 
   [ref["name"], ref["key"]]
+end
+
+def db_url_env(doc)
+  containers = doc.dig("spec", "template", "spec", "containers") || []
+  env = containers.flat_map { |container| container["env"] || [] }.find { |item| item["name"] == "DB_URL" }
+  raise "DB_URL env var missing in #{doc.dig("kind")} #{doc.dig("metadata", "name")}" unless env
+
+  env
 end
 
 def assert_equal(label, expected, actual)
@@ -52,7 +58,14 @@ job = find_doc(docs, "Job", "#{fullname}-migrate") || raise("Migration Job missi
 
 assert_equal("API DB Secret ref", [app_secret, app_key], db_url_ref(api))
 assert_equal("Indexer DB Secret ref", [app_secret, app_key], db_url_ref(indexer))
-assert_equal("Migration DB Secret ref", [migration_secret, migration_key], db_url_ref(job))
+
+if migration_secret == "__literal__"
+  migration_env = db_url_env(job)
+  raise "Expected migration DB_URL to use a literal value" unless migration_env["value"]
+  raise "Did not expect migration DB_URL to use a Secret" if migration_env.dig("valueFrom", "secretKeyRef")
+else
+  assert_equal("Migration DB Secret ref", [migration_secret, migration_key], db_url_ref(job))
+end
 
 created_secret = find_doc(docs, "Secret", app_secret)
 if expect_created_secret == "true"
@@ -70,7 +83,7 @@ trap 'rm -rf "$tmp_dir"' EXIT
 chart_created="$tmp_dir/chart-created.yaml"
 render "$chart_created" \
   --set-string appConfig.database.url="postgres://user:pass@postgres:5432/blobindexer?sslmode=require"
-assert_rendered_refs "$chart_created" "${FULLNAME}-db" "DB_URL" "${FULLNAME}-db" "DB_URL" "true"
+assert_rendered_refs "$chart_created" "${FULLNAME}-db" "DB_URL" "__literal__" "" "true"
 
 external_secret="$tmp_dir/external-secret.yaml"
 render "$external_secret" \

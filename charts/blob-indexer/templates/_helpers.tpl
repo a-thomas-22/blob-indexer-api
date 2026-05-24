@@ -62,6 +62,17 @@ Service account name
 {{- end }}
 
 {{/*
+Database URL used by migration containers when the DB Secret is chart-created.
+*/}}
+{{- define "blob-indexer.migrationDatabaseURL" -}}
+{{- $dbURL := .Values.appConfig.database.url -}}
+{{- if .Values.externalDatabase.url -}}
+{{- $dbURL = .Values.externalDatabase.url -}}
+{{- end -}}
+{{- $dbURL -}}
+{{- end }}
+
+{{/*
 Database Secret name used by the API and indexer.
 */}}
 {{- define "blob-indexer.applicationDatabaseSecretName" -}}
@@ -95,6 +106,15 @@ Database Secret key used by migration containers.
 */}}
 {{- define "blob-indexer.databaseSecretKey" -}}
 {{- default (include "blob-indexer.applicationDatabaseSecretKey" .) .Values.migrations.databaseSecret.key -}}
+{{- end }}
+
+{{/*
+Whether migration containers should read DB_URL from a Secret.
+*/}}
+{{- define "blob-indexer.useMigrationDatabaseSecret" -}}
+{{- if or .Values.migrations.databaseSecret.name (not .Values.databaseSecret.create) -}}
+true
+{{- end -}}
 {{- end }}
 
 {{/*
