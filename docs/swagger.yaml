@@ -188,6 +188,46 @@ definitions:
       success:
         type: boolean
     type: object
+  api.RollingStatsResponse:
+    properties:
+      generated_at:
+        type: string
+      network_id:
+        type: integer
+      network_name:
+        type: string
+      windows:
+        items:
+          $ref: '#/definitions/api.RollingWindowStats'
+        type: array
+    type: object
+  api.RollingWindowStats:
+    properties:
+      average_blob_base_fee:
+        type: string
+      average_utilization:
+        type: string
+      duration_seconds:
+        type: integer
+      end_time:
+        type: string
+      median_blob_base_fee:
+        type: string
+      p95_blob_base_fee:
+        type: string
+      start_time:
+        type: string
+      total_blob_gas_used:
+        type: integer
+      total_blobs:
+        type: integer
+      total_cost_eth:
+        type: string
+      unique_senders:
+        type: integer
+      window:
+        type: string
+    type: object
   api.StatsResponse:
     properties:
       average_base_fee:
@@ -670,6 +710,44 @@ paths:
           schema:
             $ref: '#/definitions/api.Response'
       summary: Get blob statistics
+      tags:
+      - stats
+  /stats/windows:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve rolling time-window statistics for blob market dashboards
+      parameters:
+      - description: 'Network name or chain ID (default: first enabled network)'
+        in: query
+        name: network
+        type: string
+      - description: 'Comma-separated rolling windows using m/h/d units (default:
+          5m,1h,24h,7d; max 8 windows, max 30d each)'
+        in: query
+        name: windows
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.RollingStatsResponse'
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get rolling blob market statistics
       tags:
       - stats
   /status:

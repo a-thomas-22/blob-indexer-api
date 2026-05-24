@@ -50,6 +50,61 @@ const (
 		WHERE network_id = $1
 	`
 
+	// queryRollingStatsWindows computes time-windowed blob market statistics.
+	queryRollingStatsWindows = `
+		WITH requested_windows AS (
+			SELECT window_label, duration_seconds, ord
+			FROM unnest($2::text[], $3::bigint[]) WITH ORDINALITY AS u(window_label, duration_seconds, ord)
+		),
+		window_bounds AS (
+			SELECT
+				window_label,
+				duration_seconds,
+				ord,
+				$4::timestamp - (duration_seconds * INTERVAL '1 second') AS start_time,
+				$4::timestamp AS end_time
+			FROM requested_windows
+		)
+		SELECT
+			wb.window_label AS stats_window,
+			wb.duration_seconds,
+			wb.start_time,
+			wb.end_time,
+			bs.average_blob_base_fee,
+			bs.median_blob_base_fee,
+			bs.p95_blob_base_fee,
+			bs.total_blobs,
+			bs.total_blob_gas_used,
+			bs.total_cost_eth,
+			bs.unique_senders,
+			bms.average_utilization
+		FROM window_bounds wb
+		LEFT JOIN LATERAL (
+			SELECT
+				COUNT(*) AS total_blobs,
+				COALESCE(SUM(COALESCE(b.blob_gas_used, 0)), 0) AS total_blob_gas_used,
+				COALESCE(SUM(b.total_cost_eth::numeric), 0) AS total_cost_eth,
+				COUNT(DISTINCT b.from_address) AS unique_senders,
+				COALESCE(AVG(b.base_fee_per_blob_gas::numeric), 0) AS average_blob_base_fee,
+				COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY b.base_fee_per_blob_gas::numeric), 0) AS median_blob_base_fee,
+				COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY b.base_fee_per_blob_gas::numeric), 0) AS p95_blob_base_fee
+			FROM blobs b
+			WHERE b.network_id = $1
+				AND b.confirmed = true
+				AND b.timestamp >= wb.start_time
+				AND b.timestamp < wb.end_time
+		) bs ON true
+		LEFT JOIN LATERAL (
+			SELECT
+				COALESCE(AVG(bm.utilization_ratio::numeric), 0) AS average_utilization
+			FROM block_metrics bm
+			WHERE bm.network_id = $1
+				AND bm.block_timestamp >= wb.start_time
+				AND bm.block_timestamp < wb.end_time
+		) bms ON true
+		ORDER BY wb.ord
+	`
+
 	// queryBlockMetrics retrieves recent block metrics for pricing data.
 	queryBlockMetrics = `
 		SELECT ` + blockMetricsSelectColumns + ` FROM block_metrics
