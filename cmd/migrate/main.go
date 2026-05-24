@@ -17,8 +17,6 @@ func run() int {
 	logger.Initialize()
 	defer func() { _ = logger.Sync() }()
 
-	logger.InitializeWithConfig(os.Getenv("LOG_LEVEL"), os.Getenv("LOG_FORMAT"))
-
 	dbURL := os.Getenv("DB_URL")
 	if dbURL == "" {
 		logger.Fatal("DB_URL is required")
