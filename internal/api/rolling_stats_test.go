@@ -20,7 +20,7 @@ func TestParseRollingStatsWindows_Defaults(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	wantLabels := []string{"5m", "1h", "24h", "7d"}
+	wantLabels := []string{"5m", "1h", apiWindow24h, "7d"}
 	if len(windows) != len(wantLabels) {
 		t.Fatalf("expected %d windows, got %d", len(wantLabels), len(windows))
 	}

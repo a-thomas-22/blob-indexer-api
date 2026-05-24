@@ -52,15 +52,13 @@ jobs:
         with:
           go-version: "1.26"
 
-      - name: Check generated Swagger docs
+      - name: Generate Swagger docs
         run: |
           set -euo pipefail
           make swagger
-          if [ -n "$(git diff -- docs)" ]; then
-            echo "::error::Swagger docs are out of date. Run 'make swagger' and commit the generated docs."
-            git diff -- docs
-            exit 1
-          fi
+          test -s docs/docs.go
+          test -s docs/swagger.json
+          test -s docs/swagger.yaml
 
   lint:
     name: Lint
@@ -71,6 +69,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
+
+      - name: Generate Swagger docs
+        run: make swagger
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
@@ -90,6 +91,9 @@ jobs:
 
       - name: Download dependencies
         run: go mod download
+
+      - name: Generate Swagger docs
+        run: make swagger
 
       - name: Run tests with coverage
         run: go test -v -coverprofile=coverage.out -covermode=atomic ./internal/... ./docs
@@ -128,6 +132,9 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Generate Swagger docs
+        run: make swagger
+
       - name: Run tests with race detector
         run: go test -race -v ./...
 
@@ -145,6 +152,9 @@ jobs:
 
       - name: Download dependencies
         run: go mod download
+
+      - name: Generate Swagger docs
+        run: make swagger
 
       - name: Build API
         env:
@@ -173,6 +183,9 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Generate Swagger docs
+        run: make swagger
+
       - name: Run go vet
         run: go vet ./...
 
@@ -188,6 +201,9 @@ jobs:
 
       - name: Download dependencies
         run: go mod download
+
+      - name: Generate Swagger docs
+        run: make swagger
 
       - name: Install staticcheck
         run: go install honnef.co/go/tools/cmd/staticcheck@latest
@@ -208,6 +224,9 @@ jobs:
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Generate Swagger docs
+        run: make swagger
 
       - name: Run govulncheck
         run: govulncheck ./...

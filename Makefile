@@ -1,4 +1,4 @@
-.PHONY: build build-api build-indexer build-migrate run-api run-indexer test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall ci staticcheck chart-template-test chart-lint chart-test chart-test-run kind-create kind-delete
+.PHONY: build build-api build-indexer build-migrate run-api run-indexer test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall ci staticcheck swagger chart-template-test chart-lint chart-test chart-test-run kind-create kind-delete
 
 # Go parameters
 GOCMD=go
@@ -19,7 +19,7 @@ all: test build
 
 build: build-api build-indexer
 
-build-api:
+build-api: swagger
 	$(GOBUILD) -o $(API_BINARY) -v ./cmd/api
 
 build-indexer:
@@ -34,10 +34,10 @@ run-api: build-api
 run-indexer: build-indexer
 	./$(INDEXER_BINARY)
 
-test:
+test: swagger
 	$(GOTEST) -v ./...
 
-test-coverage:
+test-coverage: swagger
 	@mkdir -p $(COVERAGE_DIR)
 	$(GOTEST) -v -coverprofile=$(COVERAGE_FILE) -covermode=atomic $(COVERAGE_PACKAGES)
 	$(GOCMD) tool cover -html=$(COVERAGE_FILE) -o $(COVERAGE_HTML)
@@ -50,27 +50,27 @@ test-coverage:
 	fi; \
 	echo "OK: Coverage $${COVERAGE}% meets $(COVERAGE_THRESHOLD)% threshold"
 
-test-race:
+test-race: swagger
 	$(GOTEST) -v -race ./...
 
-lint:
+lint: swagger
 	golangci-lint run ./...
 
-lint-fix:
+lint-fix: swagger
 	golangci-lint run --fix ./...
 
-vet:
+vet: swagger
 	$(GOCMD) vet ./...
 
 fmt:
 	gofmt -s -w .
 	goimports -w -local github.com/a-thomas-22/blob-indexer-api .
 
-staticcheck:
+staticcheck: swagger
 	staticcheck ./...
 
 # Run all CI-equivalent checks locally (format, lint, vet, staticcheck, test, build, mod verify)
-ci: fmt vet lint staticcheck test-coverage build
+ci: swagger fmt vet lint staticcheck test-coverage build
 	$(GOMOD) verify
 	@echo "All CI checks passed."
 
@@ -103,6 +103,7 @@ seed-data:
 
 # Swagger documentation
 swagger:
+	@mkdir -p docs
 	$(GOCMD) run github.com/swaggo/swag/cmd/swag@$(SWAG_VERSION) init -g cmd/api/main.go -o docs
 
 # Helm commands
