@@ -21,21 +21,6 @@ const (
 	// queryBlobByTxHash retrieves a single blob by transaction hash and network.
 	queryBlobByTxHash = "SELECT " + blobSelectColumns + " FROM blobs WHERE tx_hash = $1 AND network_id = $2"
 
-	// queryTopBlobUsers aggregates blob usage statistics grouped by sender address.
-	queryTopBlobUsers = `
-		SELECT
-			from_address,
-			user_attribution,
-			COUNT(*) as blob_count,
-			SUM(total_cost_eth::numeric) as total_cost_eth,
-			MAX(timestamp) as last_timestamp
-		FROM blobs
-		WHERE network_id = $1
-		GROUP BY from_address, user_attribution
-		ORDER BY blob_count DESC
-		LIMIT $2 OFFSET $3
-	`
-
 	// queryTopBlobUsersWithOptions aggregates sender usage with safe sort/window parameters.
 	queryTopBlobUsersWithOptions = `
 		WITH filtered_blobs AS (
@@ -182,15 +167,45 @@ const (
 
 	// queryUserByAddress retrieves aggregated stats for a single sender address.
 	queryUserByAddress = `
+		WITH selected_user AS (
+			SELECT
+				b.from_address,
+				COALESCE(NULLIF(MAX(BTRIM(b.user_attribution)), ''), NULLIF(MAX(BTRIM(bu.name)), ''), '') AS user_attribution,
+				COALESCE(NULLIF(MAX(BTRIM(bu.category)), ''), 'unknown') AS category,
+				COUNT(*) AS blob_count,
+				COALESCE(SUM(b.total_cost_eth::numeric), 0) AS total_cost_eth,
+				MAX(b.timestamp) AS last_timestamp
+			FROM blobs b
+			LEFT JOIN blob_users bu
+				ON bu.network_id = b.network_id
+				AND LOWER(bu.address) = LOWER(b.from_address)
+			WHERE b.network_id = $1 AND b.from_address = $2
+			GROUP BY b.from_address
+		),
+		totals AS (
+			SELECT
+				COUNT(*) AS total_blobs,
+				COALESCE(SUM(total_cost_eth::numeric), 0) AS total_spend
+			FROM blobs
+			WHERE network_id = $1
+		)
 		SELECT
-			from_address,
-			MAX(user_attribution) as user_attribution,
-			COUNT(*) as blob_count,
-			SUM(total_cost_eth::numeric) as total_cost_eth,
-			MAX(timestamp) as last_timestamp
-		FROM blobs
-		WHERE network_id = $1 AND from_address = $2
-		GROUP BY from_address
+			selected_user.from_address,
+			selected_user.user_attribution,
+			selected_user.category,
+			selected_user.blob_count,
+			selected_user.total_cost_eth::text AS total_cost_eth,
+			selected_user.last_timestamp,
+			CASE
+				WHEN totals.total_blobs > 0 THEN ROUND((selected_user.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
+				ELSE 0
+			END AS blob_share_percent,
+			CASE
+				WHEN totals.total_spend > 0 THEN ROUND((selected_user.total_cost_eth / totals.total_spend) * 100, 6)::float8
+				ELSE 0
+			END AS spend_share_percent
+		FROM selected_user
+		CROSS JOIN totals
 	`
 
 	// queryLastIndexedTimeCoalesce retrieves the most recent confirmed blob timestamp,

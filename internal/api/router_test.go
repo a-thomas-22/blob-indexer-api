@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/go-chi/chi/v5"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
@@ -1797,15 +1798,22 @@ func TestGetMempoolBlobs_AddressFilterDBError(t *testing.T) {
 // --- GetUserByAddress tests ---
 
 func TestGetUserByAddress_Success(t *testing.T) {
+	var gotQuery string
+	var gotArgs []interface{}
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			gotQuery = query
+			gotArgs = append([]interface{}{}, args...)
 			user := dest.(*models.BlobUserStats)
 			*user = models.BlobUserStats{
-				Address:       validTestAddress,
-				Name:          "TestRollup",
-				BlobCount:     42,
-				TotalCostETH:  "1.5",
-				LastTimestamp: time.Now(),
+				Address:           validTestAddress,
+				Name:              "TestRollup",
+				Category:          "rollup",
+				BlobCount:         42,
+				TotalCostETH:      "1.5",
+				LastTimestamp:     time.Now(),
+				BlobSharePercent:  12.5,
+				SpendSharePercent: 20,
 			}
 			return nil
 		},
@@ -1821,12 +1829,25 @@ func TestGetUserByAddress_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	var resp Response
+	if gotQuery != queryUserByAddress {
+		t.Fatal("expected enriched user-by-address query")
+	}
+	wantArgs := []interface{}{42, common.HexToAddress(validTestAddress).Hex()}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+	var resp struct {
+		Success bool         `json:"success"`
+		Data    UserResponse `json:"data"`
+	}
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 	if !resp.Success {
 		t.Error("expected Success=true")
+	}
+	if resp.Data.Category != "rollup" || resp.Data.BlobSharePercent != 12.5 || resp.Data.SpendSharePercent != 20 {
+		t.Fatalf("unexpected enriched user fields: %+v", resp.Data)
 	}
 }
 

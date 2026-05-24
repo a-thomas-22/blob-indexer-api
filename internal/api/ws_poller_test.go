@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -417,12 +418,25 @@ func TestPoller_BroadcastUsersUpdate_Success(t *testing.T) {
 	go hub.Run()
 	defer hub.Stop()
 
+	var gotQuery string
+	var gotArgs []interface{}
 	db := &mockDB{
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			gotQuery = query
+			gotArgs = append([]interface{}{}, args...)
 			if strings.Contains(query, "GROUP BY") {
 				users := dest.(*[]models.BlobUserStats)
 				*users = []models.BlobUserStats{
-					{Address: "0xabc", Name: "Test", BlobCount: 5, TotalCostETH: "0.01", LastTimestamp: time.Now()},
+					{
+						Address:           "0xabc",
+						Name:              "Test",
+						Category:          "rollup",
+						BlobCount:         5,
+						TotalCostETH:      "0.01",
+						LastTimestamp:     time.Now(),
+						BlobSharePercent:  25,
+						SpendSharePercent: 40,
+					},
 				}
 			}
 			return nil
@@ -437,6 +451,14 @@ func TestPoller_BroadcastUsersUpdate_Success(t *testing.T) {
 	poller := NewPoller(db, hub, testNetworks(), time.Second, time.Second)
 	poller.broadcastUsersUpdate(context.Background(), network)
 
+	if gotQuery != queryTopBlobUsersWithOptions {
+		t.Fatal("expected poller to use enriched users query")
+	}
+	wantArgs := []interface{}{11155111, 10, 0, "all", "count"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("got args %v, want %v", gotArgs, wantArgs)
+	}
+
 	select {
 	case msg := <-client.send:
 		var event WSEvent
@@ -445,6 +467,17 @@ func TestPoller_BroadcastUsersUpdate_Success(t *testing.T) {
 		}
 		if event.Type != EventUsersUpdate {
 			t.Errorf("got type %q, want %q", event.Type, EventUsersUpdate)
+		}
+		data, ok := event.Data.([]interface{})
+		if !ok || len(data) != 1 {
+			t.Fatalf("unexpected users_update data: %#v", event.Data)
+		}
+		user, ok := data[0].(map[string]interface{})
+		if !ok {
+			t.Fatalf("unexpected user payload: %#v", data[0])
+		}
+		if user["category"] != "rollup" || user["blob_share_percent"] != float64(25) || user["spend_share_percent"] != float64(40) {
+			t.Fatalf("missing enriched user fields: %#v", user)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for users_update")
