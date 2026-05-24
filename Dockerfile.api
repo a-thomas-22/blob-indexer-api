@@ -17,15 +17,15 @@ FROM alpine:3.23
 WORKDIR /app
 
 RUN apk add --no-cache ca-certificates tzdata \
-    && addgroup -S appgroup \
-    && adduser -S appuser -G appgroup
+    && addgroup -g 1000 -S appgroup \
+    && adduser -u 1000 -S appuser -G appgroup
 
 COPY --from=builder /app/blob-indexer-api .
 COPY --from=builder /app/internal/db/migrations ./internal/db/migrations
 
 RUN chown -R appuser:appgroup /app
 
-USER appuser
+USER 1000
 
 EXPOSE 8080
 

@@ -23,7 +23,7 @@ jobs:
       chart_tag_name: ${{ steps.release.outputs['blob-indexer-chart--tag_name'] }}
       chart_version: ${{ steps.release.outputs['blob-indexer-chart--version'] }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: release
         with:
           config-file: release-please-config.json

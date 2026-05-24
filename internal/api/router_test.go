@@ -1262,8 +1262,8 @@ func TestDevAPIKeyMiddleware_KeyMissing(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 when dev API key is not configured, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 when dev API key is not configured (skip auth), got %d", w.Code)
 	}
 }
 

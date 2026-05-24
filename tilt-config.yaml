@@ -18,6 +18,6 @@ indexer:
 networks:
   - name: "sepolia"
     chain_id: 11155111
-    rpc_url: "wss://sepolia.example.com/ws"
+    rpc_url: https://sepolia-geth-prysm.arbitrum.io/beng9ac18016c5c8619336b78ee2e3b9
     start_block: "LATEST-300"
     enabled: true
