@@ -810,7 +810,7 @@ const docTemplate = `{
         },
         "/users": {
             "get": {
-                "description": "Retrieve the top users of blob transactions by count",
+                "description": "Retrieve the top users of blob transactions by count or spend, optionally scoped to a recent window",
                 "consumes": [
                     "application/json"
                 ],
@@ -839,6 +839,27 @@ const docTemplate = `{
                         "description": "Number of users to skip for pagination (default: 0, max: 10000)",
                         "name": "offset",
                         "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "count",
+                            "spend"
+                        ],
+                        "type": "string",
+                        "description": "Sort users by count or spend (default: count)",
+                        "name": "sort",
+                        "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "24h",
+                            "7d",
+                            "all"
+                        ],
+                        "type": "string",
+                        "description": "Time window to aggregate (default: all)",
+                        "name": "window",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -857,6 +878,72 @@ const docTemplate = `{
                                             "items": {
                                                 "$ref": "#/definitions/api.UserResponse"
                                             }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/users/breakdown": {
+            "get": {
+                "description": "Retrieve category market share for blob senders, optionally scoped to a recent window",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "Get blob user market breakdowns",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Network name or chain ID (default: first enabled network)",
+                        "name": "network",
+                        "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "24h",
+                            "7d",
+                            "all"
+                        ],
+                        "type": "string",
+                        "description": "Time window to aggregate (default: all)",
+                        "name": "window",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Success",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/api.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/api.UserBreakdownResponse"
                                         }
                                     }
                                 }
@@ -1085,6 +1172,26 @@ const docTemplate = `{
                     "type": "number"
                 },
                 "utilization_ratio": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.CategoryShareResponse": {
+            "type": "object",
+            "properties": {
+                "blob_count": {
+                    "type": "integer"
+                },
+                "blob_share_percent": {
+                    "type": "number"
+                },
+                "category": {
+                    "type": "string"
+                },
+                "spend_share_percent": {
+                    "type": "number"
+                },
+                "total_cost_eth": {
                     "type": "string"
                 }
             }
@@ -1543,6 +1650,26 @@ const docTemplate = `{
                 }
             }
         },
+        "api.UserBreakdownResponse": {
+            "type": "object",
+            "properties": {
+                "category_shares": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.CategoryShareResponse"
+                    }
+                },
+                "network_id": {
+                    "type": "integer"
+                },
+                "network_name": {
+                    "type": "string"
+                },
+                "window": {
+                    "type": "string"
+                }
+            }
+        },
         "api.UserResponse": {
             "type": "object",
             "properties": {
@@ -1551,6 +1678,12 @@ const docTemplate = `{
                 },
                 "blob_count": {
                     "type": "integer"
+                },
+                "blob_share_percent": {
+                    "type": "number"
+                },
+                "category": {
+                    "type": "string"
                 },
                 "last_timestamp": {
                     "type": "string"
@@ -1563,6 +1696,9 @@ const docTemplate = `{
                 },
                 "network_name": {
                     "type": "string"
+                },
+                "spend_share_percent": {
+                    "type": "number"
                 },
                 "total_cost_eth": {
                     "type": "string"
