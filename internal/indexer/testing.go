@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
@@ -21,14 +22,15 @@ func NewForTest(database *db.DB, cfg *config.Config, network config.NetworkConfi
 	}
 
 	return &Indexer{
-		db:               database,
-		attribution:      attrSvc,
-		config:           cfg,
-		network:          network,
-		lastIndexedBlock: lastBlock,
-		ctx:              ctx,
-		cancel:           cancel,
-		failedBlocks:     make(map[uint64]int),
-		mu:               sync.Mutex{},
+		db:                   database,
+		attribution:          attrSvc,
+		config:               cfg,
+		network:              network,
+		lastIndexedBlock:     lastBlock,
+		ctx:                  ctx,
+		cancel:               cancel,
+		failedBlocks:         make(map[uint64]int),
+		failedBlockNextRetry: make(map[uint64]time.Time),
+		mu:                   sync.Mutex{},
 	}
 }
