@@ -6,75 +6,28 @@ allow_k8s_contexts('kind-dev')
 # === Configuration ===
 port = str(local('grep -A 2 "server:" tilt-config.yaml | grep "port:" | awk \'{print $2}\'', quiet=True)).strip()
 
-# === Docker Build ===
+# === Docker Builds ===
 docker_build(
     'blob-indexer-api',
     '.',
-    dockerfile='Dockerfile',
+    dockerfile='Dockerfile.api',
     live_update=[
         sync('.', '/app'),
         run('cd /app && go mod download', trigger=['./go.mod', './go.sum']),
-        run('cd /app && go install ./cmd/server', trigger=['./cmd/**/*.go', './internal/**/*.go']),
+        run('cd /app && go build -o blob-indexer-api ./cmd/api', trigger=['./cmd/api/**/*.go', './internal/**/*.go']),
     ]
 )
 
-# === PostgreSQL (inline, ephemeral) ===
-# Using inline YAML instead of bitnami subchart for faster startup in dev.
-# Data resets on restart (emptyDir) so only recent blobs are present.
-postgres_yaml = """
-apiVersion: v1
-kind: Service
-metadata:
-  name: postgres
-  labels:
-    app: postgres
-spec:
-  ports:
-  - port: 5432
-    targetPort: 5432
-    name: postgres
-  selector:
-    app: postgres
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: postgres
-  labels:
-    app: postgres
-spec:
-  selector:
-    matchLabels:
-      app: postgres
-  strategy:
-    type: Recreate
-  template:
-    metadata:
-      labels:
-        app: postgres
-    spec:
-      containers:
-      - name: postgres
-        image: postgres:14
-        env:
-        - name: POSTGRES_USER
-          value: postgres
-        - name: POSTGRES_PASSWORD
-          value: postgres
-        - name: POSTGRES_DB
-          value: blobindexer
-        ports:
-        - containerPort: 5432
-          name: postgres
-        volumeMounts:
-        - name: postgres-data
-          mountPath: /var/lib/postgresql/data
-      volumes:
-      - name: postgres-data
-        emptyDir: {}
-"""
-k8s_yaml(blob(postgres_yaml))
-k8s_resource('postgres', port_forwards=['5432:5432'])
+docker_build(
+    'blob-indexer-indexer',
+    '.',
+    dockerfile='Dockerfile.indexer',
+    live_update=[
+        sync('.', '/app'),
+        run('cd /app && go mod download', trigger=['./go.mod', './go.sum']),
+        run('cd /app && go build -o blob-indexer ./cmd/indexer', trigger=['./cmd/indexer/**/*.go', './internal/**/*.go']),
+    ]
+)
 
 # === App Config (managed outside Helm for live-reload) ===
 local_resource(
@@ -83,27 +36,37 @@ local_resource(
     deps=['tilt-config.yaml'],
 )
 
-# === Blob Indexer API (via Helm chart) ===
-# Render the Helm chart with dev values. PostgreSQL and ConfigMap are managed
-# separately above, so disable them in the chart.
+# === Blob Indexer (via Helm chart) ===
+# Render the Helm chart with dev values. ConfigMap is managed separately above
+# for live-reload, so disable it in the chart.
 k8s_yaml(helm(
     'charts/blob-indexer',
     name='blob-indexer',
     values='charts/blob-indexer/values-dev.yaml',
     set=[
-        'postgresql.enabled=false',
         'configMap.create=false',
         'fullnameOverride=blob-indexer',
-        'image.repository=blob-indexer-api',
+        'api.image.repository=blob-indexer-api',
+        'indexer.image.repository=blob-indexer-indexer',
         'image.pullPolicy=Never',
         'image.tag=latest',
     ]
 ))
 
 k8s_resource(
-    'blob-indexer',
+    'blob-indexer-postgresql',
+    port_forwards=['5432:5432'],
+)
+
+k8s_resource(
+    'blob-indexer-api',
     port_forwards=[port + ':' + port],
-    resource_deps=['app-config', 'postgres'],
+    resource_deps=['app-config', 'blob-indexer-postgresql'],
+)
+
+k8s_resource(
+    'blob-indexer-indexer',
+    resource_deps=['app-config', 'blob-indexer-postgresql'],
 )
 
 # === Development Tools ===
@@ -127,13 +90,3 @@ local_resource(
     labels=['dev-tools'],
 )
 
-# === Frontend (blob-flow) ===
-# Runs the Next.js frontend locally with API proxy to the backend.
-# Clone https://github.com/douvy/blob-flow as a sibling directory.
-local_resource(
-    'blob-flow',
-    serve_cmd='cd ../blob-flow && npm install && npm run dev',
-    deps=['../blob-flow/src', '../blob-flow/package.json'],
-    resource_deps=['blob-indexer'],
-    labels=['frontend'],
-)

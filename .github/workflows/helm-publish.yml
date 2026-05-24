@@ -20,7 +20,7 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF_NAME#blob-indexer-chart-v}" >> "$GITHUB_OUTPUT"
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
 
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin

@@ -58,6 +58,35 @@ const (
 		LIMIT $2
 	`
 
+	// queryLatestBlobsByAddress retrieves confirmed blobs for a specific sender address.
+	queryLatestBlobsByAddress = `
+		SELECT ` + blobSelectColumns + ` FROM blobs
+		WHERE confirmed = true AND network_id = $1 AND from_address = $2
+		ORDER BY block_number DESC, blob_index ASC
+		LIMIT $3 OFFSET $4
+	`
+
+	// queryMempoolBlobsByAddress retrieves unconfirmed blobs for a specific sender address.
+	queryMempoolBlobsByAddress = `
+		SELECT ` + blobSelectColumns + ` FROM blobs
+		WHERE confirmed = false AND network_id = $1 AND from_address = $2
+		ORDER BY timestamp DESC
+		LIMIT $3 OFFSET $4
+	`
+
+	// queryUserByAddress retrieves aggregated stats for a single sender address.
+	queryUserByAddress = `
+		SELECT
+			from_address,
+			MAX(user_attribution) as user_attribution,
+			COUNT(*) as blob_count,
+			SUM(total_cost_eth::numeric) as total_cost_eth,
+			MAX(timestamp) as last_timestamp
+		FROM blobs
+		WHERE network_id = $1 AND from_address = $2
+		GROUP BY from_address
+	`
+
 	// queryLastIndexedTimeCoalesce retrieves the most recent confirmed blob timestamp,
 	// defaulting to epoch if no blobs exist.
 	queryLastIndexedTimeCoalesce = "SELECT COALESCE(MAX(timestamp), '1970-01-01'::timestamp) FROM blobs WHERE confirmed = true AND network_id = $1"
@@ -81,4 +110,12 @@ const (
 
 	// queryLastIndexedBlock retrieves the last indexed block number from indexer metadata.
 	queryLastIndexedBlock = "SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = 'last_indexed_block'"
+
+	// queryNewBlobsSinceBlock retrieves confirmed blobs after a given block number.
+	queryNewBlobsSinceBlock = `
+		SELECT ` + blobSelectColumns + ` FROM blobs
+		WHERE confirmed = true AND network_id = $1 AND block_number > $2
+		ORDER BY block_number ASC, blob_index ASC
+		LIMIT $3
+	`
 )

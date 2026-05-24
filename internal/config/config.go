@@ -62,6 +62,8 @@ type IndexerConfig struct {
 	BatchSize              int           `mapstructure:"batch_size" yaml:"batch_size"`
 	PollingInterval        time.Duration `mapstructure:"polling_interval" yaml:"polling_interval"`
 	MempoolPollingInterval time.Duration `mapstructure:"mempool_polling_interval" yaml:"mempool_polling_interval"`
+	MempoolTTL             time.Duration `mapstructure:"mempool_ttl" yaml:"mempool_ttl"`                           // max age for pending blobs before cleanup
+	MempoolCleanupInterval time.Duration `mapstructure:"mempool_cleanup_interval" yaml:"mempool_cleanup_interval"` // how often to run stale pending blob cleanup
 	WorkerCount            int           `mapstructure:"worker_count" yaml:"worker_count"`
 	MaxBlockRetries        int           `mapstructure:"max_block_retries" yaml:"max_block_retries"`
 	GapScanInterval        time.Duration `mapstructure:"gap_scan_interval" yaml:"gap_scan_interval"`
@@ -69,13 +71,20 @@ type IndexerConfig struct {
 	RPCRateLimit           float64       `mapstructure:"rpc_rate_limit" yaml:"rpc_rate_limit"` // requests per second; 0 = no proactive limiting
 }
 
+// WebSocketConfig holds the WebSocket configuration
+type WebSocketConfig struct {
+	PollInterval          time.Duration `mapstructure:"poll_interval" yaml:"poll_interval"`
+	UsersThrottleInterval time.Duration `mapstructure:"users_throttle_interval" yaml:"users_throttle_interval"`
+}
+
 // Config holds the application configuration
 type Config struct {
-	Database DatabaseConfig  `mapstructure:"database" yaml:"database"`
-	Server   ServerConfig    `mapstructure:"server" yaml:"server"`
-	Logging  LoggingConfig   `mapstructure:"logging" yaml:"logging"`
-	Indexer  IndexerConfig   `mapstructure:"indexer" yaml:"indexer"`
-	Networks []NetworkConfig `mapstructure:"networks" yaml:"networks"`
+	Database  DatabaseConfig  `mapstructure:"database" yaml:"database"`
+	Server    ServerConfig    `mapstructure:"server" yaml:"server"`
+	Logging   LoggingConfig   `mapstructure:"logging" yaml:"logging"`
+	Indexer   IndexerConfig   `mapstructure:"indexer" yaml:"indexer"`
+	WebSocket WebSocketConfig `mapstructure:"websocket" yaml:"websocket"`
+	Networks  []NetworkConfig `mapstructure:"networks" yaml:"networks"`
 }
 
 // Load loads the configuration using Viper with full validation (for the indexer).
@@ -114,11 +123,15 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("indexer.batch_size", 100)
 	v.SetDefault("indexer.polling_interval", "15s")
 	v.SetDefault("indexer.mempool_polling_interval", "30s")
+	v.SetDefault("indexer.mempool_ttl", "30m")
+	v.SetDefault("indexer.mempool_cleanup_interval", "5m")
 	v.SetDefault("indexer.worker_count", 4)
 	v.SetDefault("indexer.max_block_retries", 3)
 	v.SetDefault("indexer.gap_scan_interval", "5m")
 	v.SetDefault("indexer.max_reorg_depth", 64)
 	v.SetDefault("indexer.rpc_rate_limit", 0)
+	v.SetDefault("websocket.poll_interval", "3s")
+	v.SetDefault("websocket.users_throttle_interval", "30s")
 	v.SetDefault("networks", []NetworkConfig{})
 
 	// Configure Viper to read from config file
@@ -298,6 +311,12 @@ func loadConfig() (*Config, error) {
 	if cfg.Indexer.MempoolPollingInterval, err = parseDuration(v, "indexer.mempool_polling_interval", "mempool_polling_interval"); err != nil {
 		return nil, err
 	}
+	if cfg.Indexer.MempoolTTL, err = parseDuration(v, "indexer.mempool_ttl", "mempool_ttl"); err != nil {
+		return nil, err
+	}
+	if cfg.Indexer.MempoolCleanupInterval, err = parseDuration(v, "indexer.mempool_cleanup_interval", "mempool_cleanup_interval"); err != nil {
+		return nil, err
+	}
 	if cfg.Server.ShutdownTimeout, err = parseDuration(v, "server.shutdown_timeout", "shutdown_timeout"); err != nil {
 		return nil, err
 	}
@@ -317,6 +336,12 @@ func loadConfig() (*Config, error) {
 		return nil, err
 	}
 	if cfg.Indexer.GapScanInterval, err = parseDuration(v, "indexer.gap_scan_interval", "gap_scan_interval"); err != nil {
+		return nil, err
+	}
+	if cfg.WebSocket.PollInterval, err = parseDuration(v, "websocket.poll_interval", "ws_poll_interval"); err != nil {
+		return nil, err
+	}
+	if cfg.WebSocket.UsersThrottleInterval, err = parseDuration(v, "websocket.users_throttle_interval", "ws_users_throttle_interval"); err != nil {
 		return nil, err
 	}
 

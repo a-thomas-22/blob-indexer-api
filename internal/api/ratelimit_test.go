@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/go-chi/chi/v5/middleware"
+
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
 
@@ -166,5 +168,29 @@ func TestRateLimitMiddleware_IgnoresXRealIP(t *testing.T) {
 	}
 	if _, ok := rl.visitors["127.0.0.1"]; !ok {
 		t.Error("visitor should be tracked by normalized remote address")
+	}
+}
+
+func TestRateLimitMiddleware_UsesClientIPContext(t *testing.T) {
+	rl := &RateLimiter{
+		visitors: make(map[string]*visitor),
+		rate:     10,
+		burst:    1,
+	}
+
+	handler := middleware.ClientIPFromRemoteAddr(RateLimitMiddleware(rl)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.RemoteAddr = "192.0.2.10:1234"
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if _, ok := rl.visitors["192.0.2.10"]; !ok {
+		t.Error("visitor should be tracked by chi client IP context")
+	}
+	if _, ok := rl.visitors["192.0.2.10:1234"]; ok {
+		t.Error("visitor should not include the remote address port")
 	}
 }

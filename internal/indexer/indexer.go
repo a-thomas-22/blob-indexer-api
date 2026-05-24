@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/jmoiron/sqlx"
 	"go.uber.org/zap"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
@@ -101,6 +102,8 @@ type Indexer struct {
 	batchSize              int
 	pollingInterval        time.Duration
 	mempoolPollingInterval time.Duration
+	mempoolTTL             time.Duration
+	mempoolCleanupInterval time.Duration
 	workerCount            int
 	maxBlockRetries        int
 	gapScanInterval        time.Duration
@@ -149,6 +152,8 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		batchSize:              cfg.Indexer.BatchSize,
 		pollingInterval:        cfg.Indexer.PollingInterval,
 		mempoolPollingInterval: cfg.Indexer.MempoolPollingInterval,
+		mempoolTTL:             cfg.Indexer.MempoolTTL,
+		mempoolCleanupInterval: cfg.Indexer.MempoolCleanupInterval,
 		workerCount:            workerCount,
 		maxBlockRetries:        cfg.Indexer.MaxBlockRetries,
 		gapScanInterval:        cfg.Indexer.GapScanInterval,
@@ -259,6 +264,15 @@ func (i *Indexer) Start() error {
 		}
 	} else {
 		i.startMempoolIndexer()
+	}
+
+	// Start periodic cleanup of stale pending blobs
+	if i.mempoolTTL > 0 && i.mempoolCleanupInterval > 0 {
+		i.wg.Add(1)
+		go func() {
+			defer i.wg.Done()
+			i.runMempoolCleanup()
+		}()
 	}
 
 	logger.Info("Indexer started",
@@ -941,6 +955,37 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 
 	// Insert blobs using a prepared statement within the transaction
 	if len(blobs) > 0 {
+		// Collect unique tx hashes to delete their pending counterparts
+		txHashSet := make(map[string]struct{}, len(blobs))
+		for _, blob := range blobs {
+			txHashSet[blob.TxHash] = struct{}{}
+		}
+
+		// Delete pending blob rows that are now being confirmed
+		if len(txHashSet) > 0 {
+			txHashes := make([]string, 0, len(txHashSet))
+			for h := range txHashSet {
+				txHashes = append(txHashes, h)
+			}
+			deleteQuery, deleteArgs, err := sqlx.In(
+				"DELETE FROM blobs WHERE network_id = ? AND block_number < 0 AND tx_hash IN (?)",
+				i.network.ChainID, txHashes,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to build pending blob delete query: %w", err)
+			}
+			deleteQuery = tx.Rebind(deleteQuery)
+			res, err := tx.ExecContext(i.ctx, deleteQuery, deleteArgs...)
+			if err != nil {
+				return fmt.Errorf("failed to delete pending blobs: %w", err)
+			}
+			if promoted, _ := res.RowsAffected(); promoted > 0 {
+				logger.Debug("Promoted pending blobs to confirmed",
+					zap.String("network", i.network.Name),
+					zap.Int64("promoted_count", promoted))
+			}
+		}
+
 		blobStmt, err := tx.PrepareContext(i.ctx, `
 			INSERT INTO blobs (
 				network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
@@ -1080,6 +1125,39 @@ func (i *Indexer) runMempoolIndexer() {
 	}
 }
 
+// runMempoolCleanup periodically removes pending blobs that have exceeded the configured TTL.
+func (i *Indexer) runMempoolCleanup() {
+	logger.Info("Mempool cleanup starting",
+		zap.String("network", i.network.Name),
+		zap.Duration("ttl", i.mempoolTTL),
+		zap.Duration("interval", i.mempoolCleanupInterval))
+
+	ticker := time.NewTicker(i.mempoolCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-i.ctx.Done():
+			logger.Info("Mempool cleanup stopped", zap.String("network", i.network.Name))
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-i.mempoolTTL)
+			deleted, err := i.db.DeleteStalePendingBlobs(i.ctx, i.network.ChainID, cutoff)
+			if err != nil {
+				logger.Error("Failed to clean up stale pending blobs",
+					zap.String("network", i.network.Name),
+					zap.Error(err))
+				continue
+			}
+			if deleted > 0 {
+				logger.Info("Cleaned up stale pending blobs",
+					zap.String("network", i.network.Name),
+					zap.Int64("deleted_count", deleted))
+			}
+		}
+	}
+}
+
 // processPendingTransactions processes pending transactions from the mempool
 func (i *Indexer) processPendingTransactions() error {
 	// Get pending transactions
@@ -1181,6 +1259,10 @@ func (i *Indexer) insertPendingBlob(blob models.Blob) error {
 		SELECT
 			$1, $3, chosen_index.blob_index, $2, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 		FROM chosen_index
+		WHERE NOT EXISTS (
+			SELECT 1 FROM blobs
+			WHERE network_id = $1 AND tx_hash = $2 AND block_number >= 0
+		)
 		ON CONFLICT (network_id, tx_hash) WHERE block_number < 0 DO UPDATE SET
 			blob_index = EXCLUDED.blob_index,
 			from_address = EXCLUDED.from_address,

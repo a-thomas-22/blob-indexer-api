@@ -256,6 +256,26 @@ func TestDeleteFromBlockMethods(t *testing.T) {
 	}
 }
 
+func TestDeleteStalePendingBlobs(t *testing.T) {
+	db, mock := newMockDB(t)
+	cutoff := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number < 0 AND timestamp < $2")).
+		WithArgs(1, cutoff).
+		WillReturnResult(sqlmock.NewResult(0, 5))
+
+	deleted, err := db.DeleteStalePendingBlobs(context.Background(), 1, cutoff)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if deleted != 5 {
+		t.Errorf("expected 5 deleted, got %d", deleted)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestConnectAndMigrations_InvalidURL(t *testing.T) {
 	ctx := context.Background()
 	dbCfg := config.DatabaseConfig{

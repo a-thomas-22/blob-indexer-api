@@ -7,6 +7,7 @@ import (
 	"log"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -165,4 +166,14 @@ func (db *DB) DeleteBlockMetricsFromBlock(ctx context.Context, networkID int, fr
 	query := "DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2"
 	_, err := db.ExecContext(ctx, query, networkID, fromBlock)
 	return err
+}
+
+// DeleteStalePendingBlobs removes pending blobs older than the given cutoff time.
+func (db *DB) DeleteStalePendingBlobs(ctx context.Context, networkID int, cutoff time.Time) (int64, error) {
+	query := "DELETE FROM blobs WHERE network_id = $1 AND block_number < 0 AND timestamp < $2"
+	res, err := db.ExecContext(ctx, query, networkID, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
