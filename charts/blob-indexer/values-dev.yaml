@@ -3,6 +3,11 @@ image:
   registry: ""
   repository: blob-indexer-api
   pullPolicy: Never
+  tag: "latest"
+
+api:
+  image:
+    repository: blob-indexer-api
 
 indexer:
   image:
