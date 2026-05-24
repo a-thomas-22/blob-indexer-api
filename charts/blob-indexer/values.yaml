@@ -2,6 +2,7 @@
 replicaCount: 1
 
 image:
+  registry: ""
   repository: blob-indexer-api
   pullPolicy: IfNotPresent
   tag: "latest"

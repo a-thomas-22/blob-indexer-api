@@ -12,13 +12,14 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   helm:
     # Only run for chart releases, not app releases
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'blob-indexer-chart-v')
     runs-on: ubuntu-latest
+    env:
+      REGISTRY: registry.ahkc.win
     steps:
       - uses: actions/checkout@v6
 
@@ -33,11 +34,11 @@ jobs:
 
       - uses: azure/setup-helm@v5
 
-      - name: Login to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Login to Harbor
+        run: echo "${{ secrets.REGISTRY_PASSWORD }}" | helm registry login "${REGISTRY}" -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
 
       - name: Package chart
         run: helm package charts/blob-indexer --version "${{ steps.version.outputs.version }}"
 
-      - name: Push chart to GHCR
-        run: helm push blob-indexer-${{ steps.version.outputs.version }}.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+      - name: Push chart to Harbor
+        run: helm push blob-indexer-${{ steps.version.outputs.version }}.tgz oci://${REGISTRY}/${{ github.repository_owner }}/charts

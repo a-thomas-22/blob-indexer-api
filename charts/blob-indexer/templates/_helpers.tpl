@@ -71,3 +71,18 @@ Database URL used by migration containers.
 {{- end -}}
 {{- $dbURL -}}
 {{- end }}
+
+{{/*
+Build a container image reference from the chart defaults and a component override.
+*/}}
+{{- define "blob-indexer.image" -}}
+{{- $root := index . 0 -}}
+{{- $image := index . 1 -}}
+{{- $repository := default $root.Values.image.repository $image.repository -}}
+{{- $tag := default (default $root.Chart.AppVersion $root.Values.image.tag) $image.tag -}}
+{{- if $root.Values.image.registry -}}
+{{- printf "%s/%s:%s" (trimSuffix "/" $root.Values.image.registry) $repository $tag -}}
+{{- else -}}
+{{- printf "%s:%s" $repository $tag -}}
+{{- end -}}
+{{- end }}
