@@ -236,7 +236,7 @@ This project uses [release-please](https://github.com/googleapis/release-please)
 
 **How it works:**
 
-1. PR titles must use [Conventional Commits](https://www.conventionalcommits.org/) format (e.g., `feat: add new endpoint`, `fix: correct query logic`) — this is enforced by CI
+1. PR titles must use [Conventional Commits](https://www.conventionalcommits.org/) format (e.g., `feat: add new endpoint`, `fix: correct query logic`, `deps: bump module`) — this is enforced by CI
 2. When PRs are merged to `main`, release-please automatically maintains a release PR with a generated changelog
 3. Merging the release PR creates a GitHub Release, which triggers:
    - **Docker**: image pushed to `ghcr.io` with semver tags
