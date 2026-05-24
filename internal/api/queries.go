@@ -18,6 +18,64 @@ const (
 		LIMIT $2 OFFSET $3
 	`
 
+	// queryMempoolPressure computes bounded aggregate pressure metrics for pending blobs.
+	queryMempoolPressure = `
+		WITH limited_pending AS (
+			SELECT
+				from_address,
+				timestamp,
+				max_fee_per_blob_gas,
+				COALESCE(blob_gas_used, blob_size_bytes / 128, 0) AS blob_gas_used
+			FROM blobs
+			WHERE confirmed = false AND network_id = $1
+			ORDER BY timestamp DESC
+			LIMIT $2
+		),
+		pending AS (
+			SELECT * FROM limited_pending
+			ORDER BY timestamp DESC
+			LIMIT $3
+		)
+		SELECT
+			COUNT(*) AS pending_blob_count,
+			COALESCE(SUM(blob_gas_used), 0)::bigint AS pending_blob_gas,
+			COUNT(DISTINCT from_address) AS pending_unique_senders,
+			COALESCE(MIN(max_fee_per_blob_gas::numeric) FILTER (WHERE max_fee_per_blob_gas IS NOT NULL), 0::numeric) AS max_fee_min,
+			COALESCE(AVG(max_fee_per_blob_gas::numeric) FILTER (WHERE max_fee_per_blob_gas IS NOT NULL), 0::numeric) AS max_fee_avg,
+			COALESCE(PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY max_fee_per_blob_gas::numeric) FILTER (WHERE max_fee_per_blob_gas IS NOT NULL), 0::numeric) AS max_fee_median,
+			COALESCE(PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY max_fee_per_blob_gas::numeric) FILTER (WHERE max_fee_per_blob_gas IS NOT NULL), 0::numeric) AS max_fee_p95,
+			COALESCE(MAX(max_fee_per_blob_gas::numeric) FILTER (WHERE max_fee_per_blob_gas IS NOT NULL), 0::numeric) AS max_fee_max,
+			COALESCE(GREATEST(EXTRACT(EPOCH FROM ((statement_timestamp() AT TIME ZONE 'UTC') - MIN(timestamp))), 0), 0)::double precision AS oldest_age_seconds,
+			COALESCE(GREATEST(EXTRACT(EPOCH FROM ((statement_timestamp() AT TIME ZONE 'UTC') - MAX(timestamp))), 0), 0)::double precision AS newest_age_seconds,
+			COALESCE(AVG(GREATEST(EXTRACT(EPOCH FROM ((statement_timestamp() AT TIME ZONE 'UTC') - timestamp)), 0)), 0)::double precision AS average_age_seconds,
+			MIN(timestamp) AS oldest_timestamp,
+			MAX(timestamp) AS newest_timestamp,
+			COUNT(*) FILTER (
+				WHERE $4::numeric IS NOT NULL
+					AND max_fee_per_blob_gas IS NOT NULL
+					AND max_fee_per_blob_gas::numeric >= $4::numeric
+			) AS likely_includable_count,
+			COUNT(*) FILTER (
+				WHERE $4::numeric IS NOT NULL
+					AND max_fee_per_blob_gas IS NOT NULL
+					AND max_fee_per_blob_gas::numeric < $4::numeric
+			) AS underpriced_count,
+			COUNT(*) FILTER (
+				WHERE $4::numeric IS NULL
+					OR max_fee_per_blob_gas IS NULL
+			) AS unknown_pricing_count,
+			EXISTS (SELECT 1 FROM limited_pending OFFSET $3) AS sample_truncated
+		FROM pending
+	`
+
+	// queryLatestBlobBaseFee retrieves the newest indexed blob base fee for includability estimates.
+	queryLatestBlobBaseFee = `
+		SELECT blob_base_fee FROM block_metrics
+		WHERE network_id = $1
+		ORDER BY block_number DESC
+		LIMIT 1
+	`
+
 	// queryBlobByTxHash retrieves a single blob by transaction hash and network.
 	queryBlobByTxHash = "SELECT " + blobSelectColumns + " FROM blobs WHERE tx_hash = $1 AND network_id = $2"
 
@@ -139,6 +197,61 @@ const (
 			COALESCE(MAX(timestamp), '1970-01-01'::timestamp) as last_indexed_time
 		FROM blobs
 		WHERE network_id = $1
+	`
+
+	// queryRollingStatsWindows computes time-windowed blob market statistics.
+	queryRollingStatsWindows = `
+		WITH requested_windows AS (
+			SELECT window_label, duration_seconds, ord
+			FROM unnest($2::text[], $3::bigint[]) WITH ORDINALITY AS u(window_label, duration_seconds, ord)
+		),
+		window_bounds AS (
+			SELECT
+				window_label,
+				duration_seconds,
+				ord,
+				$4::timestamp - (duration_seconds * INTERVAL '1 second') AS start_time,
+				$4::timestamp AS end_time
+			FROM requested_windows
+		)
+		SELECT
+			wb.window_label AS stats_window,
+			wb.duration_seconds,
+			wb.start_time,
+			wb.end_time,
+			bs.average_blob_base_fee,
+			bs.median_blob_base_fee,
+			bs.p95_blob_base_fee,
+			bs.total_blobs,
+			bs.total_blob_gas_used,
+			bs.total_cost_eth,
+			bs.unique_senders,
+			bms.average_utilization
+		FROM window_bounds wb
+		LEFT JOIN LATERAL (
+			SELECT
+				COUNT(*) AS total_blobs,
+				COALESCE(SUM(COALESCE(b.blob_gas_used, 0)), 0) AS total_blob_gas_used,
+				COALESCE(SUM(b.total_cost_eth::numeric), 0) AS total_cost_eth,
+				COUNT(DISTINCT b.from_address) AS unique_senders,
+				COALESCE(AVG(b.base_fee_per_blob_gas::numeric), 0) AS average_blob_base_fee,
+				COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY b.base_fee_per_blob_gas::numeric), 0) AS median_blob_base_fee,
+				COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY b.base_fee_per_blob_gas::numeric), 0) AS p95_blob_base_fee
+			FROM blobs b
+			WHERE b.network_id = $1
+				AND b.confirmed = true
+				AND b.timestamp >= wb.start_time
+				AND b.timestamp < wb.end_time
+		) bs ON true
+		LEFT JOIN LATERAL (
+			SELECT
+				COALESCE(AVG(bm.utilization_ratio::numeric), 0) AS average_utilization
+			FROM block_metrics bm
+			WHERE bm.network_id = $1
+				AND bm.block_timestamp >= wb.start_time
+				AND bm.block_timestamp < wb.end_time
+		) bms ON true
+		ORDER BY wb.ord
 	`
 
 	// queryBlockMetrics retrieves recent block metrics for pricing data.

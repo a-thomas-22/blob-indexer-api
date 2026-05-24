@@ -114,6 +114,13 @@ definitions:
       total_tables:
         type: integer
     type: object
+  api.FeeEstimateRangeResponse:
+    properties:
+      high:
+        type: string
+      low:
+        type: string
+    type: object
   api.IndexerMetrics:
     properties:
       confirmed_blobs_count:
@@ -144,6 +151,83 @@ definitions:
       timestamp:
         type: string
     type: object
+  api.MarketPressureResponse:
+    properties:
+      consecutive_full_blocks:
+        type: integer
+      next_block_fee_estimate:
+        $ref: '#/definitions/api.FeeEstimateRangeResponse'
+      percent_recent_blocks_at_max_blobs:
+        type: number
+      predicted_direction:
+        type: string
+      recent_blocks_above_target:
+        type: integer
+    type: object
+  api.MempoolAgeStatsResponse:
+    properties:
+      average_age_seconds:
+        type: number
+      newest_age_seconds:
+        type: number
+      newest_timestamp:
+        type: string
+      oldest_age_seconds:
+        type: number
+      oldest_timestamp:
+        type: string
+    type: object
+  api.MempoolFeeDistributionResponse:
+    properties:
+      avg:
+        type: string
+      max:
+        type: string
+      median:
+        type: string
+      min:
+        type: string
+      p95:
+        type: string
+    type: object
+  api.MempoolIncludabilityResponse:
+    properties:
+      latest_blob_base_fee:
+        type: string
+      likely_includable_count:
+        type: integer
+      pricing_available:
+        type: boolean
+      underpriced_count:
+        type: integer
+      unknown_pricing_count:
+        type: integer
+    type: object
+  api.MempoolPressureResponse:
+    properties:
+      generated_at:
+        type: string
+      includability:
+        $ref: '#/definitions/api.MempoolIncludabilityResponse'
+      max_fee_per_blob_gas:
+        $ref: '#/definitions/api.MempoolFeeDistributionResponse'
+      network_id:
+        type: integer
+      network_name:
+        type: string
+      pending_blob_count:
+        type: integer
+      pending_blob_gas:
+        type: integer
+      pending_tx_age:
+        $ref: '#/definitions/api.MempoolAgeStatsResponse'
+      pending_unique_senders:
+        type: integer
+      sample_limit:
+        type: integer
+      sample_truncated:
+        type: boolean
+    type: object
   api.PricingResponse:
     properties:
       blob_params:
@@ -156,6 +240,8 @@ definitions:
         type: string
       fork_stage:
         type: string
+      market_pressure:
+        $ref: '#/definitions/api.MarketPressureResponse'
       network_id:
         type: integer
       network_name:
@@ -187,6 +273,46 @@ definitions:
         type: string
       success:
         type: boolean
+    type: object
+  api.RollingStatsResponse:
+    properties:
+      generated_at:
+        type: string
+      network_id:
+        type: integer
+      network_name:
+        type: string
+      windows:
+        items:
+          $ref: '#/definitions/api.RollingWindowStats'
+        type: array
+    type: object
+  api.RollingWindowStats:
+    properties:
+      average_blob_base_fee:
+        type: string
+      average_utilization:
+        type: string
+      duration_seconds:
+        type: integer
+      end_time:
+        type: string
+      median_blob_base_fee:
+        type: string
+      p95_blob_base_fee:
+        type: string
+      start_time:
+        type: string
+      total_blob_gas_used:
+        type: integer
+      total_blobs:
+        type: integer
+      total_cost_eth:
+        type: string
+      unique_senders:
+        type: integer
+      window:
+        type: string
     type: object
   api.StatsResponse:
     properties:
@@ -432,6 +558,39 @@ paths:
       summary: Get pending blobs from mempool
       tags:
       - blobs
+  /blob/mempool/pressure:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve bounded aggregate pressure metrics for pending blob transactions
+      parameters:
+      - description: 'Network name or chain ID (default: first enabled network)'
+        in: query
+        name: network
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.MempoolPressureResponse'
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get blob mempool pressure
+      tags:
+      - blobs
   /blob/pricing:
     get:
       consumes:
@@ -670,6 +829,44 @@ paths:
           schema:
             $ref: '#/definitions/api.Response'
       summary: Get blob statistics
+      tags:
+      - stats
+  /stats/windows:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve rolling time-window statistics for blob market dashboards
+      parameters:
+      - description: 'Network name or chain ID (default: first enabled network)'
+        in: query
+        name: network
+        type: string
+      - description: 'Comma-separated rolling windows using m/h/d units (default:
+          5m,1h,24h,7d; max 8 windows, max 30d each)'
+        in: query
+        name: windows
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.RollingStatsResponse'
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get rolling blob market statistics
       tags:
       - stats
   /status:
