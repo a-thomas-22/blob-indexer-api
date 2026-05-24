@@ -1,6 +1,6 @@
 # Test values for chart-testing (ct install / helm test)
-# Deploys API + indexer against live Sepolia with a small block range.
-# RPC URL injected via --set appConfig.networks[0].rpc_url=...
+# Deploys the API against in-cluster PostgreSQL without running the indexer.
+# The RPC URL is unused while indexer.enabled=false.
 
 image:
   repository: blob-indexer-api

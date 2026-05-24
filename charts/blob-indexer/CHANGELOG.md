@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.1.0...blob-indexer-chart-v0.2.0) (2026-03-10)
+## [0.2.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.1.0...blob-indexer-chart-v0.2.0) (2026-05-24)
 
 
 ### Features
