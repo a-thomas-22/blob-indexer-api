@@ -74,6 +74,7 @@ spec:
           configMap:
             name: {{ include "blob-indexer.fullname" . }}-config
 ---
+{{- if .Values.indexer.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -133,3 +134,4 @@ spec:
         - name: config-volume
           configMap:
             name: {{ include "blob-indexer.fullname" . }}-config
+{{- end }}

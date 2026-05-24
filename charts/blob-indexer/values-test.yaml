@@ -11,6 +11,7 @@ api:
   replicaCount: 1
 
 indexer:
+  enabled: false
   replicaCount: 1
   image:
     repository: blob-indexer-indexer
@@ -26,6 +27,9 @@ resources:
   requests:
     cpu: 100m
     memory: 128Mi
+
+database:
+  sslMode: disable
 
 appConfig:
   server:
