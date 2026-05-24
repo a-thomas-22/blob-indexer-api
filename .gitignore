@@ -44,6 +44,11 @@ tmp/
 # Logs
 *.log
 
+# Generated Swagger/OpenAPI documentation
+docs/docs.go
+docs/swagger.json
+docs/swagger.yaml
+
 # OS specific
 .DS_Store
 Thumbs.db

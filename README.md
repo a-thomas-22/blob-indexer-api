@@ -82,6 +82,8 @@ To generate the Swagger documentation:
 make swagger
 ```
 
+Generated Swagger files are intentionally ignored by Git. Build, test, Docker, and CI targets generate them when they need the `docs` package.
+
 ## Development
 
 ### Prerequisites
@@ -198,7 +200,7 @@ make docker-build   # Build both Docker images
 make docker-run     # Run Docker container
 make tilt-up        # Start Tilt development environment
 make seed-data      # Seed test data (runs cmd/testdata)
-make swagger        # Generate Swagger/OpenAPI documentation
+make swagger        # Generate local Swagger/OpenAPI artifacts
 make db-migrate     # Run database migrations
 make db-rollback    # Rollback one database migration
 make helm-dep-update # Update Helm chart dependencies
@@ -278,7 +280,7 @@ blob-indexer-api/
 │   ├── indexer/                # Core indexing logic
 │   └── logger/                 # Centralized structured logging (Zap)
 ├── charts/                     # Helm chart for Kubernetes deployment
-├── docs/                       # Generated Swagger/OpenAPI documentation
+├── docs/                       # Local generated Swagger/OpenAPI artifacts
 ├── .env.example                # Environment variable template
 ├── config.yaml                 # Default YAML configuration
 ├── Dockerfile.api              # API Docker image

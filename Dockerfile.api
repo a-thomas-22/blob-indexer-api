@@ -10,6 +10,8 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=dev
+ARG SWAG_VERSION=v1.16.6
+RUN go run github.com/swaggo/swag/cmd/swag@${SWAG_VERSION} init -g cmd/api/main.go -o docs
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags "-X main.version=${VERSION}" -o blob-indexer-api ./cmd/api
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o blob-indexer-migrate ./cmd/migrate
 

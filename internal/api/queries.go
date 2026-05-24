@@ -1,5 +1,42 @@
 package api
 
+import "github.com/a-thomas-22/blob-indexer-api/internal/db/models"
+
+const blobSelectColumns = `
+	id,
+	network_id,
+	block_number,
+	blob_index,
+	tx_hash,
+	from_address,
+	user_attribution,
+	blob_size_bytes,
+	base_fee_per_blob_gas,
+	tip_per_blob_gas,
+	total_cost_eth,
+	timestamp,
+	confirmed,
+	indexer_version,
+	max_fee_per_blob_gas,
+	blob_gas_used
+`
+
+const blockMetricsSelectColumns = `
+	network_id,
+	block_number,
+	block_timestamp,
+	blob_count,
+	blob_gas_used,
+	blob_gas_target,
+	blob_gas_limit,
+	excess_blob_gas,
+	blob_base_fee,
+	utilization_ratio,
+	blob_params_target,
+	blob_params_max,
+	update_fraction
+`
+
 // SQL query constants used by API handlers.
 const (
 	// queryLatestBlobs retrieves confirmed blobs ordered by block number descending.
@@ -408,7 +445,21 @@ const (
 	`
 
 	// queryLastIndexedBlock retrieves the last indexed block number from indexer metadata.
-	queryLastIndexedBlock = "SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = 'last_indexed_block'"
+	queryLastIndexedBlock = "SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = '" + models.MetadataLastIndexedBlock + "'"
+
+	// queryNetworkFreshnessMetadata retrieves frontend freshness metadata for a network.
+	queryNetworkFreshnessMetadata = `
+		SELECT key, value
+		FROM indexer_metadata
+		WHERE network_id = $1
+			AND key IN (
+				'` + models.MetadataLastIndexedBlock + `',
+				'` + models.MetadataCurrentChainHead + `',
+				'` + models.MetadataChainHeadUpdatedAt + `',
+				'` + models.MetadataLastIndexedAt + `',
+				'` + models.MetadataWebSocketFreshnessAt + `'
+			)
+	`
 
 	// queryNewBlobsSinceBlock retrieves confirmed blobs after a given block number.
 	queryNewBlobsSinceBlock = `
