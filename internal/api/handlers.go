@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
@@ -68,7 +69,6 @@ const blockMetricsSelectColumns = `
 
 const aggregateCacheTTL = 30 * time.Second
 const aggregateQueryTimeout = 5 * time.Second
-const blobGasPerBlob = 131072
 
 const (
 	queryDevIndexerCounts = `
@@ -330,7 +330,7 @@ func blobSpaceLimit(paramsBlobs int, gasLimit int64) int {
 	if gasLimit <= 0 {
 		return 0
 	}
-	return int(gasLimit / blobGasPerBlob)
+	return int(gasLimit / params.BlobTxBlobGasPerBlob)
 }
 
 // respondJSON responds with JSON
@@ -868,8 +868,8 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 			Target:         latest.BlobParamsTarget,
 			Max:            latest.BlobParamsMax,
 			UpdateFraction: uint64(latest.UpdateFraction),
-			TargetGas:      uint64(latest.BlobParamsTarget) * blobGasPerBlob,
-			MaxGas:         uint64(latest.BlobParamsMax) * blobGasPerBlob,
+			TargetGas:      uint64(latest.BlobParamsTarget) * params.BlobTxBlobGasPerBlob,
+			MaxGas:         uint64(latest.BlobParamsMax) * params.BlobTxBlobGasPerBlob,
 		}
 
 		// Predict next base fee

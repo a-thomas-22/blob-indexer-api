@@ -36,12 +36,12 @@ func buildMarketPressure(metrics []models.BlockMetrics, cfg *params.ChainConfig)
 	if cfg == nil {
 		cfg = blobparams.ChainConfigForID(latest.NetworkID)
 	}
-	bp := blobparams.GetBlobParams(cfg, uint64(latest.BlockTimestamp.Unix()))
-	targetGas := effectiveBlobTargetGas(latest, bp)
-	maxGas := effectiveBlobMaxGas(latest, bp)
 
 	maxedBlocks := 0
 	for _, metric := range metrics {
+		bp := blobparamsForMetric(metric, cfg)
+		targetGas := effectiveBlobTargetGas(metric, bp)
+		maxGas := effectiveBlobMaxGas(metric, bp)
 		blobGasUsed := nonNegativeUint64(metric.BlobGasUsed)
 		if targetGas > 0 && blobGasUsed > targetGas {
 			pressure.RecentBlocksAboveTarget++
@@ -51,36 +51,45 @@ func buildMarketPressure(metrics []models.BlockMetrics, cfg *params.ChainConfig)
 		}
 	}
 
-	pressure.ConsecutiveFullBlocks = consecutiveMaxedBlobBlocks(metrics, maxGas)
+	latestTargetGas := effectiveBlobTargetGas(latest, blobparamsForMetric(latest, cfg))
+
+	pressure.ConsecutiveFullBlocks = consecutiveMaxedBlobBlocks(metrics, cfg)
 	pressure.PercentRecentBlocksAtMax = percentage(maxedBlocks, len(metrics))
-	pressure.PredictedDirection = predictedMarketDirection(latest, targetGas)
-	pressure.NextBlockFeeEstimate = nextBlockFeeEstimateRange(metrics, cfg, targetGas)
+	pressure.PredictedDirection = predictedMarketDirection(latest, latestTargetGas)
+	pressure.NextBlockFeeEstimate = nextBlockFeeEstimateRange(metrics, cfg)
 
 	return pressure
 }
 
-func effectiveBlobTargetGas(metric models.BlockMetrics, bp blobparams.BlobParams) uint64 {
-	if bp.TargetGas > 0 {
-		return bp.TargetGas
+func blobparamsForMetric(metric models.BlockMetrics, cfg *params.ChainConfig) blobparams.BlobParams {
+	if cfg == nil {
+		cfg = blobparams.ChainConfigForID(metric.NetworkID)
 	}
+	return blobparams.GetBlobParams(cfg, uint64(metric.BlockTimestamp.Unix()))
+}
+
+func effectiveBlobTargetGas(metric models.BlockMetrics, bp blobparams.BlobParams) uint64 {
 	if metric.BlobGasTarget > 0 {
 		return uint64(metric.BlobGasTarget)
 	}
 	if metric.BlobParamsTarget > 0 {
 		return uint64(metric.BlobParamsTarget) * params.BlobTxBlobGasPerBlob
 	}
+	if bp.TargetGas > 0 {
+		return bp.TargetGas
+	}
 	return 0
 }
 
 func effectiveBlobMaxGas(metric models.BlockMetrics, bp blobparams.BlobParams) uint64 {
-	if bp.MaxGas > 0 {
-		return bp.MaxGas
-	}
 	if metric.BlobGasLimit > 0 {
 		return uint64(metric.BlobGasLimit)
 	}
 	if metric.BlobParamsMax > 0 {
 		return uint64(metric.BlobParamsMax) * params.BlobTxBlobGasPerBlob
+	}
+	if bp.MaxGas > 0 {
+		return bp.MaxGas
 	}
 	return 0
 }
@@ -108,9 +117,10 @@ func isMaxedBlobBlock(metric models.BlockMetrics, maxGas uint64) bool {
 	return nonNegativeUint64(metric.BlobGasUsed) >= maxGas
 }
 
-func consecutiveMaxedBlobBlocks(metrics []models.BlockMetrics, maxGas uint64) int {
+func consecutiveMaxedBlobBlocks(metrics []models.BlockMetrics, cfg *params.ChainConfig) int {
 	consecutive := 0
 	for _, metric := range metrics {
+		maxGas := effectiveBlobMaxGas(metric, blobparamsForMetric(metric, cfg))
 		if !isMaxedBlobBlock(metric, maxGas) {
 			break
 		}
@@ -119,11 +129,12 @@ func consecutiveMaxedBlobBlocks(metrics []models.BlockMetrics, maxGas uint64) in
 	return consecutive
 }
 
-func nextBlockFeeEstimateRange(metrics []models.BlockMetrics, cfg *params.ChainConfig, targetGas uint64) FeeEstimateRangeResponse {
+func nextBlockFeeEstimateRange(metrics []models.BlockMetrics, cfg *params.ChainConfig) FeeEstimateRangeResponse {
 	var low *big.Int
 	var high *big.Int
 
 	for _, metric := range metrics {
+		targetGas := effectiveBlobTargetGas(metric, blobparamsForMetric(metric, cfg))
 		fee := predictNextBlockBlobFee(cfg, metric, targetGas)
 		if low == nil || fee.Cmp(low) < 0 {
 			low = new(big.Int).Set(fee)
