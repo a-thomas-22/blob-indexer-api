@@ -228,15 +228,7 @@ func (p *Poller) broadcastUsersUpdate(ctx context.Context, network config.Networ
 
 	response := make([]UserResponse, 0, len(users))
 	for _, user := range users {
-		response = append(response, UserResponse{
-			NetworkID:     network.ChainID,
-			NetworkName:   network.Name,
-			Address:       user.Address,
-			Name:          user.Name,
-			BlobCount:     user.BlobCount,
-			TotalCostETH:  user.TotalCostETH,
-			LastTimestamp: user.LastTimestamp,
-		})
+		response = append(response, toUserResponse(user, network.ChainID, network.Name))
 	}
 
 	p.hub.BroadcastEvent(network.Name, WSEvent{

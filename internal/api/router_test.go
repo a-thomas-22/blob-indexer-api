@@ -274,9 +274,85 @@ func TestGetTopBlobUsers_Success(t *testing.T) {
 	}
 }
 
+func TestGetTopBlobUsers_SortSpendWindow(t *testing.T) {
+	var gotQuery string
+	var gotArgs []interface{}
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			gotQuery = query
+			gotArgs = append([]interface{}{}, args...)
+			users := dest.(*[]models.BlobUserStats)
+			*users = []models.BlobUserStats{
+				{
+					Address:           "0xabc",
+					Name:              "Alice",
+					Category:          "rollup",
+					BlobCount:         10,
+					TotalCostETH:      "2.5",
+					LastTimestamp:     time.Now(),
+					BlobSharePercent:  62.5,
+					SpendSharePercent: 75,
+				},
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42&limit=5&offset=2&sort=spend&window=24h", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if gotQuery != queryTopBlobUsersWithOptions {
+		t.Fatal("expected options query to be used")
+	}
+	wantArgs := []interface{}{42, 5, 2, "24h", "spend"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+
+	var resp struct {
+		Success bool           `json:"success"`
+		Data    []UserResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success || len(resp.Data) != 1 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if resp.Data[0].Category != "rollup" || resp.Data[0].BlobSharePercent != 62.5 || resp.Data[0].SpendSharePercent != 75 {
+		t.Fatalf("unexpected user share fields: %+v", resp.Data[0])
+	}
+}
+
 func TestGetTopBlobUsers_InvalidLimit(t *testing.T) {
 	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=-1", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetTopBlobUsers_InvalidSort(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?sort=blocks", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetTopBlobUsers_InvalidWindow(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?window=30d", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
 
@@ -322,6 +398,75 @@ func TestGetTopBlobUsers_ExcessiveOffset(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetUserBreakdown_Success(t *testing.T) {
+	var gotQuery string
+	var gotArgs []interface{}
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			gotQuery = query
+			gotArgs = append([]interface{}{}, args...)
+			shares := dest.(*[]models.BlobUserCategoryShare)
+			*shares = []models.BlobUserCategoryShare{
+				{
+					Category:          "rollup",
+					BlobCount:         16,
+					TotalCostETH:      "4.2",
+					BlobSharePercent:  80,
+					SpendSharePercent: 91.5,
+				},
+				{
+					Category:          "unknown",
+					BlobCount:         4,
+					TotalCostETH:      "0.39",
+					BlobSharePercent:  20,
+					SpendSharePercent: 8.5,
+				},
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42&window=7d", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetUserBreakdown(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if gotQuery != queryBlobUserCategoryBreakdown {
+		t.Fatal("expected category breakdown query to be used")
+	}
+	wantArgs := []interface{}{42, "7d"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+
+	var resp struct {
+		Success bool                  `json:"success"`
+		Data    UserBreakdownResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success || resp.Data.Window != "7d" || len(resp.Data.CategoryShares) != 2 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if resp.Data.CategoryShares[1].Category != "unknown" {
+		t.Fatalf("expected unknown category fallback, got %+v", resp.Data.CategoryShares[1])
+	}
+}
+
+func TestGetUserBreakdown_InvalidWindow(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?window=30d", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetUserBreakdown(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
 
@@ -1028,7 +1173,7 @@ func TestGetTopBlobUsers_CacheHit(t *testing.T) {
 		},
 	}
 	a := newTestAPIWithDB(db)
-	cacheKey := fmt.Sprintf("%d:%d:%d", 42, 10, 0)
+	cacheKey := fmt.Sprintf("%d:%d:%d:%s:%s", 42, 10, 0, userSortCount, userWindowAll)
 	a.topUsersCache[cacheKey] = topUsersCacheEntry{
 		response:  []UserResponse{{Address: "0xcached"}},
 		expiresAt: time.Now().Add(time.Minute),
