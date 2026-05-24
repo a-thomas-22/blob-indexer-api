@@ -55,6 +55,12 @@ const docTemplate = `{
                         "description": "Number of blobs to skip for pagination (default: 0, max: 10000)",
                         "name": "offset",
                         "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by sender address",
+                        "name": "from",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -124,6 +130,12 @@ const docTemplate = `{
                         "type": "integer",
                         "description": "Number of blobs to skip for pagination (default: 0, max: 10000)",
                         "name": "offset",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by sender address",
+                        "name": "from",
                         "in": "query"
                     }
                 ],
@@ -737,6 +749,74 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "Bad request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/users/{address}": {
+            "get": {
+                "description": "Retrieve aggregated blob statistics for a specific sender address",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "Get user by address",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Network name or chain ID (default: first enabled network)",
+                        "name": "network",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Ethereum address",
+                        "name": "address",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Success",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/api.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/api.UserResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "User not found",
                         "schema": {
                             "$ref": "#/definitions/api.Response"
                         }

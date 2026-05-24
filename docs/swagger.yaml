@@ -336,6 +336,10 @@ paths:
         in: query
         name: offset
         type: integer
+      - description: Filter by sender address
+        in: query
+        name: from
+        type: string
       produces:
       - application/json
       responses:
@@ -379,6 +383,10 @@ paths:
         in: query
         name: offset
         type: integer
+      - description: Filter by sender address
+        in: query
+        name: from
+        type: string
       produces:
       - application/json
       responses:
@@ -714,6 +722,48 @@ paths:
           schema:
             $ref: '#/definitions/api.Response'
       summary: Get top blob users
+      tags:
+      - users
+  /users/{address}:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve aggregated blob statistics for a specific sender address
+      parameters:
+      - description: 'Network name or chain ID (default: first enabled network)'
+        in: query
+        name: network
+        type: string
+      - description: Ethereum address
+        in: path
+        name: address
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.UserResponse'
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "404":
+          description: User not found
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get user by address
       tags:
       - users
 schemes:
