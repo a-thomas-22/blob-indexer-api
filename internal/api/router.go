@@ -126,6 +126,7 @@ func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Hand
 			r.Route("/blob", func(r chi.Router) {
 				r.Get("/latest", api.GetLatestBlobs)
 				r.Get("/mempool", api.GetMempoolBlobs)
+				r.Get("/mempool/pressure", api.GetMempoolPressure)
 				r.Get("/pricing", api.GetBlobPricing)
 				r.Get("/{txHash}", api.GetBlobByTxHash)
 			})
@@ -133,12 +134,14 @@ func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Hand
 			// User endpoints
 			r.Route("/users", func(r chi.Router) {
 				r.Get("/", api.GetTopBlobUsers)
+				r.Get("/breakdown", api.GetUserBreakdown)
 				r.Get("/{address}", api.GetUserByAddress)
 			})
 
 			// Stats endpoints
 			r.Route("/stats", func(r chi.Router) {
 				r.Get("/", api.GetBlobStats)
+				r.Get("/windows", api.GetRollingStatsWindows)
 			})
 
 			// Status endpoint

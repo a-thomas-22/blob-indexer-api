@@ -219,7 +219,7 @@ func (p *Poller) broadcastUsersUpdate(ctx context.Context, network config.Networ
 	defer cancel()
 
 	var users []models.BlobUserStats
-	if err := p.db.SelectContext(queryCtx, &users, queryTopBlobUsers, network.ChainID, 10, 0); err != nil {
+	if err := p.db.SelectContext(queryCtx, &users, queryTopBlobUsersWithOptions, network.ChainID, 10, 0, string(userWindowAll), string(userSortCount)); err != nil {
 		logger.Error("Poller: failed to query top users",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -228,15 +228,7 @@ func (p *Poller) broadcastUsersUpdate(ctx context.Context, network config.Networ
 
 	response := make([]UserResponse, 0, len(users))
 	for _, user := range users {
-		response = append(response, UserResponse{
-			NetworkID:     network.ChainID,
-			NetworkName:   network.Name,
-			Address:       user.Address,
-			Name:          user.Name,
-			BlobCount:     user.BlobCount,
-			TotalCostETH:  user.TotalCostETH,
-			LastTimestamp: user.LastTimestamp,
-		})
+		response = append(response, toUserResponse(user, network.ChainID, network.Name))
 	}
 
 	p.hub.BroadcastEvent(network.Name, WSEvent{
