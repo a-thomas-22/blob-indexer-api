@@ -865,6 +865,29 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} Response "Internal server error"
 // @Router /users [get]
 func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
+	a.getTopBlobUsers(w, r, false)
+}
+
+// GetTopUnattributedBlobUsers godoc
+// @Summary Get top unattributed blob users
+// @Description Retrieve the top unattributed blob transaction senders by count or spend, optionally scoped to a recent window
+// @Tags users
+// @Accept json
+// @Produce json
+// @Param network query string false "Network name or chain ID (default: first enabled network)"
+// @Param limit query int false "Number of users to return (default: 10, max: 100)"
+// @Param offset query int false "Number of users to skip for pagination (default: 0, max: 10000)"
+// @Param sort query string false "Sort users by count or spend (default: count)" Enums(count, spend)
+// @Param window query string false "Time window to aggregate (default: all)" Enums(24h, 7d, all)
+// @Success 200 {object} Response{data=[]UserResponse} "Success"
+// @Failure 400 {object} Response "Bad request"
+// @Failure 500 {object} Response "Internal server error"
+// @Router /users/unattributed [get]
+func (a *API) GetTopUnattributedBlobUsers(w http.ResponseWriter, r *http.Request) {
+	a.getTopBlobUsers(w, r, true)
+}
+
+func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattributedOnly bool) {
 	network, err := a.getNetworkFromRequest(r)
 	if err != nil {
 		a.respondError(w, http.StatusBadRequest, err.Error())
@@ -889,14 +912,30 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logger.Debug("Getting top blob users",
+	logMessage := "Getting top blob users"
+	errMessage := "Failed to get top blob users"
+	returnMessage := "Returning top blob users"
+	query := queryTopBlobUsersWithOptions
+	cachePrefix := "all"
+	if unattributedOnly {
+		logMessage = "Getting top unattributed blob users"
+		errMessage = "Failed to get top unattributed blob users"
+		returnMessage = "Returning top unattributed blob users"
+		query = queryTopUnattributedBlobUsersWithOptions
+		cachePrefix = "unattributed"
+	}
+
+	logger.Debug(logMessage,
 		zap.String("network", network.Name),
 		zap.Int("limit", limit),
 		zap.Int("offset", offset),
 		zap.String("sort", string(sort)),
 		zap.String("window", string(window)))
 
-	cacheKey := fmt.Sprintf("%d:%d:%d:%s:%s", network.ChainID, limit, offset, sort, window)
+	cacheKey := fmt.Sprintf("%s:%d:%d:%d:%s:%s", cachePrefix, network.ChainID, limit, offset, sort, window)
+	if !unattributedOnly {
+		cacheKey = fmt.Sprintf("%d:%d:%d:%s:%s", network.ChainID, limit, offset, sort, window)
+	}
 	a.cacheMu.RLock()
 	if cached, ok := a.topUsersCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		a.cacheMu.RUnlock()
@@ -911,13 +950,13 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 	var users []models.BlobUserStats
 	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
 	defer cancel()
-	if err := a.db.SelectContext(queryCtx, &users, queryTopBlobUsersWithOptions, network.ChainID, limit, offset, string(window), string(sort)); err != nil {
-		logger.Error("Failed to get top blob users",
+	if err := a.db.SelectContext(queryCtx, &users, query, network.ChainID, limit, offset, string(window), string(sort)); err != nil {
+		logger.Error(errMessage,
 			zap.String("network", network.Name),
 			zap.String("sort", string(sort)),
 			zap.String("window", string(window)),
 			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get top blob users")
+		a.respondError(w, http.StatusInternalServerError, errMessage)
 		return
 	}
 
@@ -926,7 +965,7 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 		response = append(response, toUserResponse(user, network.ChainID, network.Name))
 	}
 
-	logger.Debug("Returning top blob users",
+	logger.Debug(returnMessage,
 		zap.String("network", network.Name),
 		zap.String("sort", string(sort)),
 		zap.String("window", string(window)),

@@ -965,6 +965,97 @@ const docTemplate = `{
                 }
             }
         },
+        "/users/unattributed": {
+            "get": {
+                "description": "Retrieve the top unattributed blob transaction senders by count or spend, optionally scoped to a recent window",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "Get top unattributed blob users",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Network name or chain ID (default: first enabled network)",
+                        "name": "network",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Number of users to return (default: 10, max: 100)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Number of users to skip for pagination (default: 0, max: 10000)",
+                        "name": "offset",
+                        "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "count",
+                            "spend"
+                        ],
+                        "type": "string",
+                        "description": "Sort users by count or spend (default: count)",
+                        "name": "sort",
+                        "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "24h",
+                            "7d",
+                            "all"
+                        ],
+                        "type": "string",
+                        "description": "Time window to aggregate (default: all)",
+                        "name": "window",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Success",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/api.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/definitions/api.UserResponse"
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    }
+                }
+            }
+        },
         "/users/{address}": {
             "get": {
                 "description": "Retrieve aggregated blob statistics for a specific sender address",

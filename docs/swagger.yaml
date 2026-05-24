@@ -1091,6 +1091,65 @@ paths:
       summary: Get blob user market breakdowns
       tags:
       - users
+  /users/unattributed:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve the top unattributed blob transaction senders by count
+        or spend, optionally scoped to a recent window
+      parameters:
+      - description: 'Network name or chain ID (default: first enabled network)'
+        in: query
+        name: network
+        type: string
+      - description: 'Number of users to return (default: 10, max: 100)'
+        in: query
+        name: limit
+        type: integer
+      - description: 'Number of users to skip for pagination (default: 0, max: 10000)'
+        in: query
+        name: offset
+        type: integer
+      - description: 'Sort users by count or spend (default: count)'
+        enum:
+        - count
+        - spend
+        in: query
+        name: sort
+        type: string
+      - description: 'Time window to aggregate (default: all)'
+        enum:
+        - 24h
+        - 7d
+        - all
+        in: query
+        name: window
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/api.UserResponse'
+                  type: array
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get top unattributed blob users
+      tags:
+      - users
 schemes:
 - http
 - https

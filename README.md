@@ -46,6 +46,7 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 
 ### User Endpoints
 - `GET /api/v1/users?network=mainnet&limit=10` - Top blob users by blobs submitted
+- `GET /api/v1/users/unattributed?network=mainnet&limit=10` - Top unattributed blob senders by blobs submitted
 
 ### Stats Endpoints
 - `GET /api/v1/stats?network=mainnet` - Historical blob cost trends, base fee history

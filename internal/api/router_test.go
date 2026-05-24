@@ -329,6 +329,59 @@ func TestGetTopBlobUsers_SortSpendWindow(t *testing.T) {
 	}
 }
 
+func TestGetTopUnattributedBlobUsers_SortSpendWindow(t *testing.T) {
+	var gotQuery string
+	var gotArgs []interface{}
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			gotQuery = query
+			gotArgs = append([]interface{}{}, args...)
+			users := dest.(*[]models.BlobUserStats)
+			*users = []models.BlobUserStats{
+				{
+					Address:           "0xunknown",
+					Category:          "unknown",
+					BlobCount:         12,
+					TotalCostETH:      "2.5",
+					LastTimestamp:     time.Now(),
+					BlobSharePercent:  55.5,
+					SpendSharePercent: 66.6,
+				},
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42&limit=5&offset=2&sort=spend&window=24h", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopUnattributedBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if gotQuery != queryTopUnattributedBlobUsersWithOptions {
+		t.Fatal("expected unattributed options query to be used")
+	}
+	wantArgs := []interface{}{42, 5, 2, "24h", "spend"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+
+	var resp struct {
+		Success bool           `json:"success"`
+		Data    []UserResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success || len(resp.Data) != 1 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if resp.Data[0].Address != "0xunknown" || resp.Data[0].Name != "" || resp.Data[0].BlobCount != 12 {
+		t.Fatalf("unexpected unattributed user: %+v", resp.Data[0])
+	}
+}
+
 func TestGetTopBlobUsers_InvalidLimit(t *testing.T) {
 	a := newTestAPI()
 	req := httptest.NewRequest(http.MethodGet, "/?limit=-1", http.NoBody)

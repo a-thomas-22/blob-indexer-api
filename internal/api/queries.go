@@ -143,6 +143,71 @@ const (
 		LIMIT $2 OFFSET $3
 	`
 
+	// queryTopUnattributedBlobUsersWithOptions aggregates sender usage for addresses
+	// without either indexed attribution or a known blob_users entry.
+	queryTopUnattributedBlobUsersWithOptions = `
+		WITH filtered_blobs AS (
+			SELECT
+				b.from_address,
+				b.user_attribution,
+				b.total_cost_eth,
+				b.timestamp,
+				bu.name AS known_name
+			FROM blobs b
+			LEFT JOIN blob_users bu
+				ON bu.network_id = b.network_id
+				AND LOWER(bu.address) = LOWER(b.from_address)
+			WHERE b.network_id = $1
+				AND (
+					$4 = 'all'
+					OR ($4 = '24h' AND b.timestamp >= NOW() - INTERVAL '24 hours')
+					OR ($4 = '7d' AND b.timestamp >= NOW() - INTERVAL '7 days')
+				)
+		),
+		user_totals AS (
+			SELECT
+				from_address,
+				'' AS user_attribution,
+				'unknown' AS category,
+				COUNT(*) AS blob_count,
+				COALESCE(SUM(total_cost_eth::numeric), 0) AS total_cost_eth,
+				MAX(timestamp) AS last_timestamp
+			FROM filtered_blobs
+			GROUP BY from_address
+			HAVING COALESCE(NULLIF(MAX(BTRIM(user_attribution)), ''), NULLIF(MAX(BTRIM(known_name)), ''), '') = ''
+		),
+		totals AS (
+			SELECT
+				COALESCE(SUM(blob_count), 0) AS total_blobs,
+				COALESCE(SUM(total_cost_eth), 0) AS total_spend
+			FROM user_totals
+		)
+		SELECT
+			user_totals.from_address,
+			user_totals.user_attribution,
+			user_totals.category,
+			user_totals.blob_count,
+			user_totals.total_cost_eth::text AS total_cost_eth,
+			user_totals.last_timestamp,
+			CASE
+				WHEN totals.total_blobs > 0 THEN ROUND((user_totals.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
+				ELSE 0
+			END AS blob_share_percent,
+			CASE
+				WHEN totals.total_spend > 0 THEN ROUND((user_totals.total_cost_eth / totals.total_spend) * 100, 6)::float8
+				ELSE 0
+			END AS spend_share_percent
+		FROM user_totals
+		CROSS JOIN totals
+		ORDER BY
+			CASE WHEN $5 = 'count' THEN user_totals.blob_count END DESC,
+			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_eth END DESC,
+			user_totals.blob_count DESC,
+			user_totals.total_cost_eth DESC,
+			user_totals.last_timestamp DESC
+		LIMIT $2 OFFSET $3
+	`
+
 	// queryBlobUserCategoryBreakdown aggregates blob usage by known user category.
 	queryBlobUserCategoryBreakdown = `
 		WITH category_totals AS (
