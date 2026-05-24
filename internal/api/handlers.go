@@ -576,12 +576,12 @@ func (a *API) GetUserByAddress(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.respondSuccess(w, UserResponse{
-		NetworkID:    network.ChainID,
-		NetworkName:  network.Name,
-		Address:      user.Address,
-		Name:         user.Name,
-		BlobCount:    user.BlobCount,
-		TotalCostETH: user.TotalCostETH,
+		NetworkID:     network.ChainID,
+		NetworkName:   network.Name,
+		Address:       user.Address,
+		Name:          user.Name,
+		BlobCount:     user.BlobCount,
+		TotalCostETH:  user.TotalCostETH,
 		LastTimestamp: user.LastTimestamp,
 	})
 }
