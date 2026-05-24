@@ -3,6 +3,7 @@
 # The RPC URL is unused while indexer.enabled=false.
 
 image:
+  registry: ""
   repository: blob-indexer-api
   pullPolicy: Never
   tag: "test"

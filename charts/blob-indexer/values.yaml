@@ -2,10 +2,10 @@
 replicaCount: 1
 
 image:
-  registry: ""
-  repository: blob-indexer-api
+  registry: registry.ahkc.win/public
+  repository: blob-indexer-api-api
   pullPolicy: IfNotPresent
-  tag: "latest"
+  tag: ""  # Defaults to Chart.appVersion when unset.
 
 # Per-component overrides (image, replicas, resources).
 # Falls back to top-level values when not set.
@@ -17,7 +17,8 @@ api:
 indexer:
   enabled: true
   replicaCount: 1
-  image: {}
+  image:
+    repository: blob-indexer-api-indexer
   resources: {}
 
 service:
