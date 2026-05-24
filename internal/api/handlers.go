@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"math/big"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -66,6 +68,7 @@ const blockMetricsSelectColumns = `
 
 const aggregateCacheTTL = 30 * time.Second
 const aggregateQueryTimeout = 5 * time.Second
+const blobGasPerBlob = 131072
 
 const (
 	queryDevIndexerCounts = `
@@ -100,22 +103,32 @@ type BlobResponse struct {
 	Confirmed         bool      `json:"confirmed"`
 	MaxFeePerBlobGas  *string   `json:"max_fee_per_blob_gas,omitempty"`
 	BlobGasUsed       *int64    `json:"blob_gas_used,omitempty"`
+	RealizedCostWei   *string   `json:"realized_cost_wei,omitempty"`
+	MaxCostWei        *string   `json:"max_cost_wei,omitempty"`
+	HeadroomWei       *string   `json:"fee_cap_headroom_wei,omitempty"`
+	HeadroomPercent   *string   `json:"fee_cap_headroom_percent,omitempty"`
 }
 
 // BlockPricingResponse represents block-level blob pricing data
 type BlockPricingResponse struct {
-	BlockNumber      int64  `json:"block_number"`
-	BlockTimestamp   string `json:"block_timestamp"`
-	BlobCount        int    `json:"blob_count"`
-	BlobGasUsed      int64  `json:"blob_gas_used"`
-	BlobGasTarget    int64  `json:"blob_gas_target"`
-	BlobGasLimit     int64  `json:"blob_gas_limit"`
-	ExcessBlobGas    int64  `json:"excess_blob_gas"`
-	BlobBaseFee      string `json:"blob_base_fee"`
-	UtilizationRatio string `json:"utilization_ratio"`
-	BlobParamsTarget int    `json:"blob_params_target"`
-	BlobParamsMax    int    `json:"blob_params_max"`
-	UpdateFraction   int64  `json:"update_fraction"`
+	BlockNumber        int64   `json:"block_number"`
+	BlockTimestamp     string  `json:"block_timestamp"`
+	BlobCount          int     `json:"blob_count"`
+	BlobGasUsed        int64   `json:"blob_gas_used"`
+	BlobGasTarget      int64   `json:"blob_gas_target"`
+	BlobGasLimit       int64   `json:"blob_gas_limit"`
+	ExcessBlobGas      int64   `json:"excess_blob_gas"`
+	BlobBaseFee        string  `json:"blob_base_fee"`
+	UtilizationRatio   string  `json:"utilization_ratio"`
+	BlobParamsTarget   int     `json:"blob_params_target"`
+	BlobParamsMax      int     `json:"blob_params_max"`
+	TargetBlobs        int     `json:"target_blobs"`
+	MaxBlobs           int     `json:"max_blobs"`
+	AvailableBlobs     int     `json:"available_blobs"`
+	UtilizationPercent float64 `json:"utilization_percent"`
+	IsFull             bool    `json:"is_full"`
+	IsAboveTarget      bool    `json:"is_above_target"`
+	UpdateFraction     int64   `json:"update_fraction"`
 }
 
 // BlobParamsResponse holds the current fork's blob parameters
@@ -193,7 +206,7 @@ type StatusResponse struct {
 
 // toBlobResponse converts a models.Blob to a BlobResponse.
 func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
-	return BlobResponse{
+	response := BlobResponse{
 		NetworkID:         blob.NetworkID,
 		NetworkName:       networkName,
 		BlockNumber:       blob.BlockNumber,
@@ -210,6 +223,114 @@ func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
 		MaxFeePerBlobGas:  blob.MaxFeePerBlobGas,
 		BlobGasUsed:       blob.BlobGasUsed,
 	}
+	response.RealizedCostWei, response.MaxCostWei, response.HeadroomWei, response.HeadroomPercent = deriveBlobCostFields(blob)
+	return response
+}
+
+func deriveBlobCostFields(blob models.Blob) (realizedCostWei, maxCostWei, headroomWei, headroomPercent *string) {
+	if blob.BlobGasUsed == nil || *blob.BlobGasUsed < 0 {
+		return nil, nil, nil, nil
+	}
+
+	blobGasUsed := big.NewInt(*blob.BlobGasUsed)
+
+	var realizedCost *big.Int
+	if baseFeePerBlobGas, ok := parseNonNegativeDecimalInt(blob.BaseFeePerBlobGas); ok {
+		realizedCost = new(big.Int).Mul(baseFeePerBlobGas, blobGasUsed)
+		realizedCostStr := realizedCost.String()
+		realizedCostWei = &realizedCostStr
+	}
+
+	if blob.MaxFeePerBlobGas == nil {
+		return realizedCostWei, nil, nil, nil
+	}
+	maxFeePerBlobGas, ok := parseNonNegativeDecimalInt(*blob.MaxFeePerBlobGas)
+	if !ok {
+		return realizedCostWei, nil, nil, nil
+	}
+
+	maxCost := new(big.Int).Mul(maxFeePerBlobGas, blobGasUsed)
+	maxCostStr := maxCost.String()
+	maxCostWei = &maxCostStr
+
+	if realizedCost == nil {
+		return realizedCostWei, maxCostWei, nil, nil
+	}
+
+	headroom := new(big.Int).Sub(maxCost, realizedCost)
+	headroomStr := headroom.String()
+	headroomWei = &headroomStr
+
+	if maxCost.Sign() == 0 {
+		return realizedCostWei, maxCostWei, headroomWei, nil
+	}
+	percentNumerator := new(big.Int).Mul(headroom, big.NewInt(100))
+	percent := new(big.Rat).SetFrac(percentNumerator, maxCost)
+	percentStr := percent.FloatString(6)
+	headroomPercent = &percentStr
+
+	return realizedCostWei, maxCostWei, headroomWei, headroomPercent
+}
+
+func parseNonNegativeDecimalInt(value string) (*big.Int, bool) {
+	rat, ok := new(big.Rat).SetString(strings.TrimSpace(value))
+	if !ok || rat.Sign() < 0 || rat.Denom().Cmp(big.NewInt(1)) != 0 {
+		return nil, false
+	}
+	return new(big.Int).Set(rat.Num()), true
+}
+
+func toBlockPricingResponse(m models.BlockMetrics) BlockPricingResponse {
+	targetBlobs := blobSpaceLimit(m.BlobParamsTarget, m.BlobGasTarget)
+	maxBlobs := blobSpaceLimit(m.BlobParamsMax, m.BlobGasLimit)
+	availableBlobs := maxBlobs - m.BlobCount
+	if availableBlobs < 0 {
+		availableBlobs = 0
+	}
+
+	usedBlobs := m.BlobCount
+	if usedBlobs < 0 {
+		usedBlobs = 0
+	}
+	if maxBlobs > 0 && usedBlobs > maxBlobs {
+		usedBlobs = maxBlobs
+	}
+
+	var utilizationPercent float64
+	if maxBlobs > 0 {
+		utilizationPercent = math.Round((float64(usedBlobs)/float64(maxBlobs))*10000) / 100
+	}
+
+	return BlockPricingResponse{
+		BlockNumber:        m.BlockNumber,
+		BlockTimestamp:     m.BlockTimestamp.UTC().Format(time.RFC3339),
+		BlobCount:          m.BlobCount,
+		BlobGasUsed:        m.BlobGasUsed,
+		BlobGasTarget:      m.BlobGasTarget,
+		BlobGasLimit:       m.BlobGasLimit,
+		ExcessBlobGas:      m.ExcessBlobGas,
+		BlobBaseFee:        m.BlobBaseFee,
+		UtilizationRatio:   m.UtilizationRatio,
+		BlobParamsTarget:   m.BlobParamsTarget,
+		BlobParamsMax:      m.BlobParamsMax,
+		TargetBlobs:        targetBlobs,
+		MaxBlobs:           maxBlobs,
+		AvailableBlobs:     availableBlobs,
+		UtilizationPercent: utilizationPercent,
+		IsFull:             maxBlobs > 0 && m.BlobCount >= maxBlobs,
+		IsAboveTarget:      targetBlobs > 0 && m.BlobCount > targetBlobs,
+		UpdateFraction:     m.UpdateFraction,
+	}
+}
+
+func blobSpaceLimit(paramsBlobs int, gasLimit int64) int {
+	if paramsBlobs > 0 {
+		return paramsBlobs
+	}
+	if gasLimit <= 0 {
+		return 0
+	}
+	return int(gasLimit / blobGasPerBlob)
 }
 
 // respondJSON responds with JSON
@@ -718,20 +839,7 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 	// Build response
 	recentBlocks := make([]BlockPricingResponse, 0, len(metrics))
 	for _, m := range metrics {
-		recentBlocks = append(recentBlocks, BlockPricingResponse{
-			BlockNumber:      m.BlockNumber,
-			BlockTimestamp:   m.BlockTimestamp.UTC().Format(time.RFC3339),
-			BlobCount:        m.BlobCount,
-			BlobGasUsed:      m.BlobGasUsed,
-			BlobGasTarget:    m.BlobGasTarget,
-			BlobGasLimit:     m.BlobGasLimit,
-			ExcessBlobGas:    m.ExcessBlobGas,
-			BlobBaseFee:      m.BlobBaseFee,
-			UtilizationRatio: m.UtilizationRatio,
-			BlobParamsTarget: m.BlobParamsTarget,
-			BlobParamsMax:    m.BlobParamsMax,
-			UpdateFraction:   m.UpdateFraction,
-		})
+		recentBlocks = append(recentBlocks, toBlockPricingResponse(m))
 	}
 
 	cfg := blobparams.ChainConfigForID(network.ChainID)
@@ -760,8 +868,8 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 			Target:         latest.BlobParamsTarget,
 			Max:            latest.BlobParamsMax,
 			UpdateFraction: uint64(latest.UpdateFraction),
-			TargetGas:      uint64(latest.BlobParamsTarget) * 131072,
-			MaxGas:         uint64(latest.BlobParamsMax) * 131072,
+			TargetGas:      uint64(latest.BlobParamsTarget) * blobGasPerBlob,
+			MaxGas:         uint64(latest.BlobParamsMax) * blobGasPerBlob,
 		}
 
 		// Predict next base fee

@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/holiman/uint256"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
 	"github.com/a-thomas-22/blob-indexer-api/internal/blobparams"
@@ -146,6 +147,33 @@ func TestConstants(t *testing.T) {
 	}
 	if DefaultWorkerCount != 4 {
 		t.Errorf("expected DefaultWorkerCount=4, got %d", DefaultWorkerCount)
+	}
+}
+
+func TestCalculateBlobMetrics_UsesRealizedBlobBaseFeeCost(t *testing.T) {
+	tx := types.NewTx(&types.BlobTx{
+		BlobFeeCap: uint256.NewInt(5),
+		BlobHashes: []common.Hash{
+			{1},
+			{2},
+		},
+	})
+	blobBaseFee := big.NewInt(2)
+	blobGasUsed := tx.BlobGas()
+
+	metrics := calculateBlobMetrics(tx, blobBaseFee)
+
+	if metrics.totalCostETH != new(big.Int).Mul(blobBaseFee, new(big.Int).SetUint64(blobGasUsed)).String() {
+		t.Fatalf("expected totalCostETH to use realized blob base fee cost, got %q", metrics.totalCostETH)
+	}
+	if metrics.totalCostETH == new(big.Int).Mul(big.NewInt(5), new(big.Int).SetUint64(blobGasUsed)).String() {
+		t.Fatal("expected totalCostETH not to use max fee cap cost")
+	}
+	if metrics.maxFeePerBlobGas == nil || *metrics.maxFeePerBlobGas != "5" {
+		t.Fatalf("expected max fee cap to be preserved, got %v", metrics.maxFeePerBlobGas)
+	}
+	if metrics.blobGasUsed == nil || *metrics.blobGasUsed != int64(blobGasUsed) {
+		t.Fatalf("expected blob gas used %d, got %v", blobGasUsed, metrics.blobGasUsed)
 	}
 }
 
