@@ -117,6 +117,35 @@ func TestMetadataConstants(t *testing.T) {
 	if MetadataIndexerVersion != "indexer_version" {
 		t.Errorf("expected MetadataIndexerVersion to be 'indexer_version', got %q", MetadataIndexerVersion)
 	}
+	if MetadataCurrentChainHead != "current_chain_head" {
+		t.Errorf("expected MetadataCurrentChainHead to be 'current_chain_head', got %q", MetadataCurrentChainHead)
+	}
+	if MetadataChainHeadUpdatedAt != "current_chain_head_updated_at" {
+		t.Errorf("expected MetadataChainHeadUpdatedAt to be 'current_chain_head_updated_at', got %q", MetadataChainHeadUpdatedAt)
+	}
+	if MetadataLastIndexedAt != "last_indexed_at" {
+		t.Errorf("expected MetadataLastIndexedAt to be 'last_indexed_at', got %q", MetadataLastIndexedAt)
+	}
+	if MetadataWebSocketFreshnessAt != "websocket_freshness_at" {
+		t.Errorf("expected MetadataWebSocketFreshnessAt to be 'websocket_freshness_at', got %q", MetadataWebSocketFreshnessAt)
+	}
+}
+
+func TestMetadataTimestampRoundTrip(t *testing.T) {
+	ts := time.Date(2026, 5, 24, 12, 34, 56, 789, time.FixedZone("test", -5*60*60))
+
+	encoded := FormatMetadataTimestamp(ts)
+	decoded, err := ParseMetadataTimestamp(encoded)
+	if err != nil {
+		t.Fatalf("ParseMetadataTimestamp() error = %v", err)
+	}
+
+	if !decoded.Equal(ts) {
+		t.Fatalf("expected decoded timestamp %s to equal %s", decoded, ts)
+	}
+	if decoded.Location() != time.UTC {
+		t.Fatalf("expected decoded timestamp to use UTC location, got %s", decoded.Location())
+	}
 }
 
 func TestBlobPendingTransaction(t *testing.T) {

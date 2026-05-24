@@ -1599,7 +1599,19 @@ const docTemplate = `{
         "api.StatusResponse": {
             "type": "object",
             "properties": {
+                "chain_head_updated_at": {
+                    "type": "string"
+                },
+                "current_chain_head": {
+                    "type": "integer"
+                },
+                "indexer_lag_blocks": {
+                    "type": "integer"
+                },
                 "indexer_version": {
+                    "type": "string"
+                },
+                "last_indexed_at": {
                     "type": "string"
                 },
                 "last_indexed_block": {
@@ -1615,6 +1627,9 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "uptime": {
+                    "type": "string"
+                },
+                "websocket_freshness_at": {
                     "type": "string"
                 }
             }

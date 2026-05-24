@@ -178,6 +178,50 @@ func (i *Indexer) getBlobBaseFeeFromBlock(block *types.Block) *big.Int {
 	return big.NewInt(1)
 }
 
+type metadataUpdate struct {
+	key   string
+	value string
+}
+
+func (i *Indexer) setNetworkMetadataValues(updates ...metadataUpdate) {
+	if i.db == nil {
+		return
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	i.setNetworkMetadataValuesLocked(updates...)
+}
+
+func (i *Indexer) setNetworkMetadataValuesLocked(updates ...metadataUpdate) {
+	if i.db == nil {
+		return
+	}
+
+	for _, update := range updates {
+		if err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID, update.key, update.value); err != nil {
+			logger.Error("Failed to update indexer metadata",
+				zap.String("network", i.network.Name),
+				zap.String("metadata_key", update.key),
+				zap.Error(err))
+		}
+	}
+}
+
+func (i *Indexer) updateCurrentChainHead(blockNumber uint64, observedAt time.Time) {
+	i.setNetworkMetadataValues(
+		metadataUpdate{key: models.MetadataCurrentChainHead, value: strconv.FormatUint(blockNumber, 10)},
+		metadataUpdate{key: models.MetadataChainHeadUpdatedAt, value: models.FormatMetadataTimestamp(observedAt)},
+	)
+}
+
+func (i *Indexer) updateWebSocketFreshness(observedAt time.Time) {
+	i.setNetworkMetadataValues(
+		metadataUpdate{key: models.MetadataWebSocketFreshnessAt, value: models.FormatMetadataTimestamp(observedAt)},
+	)
+}
+
 // Start starts the indexer
 func (i *Indexer) Start() error {
 	logger.Info("Starting indexer...",
@@ -343,6 +387,7 @@ func (i *Indexer) determineStartBlock() (uint64, error) {
 			if err != nil {
 				return 0, fmt.Errorf("failed to get latest block number: %w", err)
 			}
+			i.updateCurrentChainHead(latestBlock, time.Now())
 
 			// Parse the offset
 			parts := strings.Split(i.network.StartBlock, "-")
@@ -473,11 +518,18 @@ func (i *Indexer) updateLastIndexedBlock(blockNumber uint64) {
 			return
 		}
 		if atomic.CompareAndSwapUint64(&i.lastIndexedBlock, current, blockNumber) {
-			if err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(blockNumber, 10)); err != nil {
-				logger.Error("Failed to update last indexed block metadata",
-					zap.String("network", i.network.Name),
-					zap.Error(err))
+			i.mu.Lock()
+
+			if atomic.LoadUint64(&i.lastIndexedBlock) != blockNumber {
+				i.mu.Unlock()
+				return
 			}
+
+			i.setNetworkMetadataValuesLocked(
+				metadataUpdate{key: models.MetadataLastIndexedBlock, value: strconv.FormatUint(blockNumber, 10)},
+				metadataUpdate{key: models.MetadataLastIndexedAt, value: models.FormatMetadataTimestamp(time.Now())},
+			)
+			i.mu.Unlock()
 			return
 		}
 	}
@@ -530,6 +582,7 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 				zap.Error(err))
 			continue
 		}
+		i.updateCurrentChainHead(latestBlock, time.Now())
 
 		// If we're caught up, wait for the next tick
 		if currentBlock > latestBlock {
@@ -590,6 +643,9 @@ func (i *Indexer) handleNewBlockSubscription() {
 		case header := <-i.blockSub.Headers:
 			// Process the new block
 			blockNumber := header.Number.Uint64()
+			observedAt := time.Now()
+			i.updateCurrentChainHead(blockNumber, observedAt)
+			i.updateWebSocketFreshness(observedAt)
 
 			// Use atomic read — no lock needed
 			current := atomic.LoadUint64(&i.lastIndexedBlock)

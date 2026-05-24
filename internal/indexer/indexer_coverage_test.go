@@ -613,6 +613,9 @@ func TestUpdateLastIndexedBlock(t *testing.T) {
 	mock.ExpectExec("INSERT INTO indexer_metadata").
 		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, "12").
 		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataLastIndexedAt, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	idx.updateLastIndexedBlock(12)
 	if got := idx.GetLastIndexedBlock(); got != 12 {
@@ -622,6 +625,28 @@ func TestUpdateLastIndexedBlock(t *testing.T) {
 	idx.updateLastIndexedBlock(11) // should no-op
 	if got := idx.GetLastIndexedBlock(); got != 12 {
 		t.Fatalf("expected last indexed block to remain 12, got %d", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+func TestUpdateCurrentChainHead(t *testing.T) {
+	idx := newTestIndexer()
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	observedAt := time.Date(2026, 5, 24, 10, 0, 0, 0, time.UTC)
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataCurrentChainHead, "99").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataChainHeadUpdatedAt, models.FormatMetadataTimestamp(observedAt)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	idx.updateCurrentChainHead(99, observedAt)
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
 	}
 }
 

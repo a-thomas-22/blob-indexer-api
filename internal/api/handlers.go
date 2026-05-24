@@ -309,6 +309,7 @@ type StatusResponse struct {
 	IndexerVersion   string    `json:"indexer_version"`
 	Uptime           string    `json:"uptime"`
 	LastIndexedTime  time.Time `json:"last_indexed_time"`
+	FreshnessResponse
 }
 
 // toBlobResponse converts a models.Blob to a BlobResponse.
@@ -1253,13 +1254,15 @@ func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
 		indexedTime = *lastIndexedTime
 	}
 
+	freshness := a.getNetworkFreshnessFromDB(r.Context(), network.ChainID)
 	response := StatusResponse{
-		NetworkID:        network.ChainID,
-		NetworkName:      network.Name,
-		LastIndexedBlock: a.getLastIndexedBlockFromDB(r.Context(), network.ChainID),
-		IndexerVersion:   a.config.Indexer.Version,
-		Uptime:           uptime,
-		LastIndexedTime:  indexedTime,
+		NetworkID:         network.ChainID,
+		NetworkName:       network.Name,
+		LastIndexedBlock:  freshness.LastIndexedBlock,
+		IndexerVersion:    a.config.Indexer.Version,
+		Uptime:            uptime,
+		LastIndexedTime:   indexedTime,
+		FreshnessResponse: freshness.FreshnessResponse,
 	}
 
 	a.respondSuccess(w, response)

@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
+	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
@@ -42,6 +43,16 @@ type statsCacheEntry struct {
 type topUsersCacheEntry struct {
 	response  []UserResponse
 	expiresAt time.Time
+}
+
+type freshnessMetadataRow struct {
+	Key   string `db:"key"`
+	Value string `db:"value"`
+}
+
+type networkFreshness struct {
+	LastIndexedBlock uint64
+	FreshnessResponse
 }
 
 // NewRouter creates a new API router. The provided context controls the
@@ -224,11 +235,12 @@ func (a *API) getNetworkFromRequest(r *http.Request) (config.NetworkConfig, erro
 func (a *API) GetNetworks(w http.ResponseWriter, r *http.Request) {
 	networks := make([]NetworkResponse, 0, len(a.networks))
 	for _, n := range a.networks {
-		lastBlock := a.getLastIndexedBlockFromDB(r.Context(), n.ChainID)
+		freshness := a.getNetworkFreshnessFromDB(r.Context(), n.ChainID)
 		networks = append(networks, NetworkResponse{
-			ChainID:          n.ChainID,
-			Name:             n.Name,
-			LastIndexedBlock: lastBlock,
+			ChainID:           n.ChainID,
+			Name:              n.Name,
+			LastIndexedBlock:  freshness.LastIndexedBlock,
+			FreshnessResponse: freshness.FreshnessResponse,
 		})
 	}
 
@@ -250,14 +262,25 @@ func (a *API) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	freshness := a.getNetworkFreshnessFromDB(r.Context(), n.ChainID)
 	response := NetworkStatusResponse{
-		ChainID:          n.ChainID,
-		Name:             n.Name,
-		LastIndexedBlock: a.getLastIndexedBlockFromDB(r.Context(), n.ChainID),
-		IndexerVersion:   a.config.Indexer.Version,
+		ChainID:           n.ChainID,
+		Name:              n.Name,
+		LastIndexedBlock:  freshness.LastIndexedBlock,
+		IndexerVersion:    a.config.Indexer.Version,
+		FreshnessResponse: freshness.FreshnessResponse,
 	}
 
 	a.respondSuccess(w, response)
+}
+
+// FreshnessResponse contains network trust and freshness metadata.
+type FreshnessResponse struct {
+	CurrentChainHead     *uint64    `json:"current_chain_head,omitempty"`
+	IndexerLagBlocks     *uint64    `json:"indexer_lag_blocks,omitempty"`
+	LastIndexedAt        *time.Time `json:"last_indexed_at,omitempty"`
+	ChainHeadUpdatedAt   *time.Time `json:"chain_head_updated_at,omitempty"`
+	WebSocketFreshnessAt *time.Time `json:"websocket_freshness_at,omitempty"`
 }
 
 // NetworkResponse is a response containing network information
@@ -265,6 +288,7 @@ type NetworkResponse struct {
 	ChainID          int    `json:"chain_id"`
 	Name             string `json:"name"`
 	LastIndexedBlock uint64 `json:"last_indexed_block"`
+	FreshnessResponse
 }
 
 // NetworkStatusResponse is a response containing detailed network status
@@ -273,6 +297,7 @@ type NetworkStatusResponse struct {
 	Name             string `json:"name"`
 	LastIndexedBlock uint64 `json:"last_indexed_block"`
 	IndexerVersion   string `json:"indexer_version"`
+	FreshnessResponse
 }
 
 // Common errors
@@ -321,4 +346,62 @@ func (a *API) getLastIndexedBlockFromDB(ctx context.Context, networkID int) uint
 		return 0
 	}
 	return block
+}
+
+func (a *API) getNetworkFreshnessFromDB(ctx context.Context, networkID int) networkFreshness {
+	var rows []freshnessMetadataRow
+	if err := a.db.SelectContext(ctx, &rows, queryNetworkFreshnessMetadata, networkID); err != nil {
+		return networkFreshness{}
+	}
+
+	var freshness networkFreshness
+	for _, row := range rows {
+		switch row.Key {
+		case models.MetadataLastIndexedBlock:
+			block, ok := parseMetadataUint(row.Value)
+			if ok {
+				freshness.LastIndexedBlock = block
+			}
+		case models.MetadataCurrentChainHead:
+			head, ok := parseMetadataUint(row.Value)
+			if ok {
+				freshness.CurrentChainHead = &head
+			}
+		case models.MetadataChainHeadUpdatedAt:
+			timestamp, ok := parseMetadataTimestamp(row.Value)
+			if ok {
+				freshness.ChainHeadUpdatedAt = &timestamp
+			}
+		case models.MetadataLastIndexedAt:
+			timestamp, ok := parseMetadataTimestamp(row.Value)
+			if ok {
+				freshness.LastIndexedAt = &timestamp
+			}
+		case models.MetadataWebSocketFreshnessAt:
+			timestamp, ok := parseMetadataTimestamp(row.Value)
+			if ok {
+				freshness.WebSocketFreshnessAt = &timestamp
+			}
+		}
+	}
+
+	if freshness.CurrentChainHead != nil {
+		lag := uint64(0)
+		if *freshness.CurrentChainHead > freshness.LastIndexedBlock {
+			lag = *freshness.CurrentChainHead - freshness.LastIndexedBlock
+		}
+		freshness.IndexerLagBlocks = &lag
+	}
+
+	return freshness
+}
+
+func parseMetadataUint(value string) (uint64, bool) {
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	return parsed, err == nil
+}
+
+func parseMetadataTimestamp(value string) (time.Time, bool) {
+	parsed, err := models.ParseMetadataTimestamp(value)
+	return parsed, err == nil
 }
