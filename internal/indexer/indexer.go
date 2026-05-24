@@ -77,10 +77,7 @@ func calculateBlobMetrics(tx *types.Transaction, blobBaseFee *big.Int) blobMetri
 	}
 
 	blobGasUsed := tx.BlobGas()
-	totalCost := new(big.Int).Mul(
-		new(big.Int).Add(blobBaseFee, tipPerBlobGas),
-		new(big.Int).SetUint64(blobGasUsed),
-	)
+	totalCost := new(big.Int).Mul(blobBaseFee, new(big.Int).SetUint64(blobGasUsed))
 
 	maxFeeStr := maxFeePerBlobGas.String()
 	blobGasUsedInt := int64(blobGasUsed)

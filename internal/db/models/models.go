@@ -66,11 +66,23 @@ type IndexedBlock struct {
 
 // BlobUserStats holds aggregated blob user statistics returned by queries.
 type BlobUserStats struct {
-	Address       string    `db:"from_address" json:"address"`
-	Name          string    `db:"user_attribution" json:"name"`
-	BlobCount     int       `db:"blob_count" json:"blob_count"`
-	TotalCostETH  string    `db:"total_cost_eth" json:"total_cost_eth"`
-	LastTimestamp time.Time `db:"last_timestamp" json:"last_timestamp"`
+	Address           string    `db:"from_address" json:"address"`
+	Name              string    `db:"user_attribution" json:"name"`
+	Category          string    `db:"category" json:"category,omitempty"`
+	BlobCount         int       `db:"blob_count" json:"blob_count"`
+	TotalCostETH      string    `db:"total_cost_eth" json:"total_cost_eth"`
+	LastTimestamp     time.Time `db:"last_timestamp" json:"last_timestamp"`
+	BlobSharePercent  float64   `db:"blob_share_percent" json:"blob_share_percent,omitempty"`
+	SpendSharePercent float64   `db:"spend_share_percent" json:"spend_share_percent,omitempty"`
+}
+
+// BlobUserCategoryShare holds category-level blob user market share statistics.
+type BlobUserCategoryShare struct {
+	Category          string  `db:"category" json:"category"`
+	BlobCount         int     `db:"blob_count" json:"blob_count"`
+	TotalCostETH      string  `db:"total_cost_eth" json:"total_cost_eth"`
+	BlobSharePercent  float64 `db:"blob_share_percent" json:"blob_share_percent"`
+	SpendSharePercent float64 `db:"spend_share_percent" json:"spend_share_percent"`
 }
 
 // BlockMetrics represents block-level blob pricing data.
