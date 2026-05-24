@@ -25,7 +25,7 @@ spec:
       {{- end }}
       containers:
         - name: migrate
-          image: "{{ .Values.api.image.repository | default .Values.image.repository }}:{{ .Values.api.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ include "blob-indexer.image" (list . .Values.api.image) }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - ./blob-indexer-migrate

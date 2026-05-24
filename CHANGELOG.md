@@ -1,5 +1,76 @@
 # Changelog
 
+## [0.3.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.2.0...blob-indexer-api-v0.3.0) (2026-05-24)
+
+
+### Features
+
+* add blob-flow frontend to Tilt dev setup ([a63f80a](https://github.com/a-thomas-22/blob-indexer-api/commit/a63f80a066d74aeceabbd4d8614f5424a1ed6a2e))
+* add blob-flow frontend to Tilt dev setup ([be736db](https://github.com/a-thomas-22/blob-indexer-api/commit/be736dbe9f3d42c0e7a659bc2db0c6c4e3dfeff6))
+* add comprehensive blob pricing data and BPO fork support ([54c752f](https://github.com/a-thomas-22/blob-indexer-api/commit/54c752f726e8b96eb91a84d2d57f1b2045587d42))
+* add comprehensive blob pricing data and BPO fork support ([2dea5ee](https://github.com/a-thomas-22/blob-indexer-api/commit/2dea5eecf057c2c7dec7721e5b792739d6ff0e0d))
+* add Helm chart integration tests with ct and kind ([#60](https://github.com/a-thomas-22/blob-indexer-api/issues/60)) ([d44e474](https://github.com/a-thomas-22/blob-indexer-api/commit/d44e4747af08a43d7cf444602465cc19f37832ae))
+* add HTTP 429 rate limit handling for RPC calls ([b815303](https://github.com/a-thomas-22/blob-indexer-api/commit/b815303027e4fa2876219649650d22470138814c))
+* add HTTP 429 rate limit handling for RPC calls ([5a94c9b](https://github.com/a-thomas-22/blob-indexer-api/commit/5a94c9b87b3f065ba8869f04d5fab65fb8db8c89))
+* add routes ([#128](https://github.com/a-thomas-22/blob-indexer-api/issues/128)) ([83a6770](https://github.com/a-thomas-22/blob-indexer-api/commit/83a677044e3ffe645647aa2ab2c4bf6b12d73c15))
+* **api:** add WebSocket real-time blob feed ([#126](https://github.com/a-thomas-22/blob-indexer-api/issues/126)) ([758020d](https://github.com/a-thomas-22/blob-indexer-api/commit/758020de9b019734775203adcca2a260efd6f594))
+* **api:** remove hardcoded mock payloads from dev endpoints ([#114](https://github.com/a-thomas-22/blob-indexer-api/issues/114)) ([22b2c14](https://github.com/a-thomas-22/blob-indexer-api/commit/22b2c14825bc646ec4c1098bbdb075749eceb3b6))
+* make DB pool sizes and indexer constants configurable ([50303fb](https://github.com/a-thomas-22/blob-indexer-api/commit/50303fb96fc3d5a972bc602db7ef0fec25487442))
+* split indexer and API into separate applications ([e0651e2](https://github.com/a-thomas-22/blob-indexer-api/commit/e0651e234f884369bb6cde3e63b5579c48911320))
+* split indexer and API into separate applications ([7266f5c](https://github.com/a-thomas-22/blob-indexer-api/commit/7266f5c6eece2ffbac9e7677f5544535091fb408))
+* upgrade to Go 1.26 and make govulncheck strict ([518651f](https://github.com/a-thomas-22/blob-indexer-api/commit/518651f9e28dcc9002dbde681c3b26f7b6dd4c01))
+
+
+### Bug Fixes
+
+* add request body size limit to prevent DoS ([8ca1098](https://github.com/a-thomas-22/blob-indexer-api/commit/8ca10985fc3d4a05f4416d02578162f4f8fd9f90))
+* address lint issues and improve test coverage ([954212a](https://github.com/a-thomas-22/blob-indexer-api/commit/954212a5e27932167158dce5f477ebb8803a521f))
+* **api:** add baseline security response headers ([#81](https://github.com/a-thomas-22/blob-indexer-api/issues/81)) ([71c01c2](https://github.com/a-thomas-22/blob-indexer-api/commit/71c01c28df78448f4ca957af0f32f4bab4d501b9))
+* **api:** cache and bound expensive aggregation queries ([#79](https://github.com/a-thomas-22/blob-indexer-api/issues/79)) ([a80bd53](https://github.com/a-thomas-22/blob-indexer-api/commit/a80bd533b357cd43a073b3f7c5f6deab7910e22d))
+* **api:** configure read, write, and idle server timeouts ([#89](https://github.com/a-thomas-22/blob-indexer-api/issues/89)) ([79cf0ce](https://github.com/a-thomas-22/blob-indexer-api/commit/79cf0ceb0a361d5ac83005e12a09e181acd596d0))
+* **api:** stop leaking JSON encoder errors to clients ([#78](https://github.com/a-thomas-22/blob-indexer-api/issues/78)) ([08cb88a](https://github.com/a-thomas-22/blob-indexer-api/commit/08cb88a10f2f1aefc54c592c60b5650ac2399e28))
+* **api:** validate txHash format before DB lookup ([#85](https://github.com/a-thomas-22/blob-indexer-api/issues/85)) ([8c3d533](https://github.com/a-thomas-22/blob-indexer-api/commit/8c3d53381c487aa64cdffb9852ac3d9a5912cf1b))
+* **attribution:** synchronize knownUsers map access ([#83](https://github.com/a-thomas-22/blob-indexer-api/issues/83)) ([7c00bd8](https://github.com/a-thomas-22/blob-indexer-api/commit/7c00bd8e3b78d8ffbc60ed10983de17d1d016090))
+* batch UpdateUserLastSeen into a single query to fix N+1 problem ([d128713](https://github.com/a-thomas-22/blob-indexer-api/commit/d128713c49670869c758c8b75e6d02d78c718905))
+* **ci:** pin trivy action to a fixed version ([#82](https://github.com/a-thomas-22/blob-indexer-api/issues/82)) ([51989a1](https://github.com/a-thomas-22/blob-indexer-api/commit/51989a1d9aa8715492398800b51bcee1ad06e67b))
+* **db:** wrap GetIndexedBlockHash errors with context ([#107](https://github.com/a-thomas-22/blob-indexer-api/issues/107)) ([d7951bb](https://github.com/a-thomas-22/blob-indexer-api/commit/d7951bb8b38a2e4657ace13212df85271b5f6b99))
+* **docker:** remove bundled config.yaml from runtime image ([#80](https://github.com/a-thomas-22/blob-indexer-api/issues/80)) ([35cf866](https://github.com/a-thomas-22/blob-indexer-api/commit/35cf866e9603f11c357c8afa4f0ae94f60da05e0))
+* **ethereum:** guard against missing latest header number ([#76](https://github.com/a-thomas-22/blob-indexer-api/issues/76)) ([77b673e](https://github.com/a-thomas-22/blob-indexer-api/commit/77b673e6146d9bbfcb6cade742e1ef7abc0d8fc4))
+* **ethereum:** harden eth_blobBaseFee parsing ([#77](https://github.com/a-thomas-22/blob-indexer-api/issues/77)) ([e779397](https://github.com/a-thomas-22/blob-indexer-api/commit/e779397000673d3f057d0000f67c5572c384e424))
+* gate all /dev/* endpoints behind dev mode middleware ([07c831e](https://github.com/a-thomas-22/blob-indexer-api/commit/07c831ea03d93107d8791867b27a7a2a9c785878))
+* harden production readiness ([#154](https://github.com/a-thomas-22/blob-indexer-api/issues/154)) ([0e1b85a](https://github.com/a-thomas-22/blob-indexer-api/commit/0e1b85aaa48f76abbae0303bb17df7a2ffc24de0))
+* **helm:** add restrictive pod and container security contexts ([#72](https://github.com/a-thomas-22/blob-indexer-api/issues/72)) ([c521b46](https://github.com/a-thomas-22/blob-indexer-api/commit/c521b466e666a3bbbf982e1f637e8140b6b51ee0))
+* **helm:** add service account and database network policy ([#73](https://github.com/a-thomas-22/blob-indexer-api/issues/73)) ([ef84b18](https://github.com/a-thomas-22/blob-indexer-api/commit/ef84b182288517d472af4b5a931e462ebc4c4590))
+* **helm:** stabilize chart CI install ([#157](https://github.com/a-thomas-22/blob-indexer-api/issues/157)) ([fd0bb18](https://github.com/a-thomas-22/blob-indexer-api/commit/fd0bb18afcbf7ea626bb682bf15da862443fc808))
+* **indexer:** avoid global cancel on single network failure ([#110](https://github.com/a-thomas-22/blob-indexer-api/issues/110)) ([f29fe20](https://github.com/a-thomas-22/blob-indexer-api/commit/f29fe20d7375b9aad509a79429437bda65920747))
+* **indexer:** clean up stale pending blobs and promote on confirmation ([#125](https://github.com/a-thomas-22/blob-indexer-api/issues/125)) ([08ab8d6](https://github.com/a-thomas-22/blob-indexer-api/commit/08ab8d64b6ab50b46941cc6ebc9a2dc1d8521fe7))
+* **indexer:** evict permanently failed blocks from retry map ([#90](https://github.com/a-thomas-22/blob-indexer-api/issues/90)) ([bb8e8ed](https://github.com/a-thomas-22/blob-indexer-api/commit/bb8e8edc2eda440a98ff498499ccb26de9da3942))
+* **indexer:** recover from panics in block worker loop ([#74](https://github.com/a-thomas-22/blob-indexer-api/issues/74)) ([7475623](https://github.com/a-thomas-22/blob-indexer-api/commit/74756238112f00384091032b1f94fc376b0a5768))
+* **indexer:** stop 128x overcount in blob_size_bytes ([#96](https://github.com/a-thomas-22/blob-indexer-api/issues/96)) ([b994122](https://github.com/a-thomas-22/blob-indexer-api/commit/b994122ffc3356624e1694476959cb3bbce4cd6d))
+* **indexer:** use context-driven worker shutdown without channel close ([#84](https://github.com/a-thomas-22/blob-indexer-api/issues/84)) ([1762a44](https://github.com/a-thomas-22/blob-indexer-api/commit/1762a44cfe66431cf135bbab24e1a9bac4da68e1))
+* **indexer:** wrap reorg and reindex deletes in transactions ([#75](https://github.com/a-thomas-22/blob-indexer-api/issues/75)) ([d66dc0c](https://github.com/a-thomas-22/blob-indexer-api/commit/d66dc0c8a1b3ee404750bea6aaf66ad606757294))
+* **logger:** honor configured log format in initialization ([#105](https://github.com/a-thomas-22/blob-indexer-api/issues/105)) ([81612df](https://github.com/a-thomas-22/blob-indexer-api/commit/81612dfad329b843b548aa4f0e41fcfce1a0e225))
+* prevent in-flight query failures by correcting shutdown ordering ([fb2f36b](https://github.com/a-thomas-22/blob-indexer-api/commit/fb2f36b62c60b8059b4620bf4d0e134801ed3df7))
+* publish helm chart without bundled postgres ([#159](https://github.com/a-thomas-22/blob-indexer-api/issues/159)) ([d4b72f1](https://github.com/a-thomas-22/blob-indexer-api/commit/d4b72f1f1d157074549280d7131e267eb1f0cc1c))
+* remove Railway config and migrate golangci-lint config ([1c00abf](https://github.com/a-thomas-22/blob-indexer-api/commit/1c00abf9b6def70f3952f6b7046335fecb819d2b))
+* rename max to maxBlobs to avoid builtin shadow lint error ([6620632](https://github.com/a-thomas-22/blob-indexer-api/commit/66206324652e80d587e68a43e41fbc52e3ed71c2))
+* resolve CI failures in mod-tidy, govulncheck, and dependency-review ([bbfca86](https://github.com/a-thomas-22/blob-indexer-api/commit/bbfca86d7934b1c91e2bb05df70e26704548b86c))
+* resolve lint errors and restore test coverage above 50% ([2307a86](https://github.com/a-thomas-22/blob-indexer-api/commit/2307a86d3d0e8e4ddfa23b38adae5220ab2fcaf7))
+* restrict Tilt deploys to local kind-dev cluster ([#124](https://github.com/a-thomas-22/blob-indexer-api/issues/124)) ([c390c94](https://github.com/a-thomas-22/blob-indexer-api/commit/c390c94e9f20208f0813fa5103b20e203002c81b))
+* **security:** avoid unbounded txpool_content mempool calls ([#71](https://github.com/a-thomas-22/blob-indexer-api/issues/71)) ([21af3fd](https://github.com/a-thomas-22/blob-indexer-api/commit/21af3fdbaa4dbc43c2d65889d133e2d0c934332c))
+* **security:** make DB sslmode configurable and enforce in non-dev ([#68](https://github.com/a-thomas-22/blob-indexer-api/issues/68)) ([27ef8aa](https://github.com/a-thomas-22/blob-indexer-api/commit/27ef8aae4fc75a7910aecd40fe483019c5d5f16a))
+* **security:** move DB URL from ConfigMap to Secret ([#67](https://github.com/a-thomas-22/blob-indexer-api/issues/67)) ([6b92539](https://github.com/a-thomas-22/blob-indexer-api/commit/6b92539636a3c73630b99eb0928f424921239e95))
+* **security:** remove spoofable X-Real-Ip from rate limiter ([#69](https://github.com/a-thomas-22/blob-indexer-api/issues/69)) ([92be2f4](https://github.com/a-thomas-22/blob-indexer-api/commit/92be2f46bdf2dd7234976e9fa14dcc7a776bd0d8))
+* **security:** require API key for dev endpoints ([#70](https://github.com/a-thomas-22/blob-indexer-api/issues/70)) ([2603af2](https://github.com/a-thomas-22/blob-indexer-api/commit/2603af2812c6563609aa49aba39c664dbaa77062))
+* SQL injection vulnerability in DevDatabase handler ([48cf610](https://github.com/a-thomas-22/blob-indexer-api/commit/48cf6100cc5d849c04f08cc51ea176788a5a2bf4))
+* **tilt:** fix broken dev setup and align with production config ([#127](https://github.com/a-thomas-22/blob-indexer-api/issues/127)) ([1b31fd0](https://github.com/a-thomas-22/blob-indexer-api/commit/1b31fd0649e51a04c618b8a39bd2e71dae388e27))
+* update coverage tests for new insertBlockData signature and block_metrics ([2787fa0](https://github.com/a-thomas-22/blob-indexer-api/commit/2787fa0cca2d58b620cf6abdbd06953caf94cf2e))
+
+
+### Dependencies
+
+* bump github.com/go-chi/chi/v5 from 5.2.5 to 5.3.0 ([#155](https://github.com/a-thomas-22/blob-indexer-api/issues/155)) ([ff274a3](https://github.com/a-thomas-22/blob-indexer-api/commit/ff274a3c1aed641788492bb91bdb362ef3c2b591))
+
 ## [0.2.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.1.0...blob-indexer-api-v0.2.0) (2026-03-09)
 
 

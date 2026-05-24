@@ -244,7 +244,7 @@ This project uses [release-please](https://github.com/googleapis/release-please)
 1. PR titles must use [Conventional Commits](https://www.conventionalcommits.org/) format (e.g., `feat: add new endpoint`, `fix: correct query logic`, `deps: bump module`) — this is enforced by CI
 2. When PRs are merged to `main`, release-please automatically maintains a release PR with a generated changelog
 3. Merging the release PR creates a GitHub Release
-4. App releases publish Docker images to `ghcr.io`; chart releases package and push the Helm chart to `ghcr.io` as an OCI artifact
+4. App releases publish Docker images to Harbor at `registry.ahkc.win/public/blob-indexer-api-api` and `registry.ahkc.win/public/blob-indexer-api-indexer`; chart releases package and push the Helm chart to `oci://registry.ahkc.win/public/charts`
 
 ## Project Structure
 
