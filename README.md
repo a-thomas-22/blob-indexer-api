@@ -12,7 +12,6 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 - Persist historical blob data with correct base fee, tip, and total cost
 - Attribute blobs to known rollups based on from_address matching
 - Provide simple, fast REST APIs to access blob data
-- Support full and partial reindexing safely after version changes
 - Support multiple Ethereum networks simultaneously (e.g., mainnet, Sepolia)
 - Configuration-based RPC URLs (not stored in database for flexibility)
 - In-process rate limiting (100 req/s per IP with burst of 200)
@@ -23,7 +22,7 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 
 ## Tech Stack
 
-- Language: Go 1.24
+- Language: Go 1.26.1
 - HTTP Framework: Chi
 - Database: PostgreSQL (with sqlx query builder)
 - Ethereum Client: go-ethereum (ethclient)
@@ -36,34 +35,37 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 ## API Endpoints
 
 ### Network Endpoints
-- `GET /api/networks` - List all available networks
-- `GET /api/networks/{chainId}` - Get status of a specific network
+- `GET /api/v1/networks` - List all available networks
+- `GET /api/v1/networks/{chainId}` - Get status of a specific network
 
 ### Blob Endpoints
-- `GET /api/blob/latest?network=mainnet&limit=10` - Fetch latest blobs from recent blocks
-- `GET /api/blob/mempool?network=mainnet&limit=10` - Fetch pending (unconfirmed) blob transactions
-- `GET /api/blob/{txHash}?network=mainnet` - Fetch a specific blob by transaction hash
+- `GET /api/v1/blob/latest?network=mainnet&limit=10` - Fetch latest blobs from recent blocks
+- `GET /api/v1/blob/mempool?network=mainnet&limit=10` - Fetch pending (unconfirmed) blob transactions
+- `GET /api/v1/blob/pricing?network=mainnet&blocks=20` - Fetch recent blob pricing and utilization metrics
+- `GET /api/v1/blob/{txHash}?network=mainnet` - Fetch a specific blob by transaction hash
 
 ### User Endpoints
-- `GET /api/users?network=mainnet&limit=10` - Top blob users by blobs submitted
+- `GET /api/v1/users?network=mainnet&limit=10` - Top blob users by blobs submitted
 
 ### Stats Endpoints
-- `GET /api/stats?network=mainnet` - Historical blob cost trends, base fee history
+- `GET /api/v1/stats?network=mainnet` - Historical blob cost trends, base fee history
 
 ### Status Endpoints
-- `GET /api/status?network=mainnet` - Indexer status
+- `GET /api/v1/status?network=mainnet` - Indexer status
+
+### WebSocket Endpoint
+- `GET /api/v1/ws?network=mainnet` - Subscribe to live blob, stats, and user updates
 
 ### Development Endpoints
-These endpoints are always available for debugging and monitoring:
-- `GET /api/dev/metrics` - System-wide metrics (memory, goroutines, uptime)
-- `GET /api/dev/indexers` - Per-network indexer status
-- `GET /api/dev/database` - Database statistics
-- `GET /api/dev/logs` - Log entries
-- `GET /api/dev/queries` - Database query stats
-- `GET /api/dev/dashboard` - HTML development dashboard
-- `POST /api/dev/reindex` - Trigger block reindexing (requires `dev_mode: true`)
+These endpoints are available only when `server.dev_mode` is enabled, and can be protected with `server.dev_api_key`:
+- `GET /api/v1/dev/metrics` - System-wide metrics (memory, goroutines, uptime)
+- `GET /api/v1/dev/indexers` - Per-network indexer status
+- `GET /api/v1/dev/database` - Database statistics
+- `GET /api/v1/dev/logs` - Log entries
+- `GET /api/v1/dev/queries` - Database query stats
+- `GET /api/v1/dev/dashboard` - HTML development dashboard
 
-All endpoints accept an optional `network` query parameter (name or chain ID) to specify which network to query. If not provided, the first enabled network is used.
+Legacy `/api/*` paths redirect to `/api/v1/*`. API endpoints accept an optional `network` query parameter (name or chain ID) to specify which network to query. If not provided, the first enabled network is used.
 
 ## API Documentation
 
@@ -83,7 +85,7 @@ make swagger
 
 ### Prerequisites
 
-- Go 1.24 or later
+- Go 1.26.1 or later
 - Docker
 - Kubernetes cluster (local or remote)
 - Helm
@@ -145,6 +147,7 @@ Alternatively, you can use environment variables:
 - `LOG_LEVEL` - Logging level (default: info)
 - `LOG_FORMAT` - Logging format (default: json)
 - `INDEXER_VERSION` - Version of the indexer
+- `DEV_API_KEY` - Optional API key for development endpoints
 - `CONFIG_PATH` - Path to YAML configuration file (optional)
 
 For backward compatibility, you can configure a single network using:
@@ -176,24 +179,29 @@ NETWORK_SEPOLIA_ENABLED=true
    ```
    tilt up
    ```
-4. Access the API at http://localhost:8080/api
+4. Access the API at http://localhost:8080/api/v1
 
 ### Makefile Targets
 
 ```bash
-make build          # Build the binary
-make run            # Build and run locally
+make build          # Build both binaries
+make build-api      # Build API server only
+make build-indexer  # Build indexer only
+make run-api        # Build and run API server
+make run-indexer    # Build and run indexer
 make test           # Run all tests
 make clean          # Remove built binary
 make deps           # Download and tidy Go module dependencies
-make docker-build   # Build Docker image
+make docker-build   # Build both Docker images
 make docker-run     # Run Docker container
 make tilt-up        # Start Tilt development environment
 make seed-data      # Seed test data (runs cmd/testdata)
 make swagger        # Generate Swagger/OpenAPI documentation
 make db-migrate     # Run database migrations
 make db-rollback    # Rollback one database migration
-make helm-install   # Install Helm chart
+make helm-dep-update # Update Helm chart dependencies
+make helm-install-dev # Install Helm chart with dev values
+make helm-install-prod # Install Helm chart with prod values
 make helm-upgrade   # Upgrade Helm release
 make helm-uninstall # Uninstall Helm release
 ```
@@ -201,14 +209,12 @@ make helm-uninstall # Uninstall Helm release
 ### Building and Running with Docker
 
 ```bash
-# Build the Docker image
-docker build -t blob-indexer-api .
+# Build the Docker images
+make docker-build
 
-# Run the container
+# Run the API container
 docker run -p 8080:8080 \
   -e DB_URL="postgres://postgres:postgres@postgres:5432/blobindexer?sslmode=disable" \
-  -e RPC_URL="https://mainnet.infura.io/v3/your-api-key" \
-  -e START_BLOCK="LATEST-1000" \
   -e LOG_LEVEL="info" \
   blob-indexer-api
 ```
@@ -224,8 +230,8 @@ helm repo update
 
 # Install the chart
 helm install blob-indexer ./charts/blob-indexer \
-  --set blobIndexer.ethRpcUrl="https://mainnet.infura.io/v3/your-api-key" \
-  --set blobIndexer.startBlock="LATEST-1000"
+  -f ./charts/blob-indexer/values-dev.yaml \
+  --set appConfig.networks[0].rpc_url="https://mainnet.infura.io/v3/your-api-key"
 ```
 
 For multi-replica deployments, configure edge rate limiting on Ingress so limits are enforced across all pods. Set `ingress.annotations` in Helm values (for example with NGINX: `nginx.ingress.kubernetes.io/limit-rps` and `nginx.ingress.kubernetes.io/limit-burst-multiplier`).
@@ -247,7 +253,8 @@ This project uses [release-please](https://github.com/googleapis/release-please)
 ```
 blob-indexer-api/
 ├── cmd/
-│   ├── server/                 # Main application entry point
+│   ├── api/                    # API server binary
+│   ├── indexer/                # Indexer binary
 │   └── testdata/               # Test data seeding utility
 ├── internal/
 │   ├── api/                    # API handlers, router, middleware, rate limiting
@@ -263,7 +270,8 @@ blob-indexer-api/
 ├── docs/                       # Generated Swagger/OpenAPI documentation
 ├── .env.example                # Environment variable template
 ├── config.yaml                 # Default YAML configuration
-├── Dockerfile                  # Multi-stage Docker build
+├── Dockerfile.api              # API Docker image
+├── Dockerfile.indexer          # Indexer Docker image
 ├── Makefile                    # Build, test, and deployment tasks
 ├── Tiltfile                    # Tilt configuration for local development
 ├── tilt-config.yaml            # Tilt settings
