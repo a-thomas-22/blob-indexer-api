@@ -10,6 +10,8 @@ data:
     database:
       url: ""
       run_migrations: {{ .Values.appConfig.database.run_migrations | default false }}
+      schema_wait_timeout: {{ .Values.appConfig.database.schema_wait_timeout | quote }}
+      schema_poll_interval: {{ .Values.appConfig.database.schema_poll_interval | quote }}
     server:
       port: {{ .Values.appConfig.server.port }}
       dev_mode: {{ .Values.appConfig.server.dev_mode }}

@@ -873,7 +873,16 @@ const docTemplate = `{
                 "confirmed": {
                     "type": "boolean"
                 },
+                "fee_cap_headroom_percent": {
+                    "type": "string"
+                },
+                "fee_cap_headroom_wei": {
+                    "type": "string"
+                },
                 "from_address": {
+                    "type": "string"
+                },
+                "max_cost_wei": {
                     "type": "string"
                 },
                 "max_fee_per_blob_gas": {
@@ -883,6 +892,9 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "network_name": {
+                    "type": "string"
+                },
+                "realized_cost_wei": {
                     "type": "string"
                 },
                 "timestamp": {
@@ -905,6 +917,9 @@ const docTemplate = `{
         "api.BlockPricingResponse": {
             "type": "object",
             "properties": {
+                "available_blobs": {
+                    "type": "integer"
+                },
                 "blob_base_fee": {
                     "type": "string"
                 },
@@ -935,8 +950,23 @@ const docTemplate = `{
                 "excess_blob_gas": {
                     "type": "integer"
                 },
+                "is_above_target": {
+                    "type": "boolean"
+                },
+                "is_full": {
+                    "type": "boolean"
+                },
+                "max_blobs": {
+                    "type": "integer"
+                },
+                "target_blobs": {
+                    "type": "integer"
+                },
                 "update_fraction": {
                     "type": "integer"
+                },
+                "utilization_percent": {
+                    "type": "number"
                 },
                 "utilization_ratio": {
                     "type": "string"

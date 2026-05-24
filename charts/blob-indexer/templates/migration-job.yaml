@@ -35,7 +35,14 @@ spec:
           {{- end }}
           env:
             - name: DB_URL
+              {{- if include "blob-indexer.useMigrationDatabaseSecret" . }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "blob-indexer.databaseSecretName" . }}
+                  key: {{ include "blob-indexer.databaseSecretKey" . }}
+              {{- else }}
               value: {{ include "blob-indexer.migrationDatabaseURL" . | quote }}
+              {{- end }}
             - name: LOG_LEVEL
               value: {{ .Values.appConfig.logging.level | quote }}
             - name: LOG_FORMAT

@@ -18,6 +18,12 @@ func TestLoadForAPI(t *testing.T) {
 	if cfg.Database.URL != "postgres://test:test@localhost:5432/testdb" {
 		t.Errorf("Expected DB URL from env, got: %s", cfg.Database.URL)
 	}
+	if cfg.Database.SchemaWaitTimeout != 2*time.Minute {
+		t.Errorf("Expected schema wait timeout to default to 2m, got: %s", cfg.Database.SchemaWaitTimeout)
+	}
+	if cfg.Database.SchemaPollInterval != 2*time.Second {
+		t.Errorf("Expected schema poll interval to default to 2s, got: %s", cfg.Database.SchemaPollInterval)
+	}
 
 	if len(cfg.Networks) == 0 {
 		t.Fatal("Expected at least one network")

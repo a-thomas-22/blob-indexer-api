@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
 
@@ -146,5 +147,67 @@ func TestErrNetworkNotFound(t *testing.T) {
 func TestErrNoNetworksAvailable(t *testing.T) {
 	if ErrNoNetworksAvailable.Error() != "No networks available" {
 		t.Errorf("unexpected error message: %s", ErrNoNetworksAvailable.Error())
+	}
+}
+
+func TestToBlobResponse_DerivesBlobCostFields(t *testing.T) {
+	maxFeePerBlobGas := "5"
+	blobGasUsed := int64(10)
+
+	response := toBlobResponse(models.Blob{
+		NetworkID:         1,
+		BaseFeePerBlobGas: "2",
+		TotalCostETH:      "legacy-value",
+		MaxFeePerBlobGas:  &maxFeePerBlobGas,
+		BlobGasUsed:       &blobGasUsed,
+	}, "mainnet")
+
+	if response.TotalCostETH != "legacy-value" {
+		t.Fatalf("expected legacy total_cost_eth to be preserved, got %q", response.TotalCostETH)
+	}
+	if response.RealizedCostWei == nil || *response.RealizedCostWei != "20" {
+		t.Fatalf("expected realized_cost_wei=20, got %v", response.RealizedCostWei)
+	}
+	if response.MaxCostWei == nil || *response.MaxCostWei != "50" {
+		t.Fatalf("expected max_cost_wei=50, got %v", response.MaxCostWei)
+	}
+	if response.HeadroomWei == nil || *response.HeadroomWei != "30" {
+		t.Fatalf("expected fee_cap_headroom_wei=30, got %v", response.HeadroomWei)
+	}
+	if response.HeadroomPercent == nil || *response.HeadroomPercent != "60.000000" {
+		t.Fatalf("expected fee_cap_headroom_percent=60.000000, got %v", response.HeadroomPercent)
+	}
+}
+
+func TestToBlobResponse_OmitsUnavailableBlobCostFields(t *testing.T) {
+	maxFeePerBlobGas := "5"
+	response := toBlobResponse(models.Blob{
+		BaseFeePerBlobGas: "2",
+		MaxFeePerBlobGas:  &maxFeePerBlobGas,
+	}, "mainnet")
+
+	if response.RealizedCostWei != nil {
+		t.Fatalf("expected realized_cost_wei to be omitted without blob_gas_used, got %q", *response.RealizedCostWei)
+	}
+	if response.MaxCostWei != nil {
+		t.Fatalf("expected max_cost_wei to be omitted without blob_gas_used, got %q", *response.MaxCostWei)
+	}
+	if response.HeadroomWei != nil {
+		t.Fatalf("expected fee_cap_headroom_wei to be omitted without blob_gas_used, got %q", *response.HeadroomWei)
+	}
+	if response.HeadroomPercent != nil {
+		t.Fatalf("expected fee_cap_headroom_percent to be omitted without blob_gas_used, got %q", *response.HeadroomPercent)
+	}
+
+	blobGasUsed := int64(10)
+	response = toBlobResponse(models.Blob{
+		BaseFeePerBlobGas: "2",
+		BlobGasUsed:       &blobGasUsed,
+	}, "mainnet")
+	if response.RealizedCostWei == nil || *response.RealizedCostWei != "20" {
+		t.Fatalf("expected realized_cost_wei=20 when base fee and blob gas are available, got %v", response.RealizedCostWei)
+	}
+	if response.MaxCostWei != nil || response.HeadroomWei != nil || response.HeadroomPercent != nil {
+		t.Fatal("expected fee-cap fields to be omitted without max_fee_per_blob_gas")
 	}
 }
