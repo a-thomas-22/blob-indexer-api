@@ -205,6 +205,63 @@ func TestGetNetworks(t *testing.T) {
 	}
 }
 
+func TestGetNetworks_IncludesFreshness(t *testing.T) {
+	indexedAt := time.Date(2026, 5, 24, 10, 0, 0, 0, time.UTC)
+	headAt := indexedAt.Add(12 * time.Second)
+	wsAt := headAt.Add(time.Second)
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setSliceResult(dest, []freshnessMetadataRow{
+				{Key: models.MetadataLastIndexedBlock, Value: "100"},
+				{Key: models.MetadataCurrentChainHead, Value: "123"},
+				{Key: models.MetadataLastIndexedAt, Value: models.FormatMetadataTimestamp(indexedAt)},
+				{Key: models.MetadataChainHeadUpdatedAt, Value: models.FormatMetadataTimestamp(headAt)},
+				{Key: models.MetadataWebSocketFreshnessAt, Value: models.FormatMetadataTimestamp(wsAt)},
+			})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/networks", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetNetworks(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Success bool              `json:"success"`
+		Data    []NetworkResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Data) != 1 {
+		t.Fatalf("expected one network, got %d", len(resp.Data))
+	}
+	got := resp.Data[0]
+	if got.LastIndexedBlock != 100 {
+		t.Fatalf("expected last indexed block 100, got %d", got.LastIndexedBlock)
+	}
+	if got.CurrentChainHead == nil || *got.CurrentChainHead != 123 {
+		t.Fatalf("expected current chain head 123, got %v", got.CurrentChainHead)
+	}
+	if got.IndexerLagBlocks == nil || *got.IndexerLagBlocks != 23 {
+		t.Fatalf("expected indexer lag 23, got %v", got.IndexerLagBlocks)
+	}
+	if got.LastIndexedAt == nil || !got.LastIndexedAt.Equal(indexedAt) {
+		t.Fatalf("expected last indexed at %s, got %v", indexedAt, got.LastIndexedAt)
+	}
+	if got.ChainHeadUpdatedAt == nil || !got.ChainHeadUpdatedAt.Equal(headAt) {
+		t.Fatalf("expected chain head updated at %s, got %v", headAt, got.ChainHeadUpdatedAt)
+	}
+	if got.WebSocketFreshnessAt == nil || !got.WebSocketFreshnessAt.Equal(wsAt) {
+		t.Fatalf("expected websocket freshness at %s, got %v", wsAt, got.WebSocketFreshnessAt)
+	}
+}
+
 // --- GetNetworkStatus ---
 
 func TestGetNetworkStatus_Valid(t *testing.T) {
@@ -219,6 +276,47 @@ func TestGetNetworkStatus_Valid(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetNetworkStatus_IncludesFreshness(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setSliceResult(dest, []freshnessMetadataRow{
+				{Key: models.MetadataLastIndexedBlock, Value: "200"},
+				{Key: models.MetadataCurrentChainHead, Value: "205"},
+			})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+
+	r := chi.NewRouter()
+	r.Get("/api/networks/{chainId}", a.GetNetworkStatus)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/networks/42", http.NoBody)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Success bool                  `json:"success"`
+		Data    NetworkStatusResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Data.LastIndexedBlock != 200 {
+		t.Fatalf("expected last indexed block 200, got %d", resp.Data.LastIndexedBlock)
+	}
+	if resp.Data.CurrentChainHead == nil || *resp.Data.CurrentChainHead != 205 {
+		t.Fatalf("expected current chain head 205, got %v", resp.Data.CurrentChainHead)
+	}
+	if resp.Data.IndexerLagBlocks == nil || *resp.Data.IndexerLagBlocks != 5 {
+		t.Fatalf("expected indexer lag 5, got %v", resp.Data.IndexerLagBlocks)
 	}
 }
 
@@ -699,6 +797,57 @@ func TestGetIndexerStatus_Success(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetIndexerStatus_IncludesFreshness(t *testing.T) {
+	lastBlobTime := time.Date(2026, 5, 24, 10, 0, 0, 0, time.UTC)
+	indexedAt := lastBlobTime.Add(5 * time.Second)
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			timestamp := dest.(**time.Time)
+			*timestamp = &lastBlobTime
+			return nil
+		},
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setSliceResult(dest, []freshnessMetadataRow{
+				{Key: models.MetadataLastIndexedBlock, Value: "300"},
+				{Key: models.MetadataCurrentChainHead, Value: "301"},
+				{Key: models.MetadataLastIndexedAt, Value: models.FormatMetadataTimestamp(indexedAt)},
+			})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetIndexerStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Success bool           `json:"success"`
+		Data    StatusResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Data.LastIndexedBlock != 300 {
+		t.Fatalf("expected last indexed block 300, got %d", resp.Data.LastIndexedBlock)
+	}
+	if !resp.Data.LastIndexedTime.Equal(lastBlobTime) {
+		t.Fatalf("expected last indexed time %s, got %s", lastBlobTime, resp.Data.LastIndexedTime)
+	}
+	if resp.Data.CurrentChainHead == nil || *resp.Data.CurrentChainHead != 301 {
+		t.Fatalf("expected current chain head 301, got %v", resp.Data.CurrentChainHead)
+	}
+	if resp.Data.IndexerLagBlocks == nil || *resp.Data.IndexerLagBlocks != 1 {
+		t.Fatalf("expected indexer lag 1, got %v", resp.Data.IndexerLagBlocks)
+	}
+	if resp.Data.LastIndexedAt == nil || !resp.Data.LastIndexedAt.Equal(indexedAt) {
+		t.Fatalf("expected last indexed at %s, got %v", indexedAt, resp.Data.LastIndexedAt)
 	}
 }
 

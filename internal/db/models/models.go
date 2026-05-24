@@ -109,6 +109,20 @@ type BlobCountTotals struct {
 
 // Common metadata keys
 const (
-	MetadataLastIndexedBlock = "last_indexed_block"
-	MetadataIndexerVersion   = "indexer_version"
+	MetadataLastIndexedBlock     = "last_indexed_block"
+	MetadataIndexerVersion       = "indexer_version"
+	MetadataCurrentChainHead     = "current_chain_head"
+	MetadataChainHeadUpdatedAt   = "current_chain_head_updated_at"
+	MetadataLastIndexedAt        = "last_indexed_at"
+	MetadataWebSocketFreshnessAt = "websocket_freshness_at"
 )
+
+// FormatMetadataTimestamp serializes metadata timestamps consistently.
+func FormatMetadataTimestamp(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// ParseMetadataTimestamp parses timestamps stored in indexer_metadata.
+func ParseMetadataTimestamp(value string) (time.Time, error) {
+	return time.Parse(time.RFC3339Nano, value)
+}

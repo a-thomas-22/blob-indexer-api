@@ -1,5 +1,7 @@
 package api
 
+import "github.com/a-thomas-22/blob-indexer-api/internal/db/models"
+
 // SQL query constants used by API handlers.
 const (
 	// queryLatestBlobs retrieves confirmed blobs ordered by block number descending.
@@ -109,7 +111,21 @@ const (
 	`
 
 	// queryLastIndexedBlock retrieves the last indexed block number from indexer metadata.
-	queryLastIndexedBlock = "SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = 'last_indexed_block'"
+	queryLastIndexedBlock = "SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = '" + models.MetadataLastIndexedBlock + "'"
+
+	// queryNetworkFreshnessMetadata retrieves frontend freshness metadata for a network.
+	queryNetworkFreshnessMetadata = `
+		SELECT key, value
+		FROM indexer_metadata
+		WHERE network_id = $1
+			AND key IN (
+				'` + models.MetadataLastIndexedBlock + `',
+				'` + models.MetadataCurrentChainHead + `',
+				'` + models.MetadataChainHeadUpdatedAt + `',
+				'` + models.MetadataLastIndexedAt + `',
+				'` + models.MetadataWebSocketFreshnessAt + `'
+			)
+	`
 
 	// queryNewBlobsSinceBlock retrieves confirmed blobs after a given block number.
 	queryNewBlobsSinceBlock = `
