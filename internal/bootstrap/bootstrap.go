@@ -40,6 +40,12 @@ func InitializeApp(loadConfig func() (*config.Config, error)) (*AppResources, er
 		}
 	}
 
+	if err := database.WaitForSchema(ctx, cfg.Database.SchemaWaitTimeout, cfg.Database.SchemaPollInterval); err != nil {
+		_ = database.Close()
+		cancel()
+		return nil, fmt.Errorf("database schema is not ready: %w", err)
+	}
+
 	if err := database.UpsertNetworks(ctx, cfg.Networks); err != nil {
 		_ = database.Close()
 		cancel()

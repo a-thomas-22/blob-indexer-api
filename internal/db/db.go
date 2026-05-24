@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"path/filepath"
-	"runtime"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -53,12 +51,10 @@ func RunMigrations(dbURL string) error {
 	}
 	defer db.Close()
 
-	// Get the path to the migrations directory
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		return errors.New("failed to get caller information")
+	migrationsPath, err := migrationsDir()
+	if err != nil {
+		return err
 	}
-	migrationsPath := filepath.Join(filepath.Dir(filename), "migrations")
 
 	// Create a new migrate instance
 	driver, err := postgres.WithInstance(db.DB, &postgres.Config{})

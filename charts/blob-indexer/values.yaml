@@ -94,6 +94,8 @@ appConfig:
   database:
     url: ""  # PostgreSQL connection string; can also be set via externalDatabase.url
     run_migrations: false
+    schema_wait_timeout: "2m"
+    schema_poll_interval: "2s"
   server:
     port: 8080
     dev_mode: false
