@@ -626,6 +626,9 @@ func TestUpdateLastIndexedBlock(t *testing.T) {
 	if got := idx.GetLastIndexedBlock(); got != 12 {
 		t.Fatalf("expected last indexed block to remain 12, got %d", got)
 	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
 }
 
 func TestUpdateCurrentChainHead(t *testing.T) {
@@ -642,6 +645,9 @@ func TestUpdateCurrentChainHead(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	idx.updateCurrentChainHead(99, observedAt)
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
 }
 
 func TestReindex(t *testing.T) {

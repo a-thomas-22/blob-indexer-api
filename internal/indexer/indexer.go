@@ -191,6 +191,14 @@ func (i *Indexer) setNetworkMetadataValues(updates ...metadataUpdate) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
+	i.setNetworkMetadataValuesLocked(updates...)
+}
+
+func (i *Indexer) setNetworkMetadataValuesLocked(updates ...metadataUpdate) {
+	if i.db == nil {
+		return
+	}
+
 	for _, update := range updates {
 		if err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID, update.key, update.value); err != nil {
 			logger.Error("Failed to update indexer metadata",
@@ -510,10 +518,18 @@ func (i *Indexer) updateLastIndexedBlock(blockNumber uint64) {
 			return
 		}
 		if atomic.CompareAndSwapUint64(&i.lastIndexedBlock, current, blockNumber) {
-			i.setNetworkMetadataValues(
+			i.mu.Lock()
+
+			if atomic.LoadUint64(&i.lastIndexedBlock) != blockNumber {
+				i.mu.Unlock()
+				return
+			}
+
+			i.setNetworkMetadataValuesLocked(
 				metadataUpdate{key: models.MetadataLastIndexedBlock, value: strconv.FormatUint(blockNumber, 10)},
 				metadataUpdate{key: models.MetadataLastIndexedAt, value: models.FormatMetadataTimestamp(time.Now())},
 			)
+			i.mu.Unlock()
 			return
 		}
 	}
