@@ -1400,12 +1400,24 @@ func TestGetBlobPricing_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	var resp Response
+	var resp struct {
+		Success bool            `json:"success"`
+		Data    PricingResponse `json:"data"`
+	}
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 	if !resp.Success {
 		t.Error("expected Success=true")
+	}
+	if resp.Data.MarketPressure.PredictedDirection != marketPressureDirectionFlat {
+		t.Errorf("expected flat market pressure direction, got %q", resp.Data.MarketPressure.PredictedDirection)
+	}
+	if resp.Data.MarketPressure.NextBlockFeeEstimate.Low == "" {
+		t.Error("expected low next-block fee estimate")
+	}
+	if resp.Data.MarketPressure.NextBlockFeeEstimate.High == "" {
+		t.Error("expected high next-block fee estimate")
 	}
 }
 
