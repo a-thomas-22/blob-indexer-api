@@ -90,6 +90,7 @@ const (
 				COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY b.base_fee_per_blob_gas::numeric), 0) AS p95_blob_base_fee
 			FROM blobs b
 			WHERE b.network_id = $1
+				AND b.confirmed = true
 				AND b.timestamp >= wb.start_time
 				AND b.timestamp < wb.end_time
 		) bs ON true

@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,14 +75,27 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 	now := time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC)
 	db := &mockDB{
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			if query != queryRollingStatsWindows {
-				t.Fatalf("unexpected query: %s", query)
+			for _, want := range []string{
+				"WITH requested_windows AS",
+				"FROM blobs b",
+				"b.confirmed = true",
+				"FROM block_metrics bm",
+				"ORDER BY wb.ord",
+			} {
+				if !strings.Contains(query, want) {
+					t.Fatalf("expected query to contain %q: %s", want, query)
+				}
 			}
 			if len(args) != 4 {
 				t.Fatalf("expected 4 args, got %d", len(args))
 			}
 			if args[0] != 42 {
 				t.Fatalf("expected network arg 42, got %v", args[0])
+			}
+			requireDriverValue(t, args[1], `{"1h"}`)
+			requireDriverValue(t, args[2], `{3600}`)
+			if generatedAt, ok := args[3].(time.Time); !ok || generatedAt.IsZero() {
+				t.Fatalf("expected generated_at time arg, got %#v", args[3])
 			}
 			setSliceResult(dest, []rollingStatsWindowRow{
 				{
@@ -137,6 +152,22 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 	}
 	if window.AverageUtilization != "0.750000" || window.TotalCostETH != "0.0123" || window.UniqueSenders != 3 {
 		t.Fatalf("unexpected market stats: %+v", window)
+	}
+}
+
+func requireDriverValue(t *testing.T, arg interface{}, want string) {
+	t.Helper()
+
+	valuer, ok := arg.(driver.Valuer)
+	if !ok {
+		t.Fatalf("expected driver.Valuer arg, got %T", arg)
+	}
+	got, err := valuer.Value()
+	if err != nil {
+		t.Fatalf("failed to read driver value: %v", err)
+	}
+	if got != want {
+		t.Fatalf("expected driver value %q, got %q", want, got)
 	}
 }
 
