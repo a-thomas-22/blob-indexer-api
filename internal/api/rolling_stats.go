@@ -135,20 +135,7 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 		Windows:     make([]RollingWindowStats, 0, len(rows)),
 	}
 	for _, row := range rows {
-		response.Windows = append(response.Windows, RollingWindowStats{
-			Window:             row.Window,
-			DurationSeconds:    row.DurationSeconds,
-			StartTime:          row.StartTime,
-			EndTime:            row.EndTime,
-			AverageBlobBaseFee: row.AverageBlobBaseFee,
-			MedianBlobBaseFee:  row.MedianBlobBaseFee,
-			P95BlobBaseFee:     row.P95BlobBaseFee,
-			TotalBlobs:         row.TotalBlobs,
-			TotalBlobGasUsed:   row.TotalBlobGasUsed,
-			AverageUtilization: row.AverageUtilization,
-			TotalCostETH:       row.TotalCostETH,
-			UniqueSenders:      row.UniqueSenders,
-		})
+		response.Windows = append(response.Windows, RollingWindowStats(row))
 	}
 
 	a.respondSuccess(w, response)
