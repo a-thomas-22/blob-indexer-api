@@ -32,12 +32,14 @@ type NetworkConfig struct {
 
 // DatabaseConfig holds the database configuration
 type DatabaseConfig struct {
-	URL             string        `mapstructure:"url" yaml:"url"`
-	RunMigrations   bool          `mapstructure:"run_migrations" yaml:"run_migrations"`
-	MaxOpenConns    int           `mapstructure:"max_open_conns" yaml:"max_open_conns"`
-	MaxIdleConns    int           `mapstructure:"max_idle_conns" yaml:"max_idle_conns"`
-	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime" yaml:"conn_max_lifetime"`
-	ConnMaxIdleTime time.Duration `mapstructure:"conn_max_idle_time" yaml:"conn_max_idle_time"`
+	URL                string        `mapstructure:"url" yaml:"url"`
+	RunMigrations      bool          `mapstructure:"run_migrations" yaml:"run_migrations"`
+	SchemaWaitTimeout  time.Duration `mapstructure:"schema_wait_timeout" yaml:"schema_wait_timeout"`
+	SchemaPollInterval time.Duration `mapstructure:"schema_poll_interval" yaml:"schema_poll_interval"`
+	MaxOpenConns       int           `mapstructure:"max_open_conns" yaml:"max_open_conns"`
+	MaxIdleConns       int           `mapstructure:"max_idle_conns" yaml:"max_idle_conns"`
+	ConnMaxLifetime    time.Duration `mapstructure:"conn_max_lifetime" yaml:"conn_max_lifetime"`
+	ConnMaxIdleTime    time.Duration `mapstructure:"conn_max_idle_time" yaml:"conn_max_idle_time"`
 }
 
 // ServerConfig holds the server configuration
@@ -117,6 +119,8 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")
 	v.SetDefault("database.run_migrations", false)
+	v.SetDefault("database.schema_wait_timeout", "2m")
+	v.SetDefault("database.schema_poll_interval", "2s")
 	v.SetDefault("database.max_open_conns", 25)
 	v.SetDefault("database.max_idle_conns", 10)
 	v.SetDefault("database.conn_max_lifetime", "5m")
@@ -335,6 +339,12 @@ func loadConfig() (*Config, error) {
 		return nil, err
 	}
 	if cfg.Database.ConnMaxIdleTime, err = parseDuration(v, "database.conn_max_idle_time", "conn_max_idle_time"); err != nil {
+		return nil, err
+	}
+	if cfg.Database.SchemaWaitTimeout, err = parseDuration(v, "database.schema_wait_timeout", "schema_wait_timeout"); err != nil {
+		return nil, err
+	}
+	if cfg.Database.SchemaPollInterval, err = parseDuration(v, "database.schema_poll_interval", "schema_poll_interval"); err != nil {
 		return nil, err
 	}
 	if cfg.Indexer.GapScanInterval, err = parseDuration(v, "indexer.gap_scan_interval", "gap_scan_interval"); err != nil {

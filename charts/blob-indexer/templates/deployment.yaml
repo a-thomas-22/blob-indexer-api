@@ -50,8 +50,8 @@ spec:
             - name: DB_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "blob-indexer.fullname" . }}-db
-                  key: DB_URL
+                  name: {{ include "blob-indexer.applicationDatabaseSecretName" . }}
+                  key: {{ include "blob-indexer.applicationDatabaseSecretKey" . }}
           volumeMounts:
             - name: config-volume
               mountPath: /etc/config
@@ -123,8 +123,8 @@ spec:
             - name: DB_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "blob-indexer.fullname" . }}-db
-                  key: DB_URL
+                  name: {{ include "blob-indexer.applicationDatabaseSecretName" . }}
+                  key: {{ include "blob-indexer.applicationDatabaseSecretKey" . }}
           volumeMounts:
             - name: config-volume
               mountPath: /etc/config

@@ -74,14 +74,19 @@ serviceAccount:
 configMap:
   create: true
 
-# Database Secret creation toggle. When true, set appConfig.database.url or
-# externalDatabase.url. When false, create a Secret named
-# <release fullname>-db with a DB_URL key outside this chart.
+# Database Secret configuration. When create is true, set appConfig.database.url
+# or externalDatabase.url. When create is false, provide this Secret outside the
+# chart, defaulting to <release fullname>-db when name is unset.
 databaseSecret:
   create: true
+  name: ""
+  key: DB_URL
 
 migrations:
   enabled: true
+  databaseSecret:
+    name: ""
+    key: ""  # Defaults to databaseSecret.key.
 
 # Application configuration -- rendered into a ConfigMap as YAML.
 # Maps directly to the Config struct in internal/config/config.go.
@@ -89,6 +94,8 @@ appConfig:
   database:
     url: ""  # PostgreSQL connection string; can also be set via externalDatabase.url
     run_migrations: false
+    schema_wait_timeout: "2m"
+    schema_poll_interval: "2s"
   server:
     port: 8080
     dev_mode: false

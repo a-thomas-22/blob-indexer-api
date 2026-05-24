@@ -73,6 +73,9 @@ jobs:
 
       - uses: ./.github/actions/setup-chart-testing
 
+      - name: Run chart template tests
+        run: make chart-template-test
+
       - name: Run ct lint
         run: ct lint --config charts/ct.yaml
 
