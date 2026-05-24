@@ -222,16 +222,14 @@ docker run -p 8080:8080 \
 ### Deploying with Helm
 
 ```bash
-# Add the Bitnami repository for PostgreSQL dependency
-helm repo add bitnami https://charts.bitnami.com/bitnami
-
-# Update Helm repositories
-helm repo update
-
-# Install the chart
+# Install the chart. PostgreSQL is external to this chart; provide a DB URL.
 helm install blob-indexer ./charts/blob-indexer \
-  -f ./charts/blob-indexer/values-dev.yaml \
-  --set appConfig.networks[0].rpc_url="https://mainnet.infura.io/v3/your-api-key"
+  --set appConfig.database.url="postgres://user:pass@postgres.example.com:5432/blobindexer?sslmode=require" \
+  --set appConfig.networks[0].name="mainnet" \
+  --set appConfig.networks[0].chain_id=1 \
+  --set appConfig.networks[0].rpc_url="https://mainnet.infura.io/v3/your-api-key" \
+  --set appConfig.networks[0].start_block="LATEST-1000" \
+  --set appConfig.networks[0].enabled=true
 ```
 
 For multi-replica deployments, configure edge rate limiting on Ingress so limits are enforced across all pods. Set `ingress.annotations` in Helm values (for example with NGINX: `nginx.ingress.kubernetes.io/limit-rps` and `nginx.ingress.kubernetes.io/limit-burst-multiplier`).
@@ -244,9 +242,8 @@ This project uses [release-please](https://github.com/googleapis/release-please)
 
 1. PR titles must use [Conventional Commits](https://www.conventionalcommits.org/) format (e.g., `feat: add new endpoint`, `fix: correct query logic`, `deps: bump module`) — this is enforced by CI
 2. When PRs are merged to `main`, release-please automatically maintains a release PR with a generated changelog
-3. Merging the release PR creates a GitHub Release, which triggers:
-   - **Docker**: image pushed to `ghcr.io` with semver tags
-   - **Helm**: chart packaged and pushed to `ghcr.io` as an OCI artifact
+3. Merging the release PR creates a GitHub Release
+4. App releases publish Docker images to `ghcr.io`; chart releases package and push the Helm chart to `ghcr.io` as an OCI artifact
 
 ## Project Structure
 

@@ -2,9 +2,17 @@
 replicaCount: 2
 
 image:
-  repository: ghcr.io/a-thomas-22/blob-indexer-api
+  repository: ghcr.io/a-thomas-22/blob-indexer-api-api
   pullPolicy: Always
   tag: ""  # Set via --set image.tag=<sha> in CI
+
+api:
+  image:
+    repository: ghcr.io/a-thomas-22/blob-indexer-api-api
+
+indexer:
+  image:
+    repository: ghcr.io/a-thomas-22/blob-indexer-api-indexer
 
 resources:
   limits:
@@ -14,10 +22,9 @@ resources:
     cpu: 500m
     memory: 512Mi
 
-database:
-  sslMode: require
-
 appConfig:
+  database:
+    url: ""  # Set via --set appConfig.database.url=...
   server:
     dev_mode: false
   logging:
@@ -33,14 +40,6 @@ appConfig:
       rpc_url: ""  # Set via --set appConfig.networks[0].rpc_url=...
       start_block: "LATEST-1000"
       enabled: true
-
-# Disable bundled PostgreSQL in production
-postgresql:
-  enabled: false
-
-# Set via --set externalDatabase.url=...
-externalDatabase:
-  url: ""
 
 healthCheck:
   initialDelaySeconds: 60

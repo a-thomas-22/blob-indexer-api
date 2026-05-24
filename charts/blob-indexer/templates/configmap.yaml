@@ -1,5 +1,4 @@
 {{- if .Values.configMap.create }}
-{{- $sslMode := .Values.database.sslMode | default "require" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
