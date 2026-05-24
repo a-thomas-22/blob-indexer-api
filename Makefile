@@ -1,4 +1,4 @@
-.PHONY: build build-api build-indexer run-api run-indexer test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-install-dev helm-install-prod helm-upgrade helm-uninstall ci staticcheck chart-lint chart-test chart-test-run kind-create kind-delete
+.PHONY: build build-api build-indexer build-migrate run-api run-indexer test test-coverage test-race lint lint-fix vet fmt clean docker-build docker-run tilt-up seed-data helm-dep-update helm-install-dev helm-install-prod helm-upgrade helm-uninstall ci staticcheck chart-lint chart-test chart-test-run kind-create kind-delete
 
 # Go parameters
 GOCMD=go
@@ -24,6 +24,9 @@ build-api:
 
 build-indexer:
 	$(GOBUILD) -o $(INDEXER_BINARY) -v ./cmd/indexer
+
+build-migrate:
+	$(GOBUILD) -o blob-indexer-migrate -v ./cmd/migrate
 
 run-api: build-api
 	./$(API_BINARY)
@@ -103,6 +106,9 @@ swagger:
 	$(GOCMD) run github.com/swaggo/swag/cmd/swag@$(SWAG_VERSION) init -g cmd/api/main.go -o docs
 
 # Helm commands
+helm-dep-update:
+	helm dependency update ./charts/blob-indexer
+
 helm-install-dev:
 	helm install blob-indexer ./charts/blob-indexer \
 		-f ./charts/blob-indexer/values-dev.yaml

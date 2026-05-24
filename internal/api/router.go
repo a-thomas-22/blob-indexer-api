@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -161,20 +162,16 @@ func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Hand
 	// Backward compatibility: redirect /api/* to /api/v1/* with 301 Moved Permanently
 	r.HandleFunc("/api/*", func(w http.ResponseWriter, r *http.Request) {
 		// Strip the "/api" prefix and prepend "/api/v1"
-		newPath := "/api/v1" + r.URL.Path[len("/api"):]
-		if r.URL.RawQuery != "" {
-			newPath += "?" + r.URL.RawQuery
-		}
-		http.Redirect(w, r, newPath, http.StatusMovedPermanently)
+		location := (&url.URL{Path: "/api/v1" + r.URL.Path[len("/api"):], RawQuery: r.URL.RawQuery}).String()
+		w.Header().Set("Location", location)
+		w.WriteHeader(http.StatusMovedPermanently)
 	})
 
 	// Also handle the exact /api path (without trailing slash or sub-paths)
 	r.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
-		newPath := "/api/v1"
-		if r.URL.RawQuery != "" {
-			newPath += "?" + r.URL.RawQuery
-		}
-		http.Redirect(w, r, newPath, http.StatusMovedPermanently)
+		location := (&url.URL{Path: "/api/v1", RawQuery: r.URL.RawQuery}).String()
+		w.Header().Set("Location", location)
+		w.WriteHeader(http.StatusMovedPermanently)
 	})
 
 	logger.Info("API routes initialized",

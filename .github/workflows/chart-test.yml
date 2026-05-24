@@ -67,7 +67,11 @@ jobs:
         with:
           version: v3.14.0
 
-      - uses: helm/chart-testing-action@v2.8.0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: ./.github/actions/setup-chart-testing
 
       - name: Run ct lint
         run: ct lint --config charts/ct.yaml
@@ -88,7 +92,11 @@ jobs:
         with:
           version: v3.14.0
 
-      - uses: helm/chart-testing-action@v2.8.0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: ./.github/actions/setup-chart-testing
 
       - name: Add Bitnami repo
         run: helm repo add bitnami https://charts.bitnami.com/bitnami

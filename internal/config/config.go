@@ -33,6 +33,7 @@ type NetworkConfig struct {
 // DatabaseConfig holds the database configuration
 type DatabaseConfig struct {
 	URL             string        `mapstructure:"url" yaml:"url"`
+	RunMigrations   bool          `mapstructure:"run_migrations" yaml:"run_migrations"`
 	MaxOpenConns    int           `mapstructure:"max_open_conns" yaml:"max_open_conns"`
 	MaxIdleConns    int           `mapstructure:"max_idle_conns" yaml:"max_idle_conns"`
 	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime" yaml:"conn_max_lifetime"`
@@ -115,6 +116,7 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("server.shutdown_timeout", "15s")
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")
+	v.SetDefault("database.run_migrations", false)
 	v.SetDefault("database.max_open_conns", 25)
 	v.SetDefault("database.max_idle_conns", 10)
 	v.SetDefault("database.conn_max_lifetime", "5m")

@@ -28,9 +28,6 @@ resources:
     cpu: 100m
     memory: 128Mi
 
-database:
-  sslMode: disable
-
 appConfig:
   database:
     url: "postgres://testuser:testpass@blob-indexer-postgresql.default.svc.cluster.local:5432/blobindexer?sslmode=disable"

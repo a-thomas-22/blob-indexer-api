@@ -1,5 +1,11 @@
 # Production values for blob-indexer
-replicaCount: 2
+replicaCount: 1
+
+api:
+  replicaCount: 2
+
+indexer:
+  replicaCount: 1
 
 image:
   repository: ghcr.io/a-thomas-22/blob-indexer-api-api
@@ -42,5 +48,6 @@ appConfig:
       enabled: true
 
 healthCheck:
+  path: /api/v1/status
   initialDelaySeconds: 60
   periodSeconds: 15

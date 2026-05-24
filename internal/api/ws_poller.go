@@ -282,7 +282,7 @@ func (p *Poller) pollMempool(ctx context.Context, network config.NetworkConfig) 
 			p.hub.BroadcastEvent(network.Name, WSEvent{
 				Type: EventMempoolUpdate,
 				Data: MempoolUpdateData{
-					Action: "add",
+					Action: MempoolActionAdd,
 					Blob:   toBlobResponse(blob, network.Name),
 				},
 			})
@@ -295,7 +295,7 @@ func (p *Poller) pollMempool(ctx context.Context, network config.NetworkConfig) 
 			p.hub.BroadcastEvent(network.Name, WSEvent{
 				Type: EventMempoolUpdate,
 				Data: MempoolUpdateData{
-					Action: "remove",
+					Action: MempoolActionRemove,
 					Blob:   BlobResponse{TxHash: hash, NetworkName: network.Name, NetworkID: chainID},
 				},
 			})

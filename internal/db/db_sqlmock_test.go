@@ -197,6 +197,49 @@ func TestSetNetworkMetadata(t *testing.T) {
 	})
 }
 
+func TestUpsertNetworks(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		networks := []config.NetworkConfig{
+			{Name: "mainnet", ChainID: 1, StartBlock: "LATEST-1000", Enabled: true},
+			{Name: "sepolia", ChainID: 11155111, StartBlock: "LATEST-100", Enabled: false},
+		}
+
+		mock.ExpectExec("INSERT INTO networks").
+			WithArgs(1, "mainnet", "LATEST-1000", true).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec("INSERT INTO networks").
+			WithArgs(11155111, "sepolia", "LATEST-100", false).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+
+		if err := db.UpsertNetworks(context.Background(), networks); err != nil {
+			t.Fatalf("UpsertNetworks() error = %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		networks := []config.NetworkConfig{
+			{Name: "sepolia", ChainID: 11155111, StartBlock: "LATEST-100", Enabled: true},
+		}
+
+		mock.ExpectExec("INSERT INTO networks").
+			WithArgs(11155111, "sepolia", "LATEST-100", true).
+			WillReturnError(errors.New("write failed"))
+
+		err := db.UpsertNetworks(context.Background(), networks)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "failed to upsert network sepolia") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
 func TestGetIndexedBlockHash(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		db, mock := newMockDB(t)

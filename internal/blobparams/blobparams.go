@@ -8,6 +8,18 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
+const (
+	forkBPO5    = "BPO5"
+	forkBPO4    = "BPO4"
+	forkBPO3    = "BPO3"
+	forkBPO2    = "BPO2"
+	forkBPO1    = "BPO1"
+	forkOsaka   = "Osaka"
+	forkPrague  = "Prague"
+	forkCancun  = "Cancun"
+	forkPre4844 = "Pre-4844"
+)
+
 // BlobParams holds the active blob parameters for a specific block timestamp.
 type BlobParams struct {
 	Target         int
@@ -86,23 +98,23 @@ func ForkName(cfg *params.ChainConfig, time uint64) string {
 	london := cfg.LondonBlock
 	switch {
 	case cfg.IsBPO5(london, time):
-		return "BPO5"
+		return forkBPO5
 	case cfg.IsBPO4(london, time):
-		return "BPO4"
+		return forkBPO4
 	case cfg.IsBPO3(london, time):
-		return "BPO3"
+		return forkBPO3
 	case cfg.IsBPO2(london, time):
-		return "BPO2"
+		return forkBPO2
 	case cfg.IsBPO1(london, time):
-		return "BPO1"
+		return forkBPO1
 	case cfg.IsOsaka(london, time):
-		return "Osaka"
+		return forkOsaka
 	case cfg.IsPrague(london, time):
-		return "Prague"
+		return forkPrague
 	case cfg.IsCancun(london, time):
-		return "Cancun"
+		return forkCancun
 	default:
-		return "Pre-4844"
+		return forkPre4844
 	}
 }
 

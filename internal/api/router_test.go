@@ -85,7 +85,7 @@ func newTestAPIWithDB(db DBProvider) *API {
 // setSliceResult is a helper to assign mock data to a dest pointer via reflection.
 func setSliceResult(dest, src interface{}) {
 	dv := reflect.ValueOf(dest)
-	if dv.Kind() == reflect.Ptr {
+	if dv.Kind() == reflect.Pointer {
 		dv = dv.Elem()
 	}
 	sv := reflect.ValueOf(src)
@@ -95,11 +95,11 @@ func setSliceResult(dest, src interface{}) {
 // setStructResult copies a struct value into the dest pointer.
 func setStructResult(dest, src interface{}) {
 	dv := reflect.ValueOf(dest)
-	if dv.Kind() == reflect.Ptr {
+	if dv.Kind() == reflect.Pointer {
 		dv = dv.Elem()
 	}
 	sv := reflect.ValueOf(src)
-	if sv.Kind() == reflect.Ptr {
+	if sv.Kind() == reflect.Pointer {
 		sv = sv.Elem()
 	}
 	dv.Set(sv)

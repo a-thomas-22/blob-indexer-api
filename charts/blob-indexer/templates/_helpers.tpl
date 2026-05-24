@@ -60,3 +60,14 @@ Service account name
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Database URL used by migration containers.
+*/}}
+{{- define "blob-indexer.migrationDatabaseURL" -}}
+{{- $dbURL := .Values.appConfig.database.url -}}
+{{- if .Values.externalDatabase.url -}}
+{{- $dbURL = .Values.externalDatabase.url -}}
+{{- end -}}
+{{- $dbURL -}}
+{{- end }}

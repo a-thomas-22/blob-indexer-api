@@ -77,11 +77,15 @@ configMap:
 databaseSecret:
   create: true
 
+migrations:
+  enabled: true
+
 # Application configuration -- rendered into a ConfigMap as YAML.
 # Maps directly to the Config struct in internal/config/config.go.
 appConfig:
   database:
     url: ""  # PostgreSQL connection string; can also be set via externalDatabase.url
+    run_migrations: false
   server:
     port: 8080
     dev_mode: false
