@@ -37,6 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REGISTRY: registry.ahkc.win
+      REGISTRY_PROJECT: public
     steps:
       - uses: actions/checkout@v6
 
@@ -49,4 +50,4 @@ jobs:
         run: helm package charts/blob-indexer --version "${{ needs.release-please.outputs.chart_version }}"
 
       - name: Push chart to Harbor
-        run: helm push blob-indexer-${{ needs.release-please.outputs.chart_version }}.tgz oci://${REGISTRY}/${{ github.repository_owner }}/charts
+        run: helm push blob-indexer-${{ needs.release-please.outputs.chart_version }}.tgz oci://${REGISTRY}/${REGISTRY_PROJECT}/charts
