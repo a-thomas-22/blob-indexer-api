@@ -67,28 +67,21 @@ serviceAccount:
   name: ""
   automountServiceAccountToken: false
 
-networkPolicy:
-  enabled: true
-  dbPort: 5432
-
 # ConfigMap creation toggle. Set to false when config is managed externally (e.g., Tilt).
 configMap:
   create: true
 
-# Database Secret creation toggle.
+# Database Secret creation toggle. When true, set appConfig.database.url or
+# externalDatabase.url. When false, create a Secret named
+# <release fullname>-db with a DB_URL key outside this chart.
 databaseSecret:
   create: true
-
-# Database security settings for constructed URLs.
-database:
-  sslMode: require
-
 
 # Application configuration -- rendered into a ConfigMap as YAML.
 # Maps directly to the Config struct in internal/config/config.go.
 appConfig:
   database:
-    url: ""  # Set via externalDatabase.url or auto-constructed from postgresql.* values
+    url: ""  # PostgreSQL connection string; can also be set via externalDatabase.url
   server:
     port: 8080
     dev_mode: false
@@ -107,20 +100,9 @@ appConfig:
     #   start_block: "LATEST-1000"
     #   enabled: true
 
-# External database URL (used when postgresql.enabled is false)
+# External database URL. Prefer appConfig.database.url for new installs.
 externalDatabase:
   url: ""
-
-# PostgreSQL subchart configuration
-postgresql:
-  enabled: true
-  auth:
-    username: blobdev
-    password: blobdev
-    database: blobindexer
-  primary:
-    persistence:
-      size: 1Gi
 
 # Health check configuration
 healthCheck:

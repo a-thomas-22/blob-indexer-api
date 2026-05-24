@@ -3,6 +3,12 @@ name: Helm Publish
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Helm chart version to publish
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -11,14 +17,19 @@ permissions:
 jobs:
   helm:
     # Only run for chart releases, not app releases
-    if: startsWith(github.event.release.tag_name, 'blob-indexer-chart-v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'blob-indexer-chart-v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
       - name: Extract version from tag
         id: version
-        run: echo "version=${GITHUB_REF_NAME#blob-indexer-chart-v}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#blob-indexer-chart-v}" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: azure/setup-helm@v5
 
