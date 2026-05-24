@@ -26,7 +26,6 @@ spec:
         app.kubernetes.io/component: migrate
     spec:
       restartPolicy: OnFailure
-      serviceAccountName: {{ include "blob-indexer.serviceAccountName" . }}
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
