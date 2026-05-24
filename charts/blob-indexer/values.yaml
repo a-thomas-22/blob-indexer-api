@@ -2,22 +2,24 @@
 replicaCount: 1
 
 image:
-  registry: ""
-  repository: blob-indexer-api
-  pullPolicy: IfNotPresent
-  tag: "latest"
+  registry: registry.ahkc.win/public
+  repository: blob-indexer-api-api
+  pullPolicy: Always
+  tag: ""  # Defaults to Chart.appVersion when unset.
 
 # Per-component overrides (image, replicas, resources).
 # Falls back to top-level values when not set.
 api:
-  replicaCount: 1
-  image: {}
+  replicaCount: 2
+  image:
+    repository: blob-indexer-api-api
   resources: {}
 
 indexer:
   enabled: true
   replicaCount: 1
-  image: {}
+  image:
+    repository: blob-indexer-api-indexer
   resources: {}
 
 service:
@@ -36,11 +38,11 @@ ingress:
 
 resources:
   limits:
-    cpu: "1"
-    memory: 1Gi
+    cpu: "2"
+    memory: 2Gi
   requests:
-    cpu: 250m
-    memory: 256Mi
+    cpu: 500m
+    memory: 512Mi
 
 podSecurityContext:
   # Enforce that containers do not run as root. When overriding images, ensure
@@ -91,19 +93,19 @@ appConfig:
     port: 8080
     dev_mode: false
   logging:
-    level: "info"
+    level: "warn"
     format: "json"
   indexer:
     version: "v1.0.0"
-    batch_size: 100
+    batch_size: 500
     polling_interval: "15s"
     mempool_polling_interval: "30s"
-  networks: []
-    # - name: "mainnet"
-    #   chain_id: 1
-    #   rpc_url: "https://mainnet.infura.io/v3/YOUR-KEY"
-    #   start_block: "LATEST-1000"
-    #   enabled: true
+  networks:
+    - name: "mainnet"
+      chain_id: 1
+      rpc_url: ""  # Set via --set appConfig.networks[0].rpc_url=...
+      start_block: "LATEST-1000"
+      enabled: true
 
 # External database URL. Prefer appConfig.database.url for new installs.
 externalDatabase:
@@ -112,8 +114,8 @@ externalDatabase:
 # Health check configuration
 healthCheck:
   path: /api/v1/status
-  initialDelaySeconds: 30
-  periodSeconds: 10
+  initialDelaySeconds: 60
+  periodSeconds: 15
 
 # Pod annotations
 podAnnotations: {}

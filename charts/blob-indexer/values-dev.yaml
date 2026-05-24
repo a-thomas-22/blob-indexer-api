@@ -1,6 +1,17 @@
 # Development values for blob-indexer
 image:
+  registry: ""
+  repository: blob-indexer-api
   pullPolicy: Never
+  tag: "latest"
+
+api:
+  image:
+    repository: blob-indexer-api
+
+indexer:
+  image:
+    repository: blob-indexer-indexer
 
 ingress:
   enabled: true

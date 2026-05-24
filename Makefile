@@ -115,7 +115,6 @@ helm-install-dev:
 
 helm-install-prod:
 	helm install blob-indexer ./charts/blob-indexer \
-		-f ./charts/blob-indexer/values-prod.yaml \
 		--set appConfig.database.url="$(DB_URL)" \
 		--set appConfig.networks[0].rpc_url="$(RPC_URL)"
 
