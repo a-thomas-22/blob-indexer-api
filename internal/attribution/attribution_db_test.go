@@ -26,25 +26,15 @@ func newMockService(t *testing.T) (*Service, sqlmock.Sqlmock) {
 	return NewService(&db.DB{DB: xdb}), mock
 }
 
-func TestInitialize_LoadsKnownUsers(t *testing.T) {
+func TestInitialize_DoesNotLoadBlobUsersAsFallback(t *testing.T) {
 	svc, mock := newMockService(t)
-	rows := sqlmock.NewRows([]string{"id", "network_id", "address", "name", "description", "category", "first_seen", "last_seen"}).
-		AddRow(1, 1, "0xABC", "Alice", "", "", time.Now(), time.Now()).
-		AddRow(2, 1, "0xDef", "Bob", "", "", time.Now(), time.Now())
-
-	mock.ExpectQuery("SELECT \\* FROM blob_users WHERE network_id = \\$1").
-		WithArgs(1).
-		WillReturnRows(rows)
 
 	if err := svc.Initialize(context.TODO()); err != nil {
 		t.Fatalf("Initialize() error = %v", err)
 	}
 
-	if got := svc.GetUserAttribution("0xabc"); got != "Alice" {
-		t.Errorf("expected Alice, got %q", got)
-	}
-	if got := svc.GetUserAttribution("0xDEF"); got != "Bob" {
-		t.Errorf("expected Bob, got %q", got)
+	if got := svc.GetUserAttribution("0xabc"); got != "" {
+		t.Errorf("expected no DB-backed fallback attribution, got %q", got)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -166,14 +156,11 @@ func TestGetTopBlobUsers_ReturnsRows(t *testing.T) {
 	}
 }
 
-func TestInitialize_ReturnsErrorOnQueryFailure(t *testing.T) {
+func TestInitialize_BlobListDisabledDoesNotQuery(t *testing.T) {
 	svc, mock := newMockService(t)
-	mock.ExpectQuery("SELECT \\* FROM blob_users WHERE network_id = \\$1").
-		WithArgs(1).
-		WillReturnError(assertiveError("load failed"))
 
-	if err := svc.Initialize(context.TODO()); err == nil {
-		t.Fatal("expected Initialize() to return an error")
+	if err := svc.Initialize(context.TODO()); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

@@ -182,11 +182,12 @@ func (a *API) DevIndexers(w http.ResponseWriter, r *http.Request) {
 // allowedTables is a whitelist of table names that can be queried in the DevDatabase handler.
 // This prevents SQL injection by ensuring only known table names are used in queries.
 var allowedTables = map[string]bool{
-	"networks":         true,
-	"blobs":            true,
-	"blob_users":       true,
-	"indexer_metadata": true,
-	"indexed_blocks":   true,
+	"networks":                true,
+	"blobs":                   true,
+	"blob_users":              true,
+	"blob_attribution_claims": true,
+	"indexer_metadata":        true,
+	"indexed_blocks":          true,
 }
 
 // isAllowedTable checks whether a table name is in the whitelist of allowed tables.
@@ -208,7 +209,7 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting database statistics")
 
 	// Get table statistics
-	tables := []string{"blobs", "blob_users", "networks", "indexer_metadata"}
+	tables := []string{"blobs", "blob_users", "blob_attribution_claims", "networks", "indexer_metadata"}
 	tableStats := make([]TableStat, 0, len(tables))
 	for _, table := range tables {
 		// Validate the table name against the whitelist to prevent SQL injection

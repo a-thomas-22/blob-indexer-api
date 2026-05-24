@@ -131,6 +131,12 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 
 	// Create attribution service with network ID context.
 	attributionSvc := attribution.NewService(database, network.ChainID)
+	attributionSvc.ConfigureBlobList(attribution.BlobListConfig{
+		Enabled:         cfg.Attribution.BlobListEnabled,
+		BaseURL:         cfg.Attribution.BlobListBaseURL,
+		RefreshInterval: cfg.Attribution.BlobListRefreshInterval,
+		RequestTimeout:  cfg.Attribution.BlobListRequestTimeout,
+	})
 
 	// Determine the number of workers: use config value, or fall back to CPU-based heuristic
 	workerCount := cfg.Indexer.WorkerCount
@@ -743,7 +749,7 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 		return
 	}
 
-	// Get the user attribution
+	// Get the current user attribution for the pending transaction.
 	userAttribution := i.attribution.GetUserAttribution(from)
 
 	metrics := calculateBlobMetrics(tx, blobBaseFee)
@@ -836,8 +842,8 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 			continue
 		}
 
-		// Get the user attribution
-		userAttribution := i.attribution.GetUserAttribution(from)
+		// Get the user attribution for this block's validity window.
+		userAttribution := i.attribution.GetUserAttributionForBlock(from, int64(blockNumber))
 
 		metrics := calculateBlobMetrics(tx, blobBaseFee)
 
@@ -1258,7 +1264,7 @@ func (i *Indexer) processPendingTransactions() error {
 			continue
 		}
 
-		// Get the user attribution
+		// Get the current user attribution for the pending transaction.
 		userAttribution := i.attribution.GetUserAttribution(from)
 
 		metrics := calculateBlobMetrics(tx, blobBaseFee)

@@ -74,6 +74,14 @@ type IndexerConfig struct {
 	RPCRateLimit           float64       `mapstructure:"rpc_rate_limit" yaml:"rpc_rate_limit"` // requests per second; 0 = no proactive limiting
 }
 
+// AttributionConfig holds dynamic attribution registry configuration.
+type AttributionConfig struct {
+	BlobListEnabled         bool          `mapstructure:"blob_list_enabled" yaml:"blob_list_enabled"`
+	BlobListBaseURL         string        `mapstructure:"blob_list_base_url" yaml:"blob_list_base_url"`
+	BlobListRefreshInterval time.Duration `mapstructure:"blob_list_refresh_interval" yaml:"blob_list_refresh_interval"`
+	BlobListRequestTimeout  time.Duration `mapstructure:"blob_list_request_timeout" yaml:"blob_list_request_timeout"`
+}
+
 // WebSocketConfig holds the WebSocket configuration
 type WebSocketConfig struct {
 	PollInterval          time.Duration `mapstructure:"poll_interval" yaml:"poll_interval"`
@@ -82,12 +90,13 @@ type WebSocketConfig struct {
 
 // Config holds the application configuration
 type Config struct {
-	Database  DatabaseConfig  `mapstructure:"database" yaml:"database"`
-	Server    ServerConfig    `mapstructure:"server" yaml:"server"`
-	Logging   LoggingConfig   `mapstructure:"logging" yaml:"logging"`
-	Indexer   IndexerConfig   `mapstructure:"indexer" yaml:"indexer"`
-	WebSocket WebSocketConfig `mapstructure:"websocket" yaml:"websocket"`
-	Networks  []NetworkConfig `mapstructure:"networks" yaml:"networks"`
+	Database    DatabaseConfig    `mapstructure:"database" yaml:"database"`
+	Server      ServerConfig      `mapstructure:"server" yaml:"server"`
+	Logging     LoggingConfig     `mapstructure:"logging" yaml:"logging"`
+	Indexer     IndexerConfig     `mapstructure:"indexer" yaml:"indexer"`
+	Attribution AttributionConfig `mapstructure:"attribution" yaml:"attribution"`
+	WebSocket   WebSocketConfig   `mapstructure:"websocket" yaml:"websocket"`
+	Networks    []NetworkConfig   `mapstructure:"networks" yaml:"networks"`
 }
 
 // Load loads the configuration using Viper with full validation (for the indexer).
@@ -136,6 +145,10 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("indexer.gap_scan_interval", "5m")
 	v.SetDefault("indexer.max_reorg_depth", 64)
 	v.SetDefault("indexer.rpc_rate_limit", 0)
+	v.SetDefault("attribution.blob_list_enabled", true)
+	v.SetDefault("attribution.blob_list_base_url", "https://raw.githubusercontent.com/ahkc4/blob-list/main/artifacts/by-chain")
+	v.SetDefault("attribution.blob_list_refresh_interval", "1h")
+	v.SetDefault("attribution.blob_list_request_timeout", "10s")
 	v.SetDefault("websocket.poll_interval", "3s")
 	v.SetDefault("websocket.users_throttle_interval", "30s")
 	v.SetDefault("networks", []NetworkConfig{})
@@ -348,6 +361,12 @@ func loadConfig() (*Config, error) {
 		return nil, err
 	}
 	if cfg.Indexer.GapScanInterval, err = parseDuration(v, "indexer.gap_scan_interval", "gap_scan_interval"); err != nil {
+		return nil, err
+	}
+	if cfg.Attribution.BlobListRefreshInterval, err = parseDuration(v, "attribution.blob_list_refresh_interval", "blob_list_refresh_interval"); err != nil {
+		return nil, err
+	}
+	if cfg.Attribution.BlobListRequestTimeout, err = parseDuration(v, "attribution.blob_list_request_timeout", "blob_list_request_timeout"); err != nil {
 		return nil, err
 	}
 	if cfg.WebSocket.PollInterval, err = parseDuration(v, "websocket.poll_interval", "ws_poll_interval"); err != nil {
