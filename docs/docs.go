@@ -873,7 +873,16 @@ const docTemplate = `{
                 "confirmed": {
                     "type": "boolean"
                 },
+                "fee_cap_headroom_percent": {
+                    "type": "string"
+                },
+                "fee_cap_headroom_wei": {
+                    "type": "string"
+                },
                 "from_address": {
+                    "type": "string"
+                },
+                "max_cost_wei": {
                     "type": "string"
                 },
                 "max_fee_per_blob_gas": {
@@ -883,6 +892,9 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "network_name": {
+                    "type": "string"
+                },
+                "realized_cost_wei": {
                     "type": "string"
                 },
                 "timestamp": {
