@@ -69,6 +69,7 @@ const blockMetricsSelectColumns = `
 
 const aggregateCacheTTL = 30 * time.Second
 const aggregateQueryTimeout = 5 * time.Second
+const mempoolPressureSampleLimit = 10000
 
 const (
 	queryDevIndexerCounts = `
@@ -167,6 +168,68 @@ type PricingResponse struct {
 	BlobParams         BlobParamsResponse     `json:"blob_params"`
 	MarketPressure     MarketPressureResponse `json:"market_pressure"`
 	RecentBlocks       []BlockPricingResponse `json:"recent_blocks"`
+}
+
+// MempoolFeeDistributionResponse represents pending max fee distribution.
+type MempoolFeeDistributionResponse struct {
+	Min    string `json:"min"`
+	Avg    string `json:"avg"`
+	Median string `json:"median"`
+	P95    string `json:"p95"`
+	Max    string `json:"max"`
+}
+
+// MempoolAgeStatsResponse represents pending transaction age statistics.
+type MempoolAgeStatsResponse struct {
+	OldestAgeSeconds  float64    `json:"oldest_age_seconds"`
+	NewestAgeSeconds  float64    `json:"newest_age_seconds"`
+	AverageAgeSeconds float64    `json:"average_age_seconds"`
+	OldestTimestamp   *time.Time `json:"oldest_timestamp,omitempty"`
+	NewestTimestamp   *time.Time `json:"newest_timestamp,omitempty"`
+}
+
+// MempoolIncludabilityResponse summarizes likely pending transaction includability.
+type MempoolIncludabilityResponse struct {
+	LatestBlobBaseFee     string `json:"latest_blob_base_fee"`
+	PricingAvailable      bool   `json:"pricing_available"`
+	LikelyIncludableCount int    `json:"likely_includable_count"`
+	UnderpricedCount      int    `json:"underpriced_count"`
+	UnknownPricingCount   int    `json:"unknown_pricing_count"`
+}
+
+// MempoolPressureResponse is the top-level mempool pressure API response.
+type MempoolPressureResponse struct {
+	NetworkID            int                            `json:"network_id"`
+	NetworkName          string                         `json:"network_name"`
+	PendingBlobCount     int                            `json:"pending_blob_count"`
+	PendingBlobGas       int64                          `json:"pending_blob_gas"`
+	PendingUniqueSenders int                            `json:"pending_unique_senders"`
+	MaxFeePerBlobGas     MempoolFeeDistributionResponse `json:"max_fee_per_blob_gas"`
+	PendingTxAge         MempoolAgeStatsResponse        `json:"pending_tx_age"`
+	Includability        MempoolIncludabilityResponse   `json:"includability"`
+	SampleLimit          int                            `json:"sample_limit"`
+	SampleTruncated      bool                           `json:"sample_truncated"`
+	GeneratedAt          time.Time                      `json:"generated_at"`
+}
+
+type mempoolPressureAggregate struct {
+	PendingBlobCount     int          `db:"pending_blob_count"`
+	PendingBlobGas       int64        `db:"pending_blob_gas"`
+	PendingUniqueSenders int          `db:"pending_unique_senders"`
+	MaxFeeMin            string       `db:"max_fee_min"`
+	MaxFeeAvg            string       `db:"max_fee_avg"`
+	MaxFeeMedian         string       `db:"max_fee_median"`
+	MaxFeeP95            string       `db:"max_fee_p95"`
+	MaxFeeMax            string       `db:"max_fee_max"`
+	OldestAgeSeconds     float64      `db:"oldest_age_seconds"`
+	NewestAgeSeconds     float64      `db:"newest_age_seconds"`
+	AverageAgeSeconds    float64      `db:"average_age_seconds"`
+	OldestTimestamp      sql.NullTime `db:"oldest_timestamp"`
+	NewestTimestamp      sql.NullTime `db:"newest_timestamp"`
+	LikelyIncludable     int          `db:"likely_includable_count"`
+	Underpriced          int          `db:"underpriced_count"`
+	UnknownPricing       int          `db:"unknown_pricing_count"`
+	SampleTruncated      bool         `db:"sample_truncated"`
 }
 
 // UserResponse is a response containing user data
@@ -331,6 +394,13 @@ func blobSpaceLimit(paramsBlobs int, gasLimit int64) int {
 		return 0
 	}
 	return int(gasLimit / params.BlobTxBlobGasPerBlob)
+}
+
+func nullTimePtr(t sql.NullTime) *time.Time {
+	if !t.Valid {
+		return nil
+	}
+	return &t.Time
 }
 
 // respondJSON responds with JSON
@@ -533,6 +603,104 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Returning mempool blobs",
 		zap.String("network", network.Name),
 		zap.Int("count", len(response)))
+	a.respondSuccess(w, response)
+}
+
+// GetMempoolPressure godoc
+// @Summary Get blob mempool pressure
+// @Description Retrieve bounded aggregate pressure metrics for pending blob transactions
+// @Tags blobs
+// @Accept json
+// @Produce json
+// @Param network query string false "Network name or chain ID (default: first enabled network)"
+// @Success 200 {object} Response{data=MempoolPressureResponse} "Success"
+// @Failure 400 {object} Response "Bad request"
+// @Failure 500 {object} Response "Internal server error"
+// @Router /blob/mempool/pressure [get]
+func (a *API) GetMempoolPressure(w http.ResponseWriter, r *http.Request) {
+	network, err := a.getNetworkFromRequest(r)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	logger.Debug("Getting mempool pressure", zap.String("network", network.Name))
+
+	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
+	defer cancel()
+
+	latestBaseFee := "0"
+	pricingAvailable := false
+	if err := a.db.GetContext(queryCtx, &latestBaseFee, queryLatestBlobBaseFee, network.ChainID); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			logger.Error("Failed to get latest blob base fee",
+				zap.String("network", network.Name),
+				zap.Error(err))
+			a.respondError(w, http.StatusInternalServerError, "Failed to get mempool pressure")
+			return
+		}
+	} else {
+		pricingAvailable = true
+	}
+
+	var latestBaseFeeArg interface{}
+	if pricingAvailable {
+		latestBaseFeeArg = latestBaseFee
+	}
+
+	var pressure mempoolPressureAggregate
+	if err := a.db.GetContext(
+		queryCtx,
+		&pressure,
+		queryMempoolPressure,
+		network.ChainID,
+		mempoolPressureSampleLimit+1,
+		mempoolPressureSampleLimit,
+		latestBaseFeeArg,
+	); err != nil {
+		logger.Error("Failed to get mempool pressure",
+			zap.String("network", network.Name),
+			zap.Error(err))
+		a.respondError(w, http.StatusInternalServerError, "Failed to get mempool pressure")
+		return
+	}
+
+	response := MempoolPressureResponse{
+		NetworkID:            network.ChainID,
+		NetworkName:          network.Name,
+		PendingBlobCount:     pressure.PendingBlobCount,
+		PendingBlobGas:       pressure.PendingBlobGas,
+		PendingUniqueSenders: pressure.PendingUniqueSenders,
+		MaxFeePerBlobGas: MempoolFeeDistributionResponse{
+			Min:    pressure.MaxFeeMin,
+			Avg:    pressure.MaxFeeAvg,
+			Median: pressure.MaxFeeMedian,
+			P95:    pressure.MaxFeeP95,
+			Max:    pressure.MaxFeeMax,
+		},
+		PendingTxAge: MempoolAgeStatsResponse{
+			OldestAgeSeconds:  pressure.OldestAgeSeconds,
+			NewestAgeSeconds:  pressure.NewestAgeSeconds,
+			AverageAgeSeconds: pressure.AverageAgeSeconds,
+			OldestTimestamp:   nullTimePtr(pressure.OldestTimestamp),
+			NewestTimestamp:   nullTimePtr(pressure.NewestTimestamp),
+		},
+		Includability: MempoolIncludabilityResponse{
+			LatestBlobBaseFee:     latestBaseFee,
+			PricingAvailable:      pricingAvailable,
+			LikelyIncludableCount: pressure.LikelyIncludable,
+			UnderpricedCount:      pressure.Underpriced,
+			UnknownPricingCount:   pressure.UnknownPricing,
+		},
+		SampleLimit:     mempoolPressureSampleLimit,
+		SampleTruncated: pressure.SampleTruncated,
+		GeneratedAt:     time.Now().UTC(),
+	}
+
+	logger.Debug("Returning mempool pressure",
+		zap.String("network", network.Name),
+		zap.Int("pending_blob_count", response.PendingBlobCount),
+		zap.Bool("pricing_available", response.Includability.PricingAvailable))
 	a.respondSuccess(w, response)
 }
 

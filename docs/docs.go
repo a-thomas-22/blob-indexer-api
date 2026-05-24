@@ -176,6 +176,61 @@ const docTemplate = `{
                 }
             }
         },
+        "/blob/mempool/pressure": {
+            "get": {
+                "description": "Retrieve bounded aggregate pressure metrics for pending blob transactions",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "blobs"
+                ],
+                "summary": "Get blob mempool pressure",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Network name or chain ID (default: first enabled network)",
+                        "name": "network",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Success",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/api.Response"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/api.MempoolPressureResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "$ref": "#/definitions/api.Response"
+                        }
+                    }
+                }
+            }
+        },
         "/blob/pricing": {
             "get": {
                 "description": "Retrieve current and historical blob pricing with utilization metrics and fork parameters",
@@ -1140,6 +1195,104 @@ const docTemplate = `{
                 },
                 "recent_blocks_above_target": {
                     "type": "integer"
+                }
+            }
+        },
+        "api.MempoolAgeStatsResponse": {
+            "type": "object",
+            "properties": {
+                "average_age_seconds": {
+                    "type": "number"
+                },
+                "newest_age_seconds": {
+                    "type": "number"
+                },
+                "newest_timestamp": {
+                    "type": "string"
+                },
+                "oldest_age_seconds": {
+                    "type": "number"
+                },
+                "oldest_timestamp": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.MempoolFeeDistributionResponse": {
+            "type": "object",
+            "properties": {
+                "avg": {
+                    "type": "string"
+                },
+                "max": {
+                    "type": "string"
+                },
+                "median": {
+                    "type": "string"
+                },
+                "min": {
+                    "type": "string"
+                },
+                "p95": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.MempoolIncludabilityResponse": {
+            "type": "object",
+            "properties": {
+                "latest_blob_base_fee": {
+                    "type": "string"
+                },
+                "likely_includable_count": {
+                    "type": "integer"
+                },
+                "pricing_available": {
+                    "type": "boolean"
+                },
+                "underpriced_count": {
+                    "type": "integer"
+                },
+                "unknown_pricing_count": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.MempoolPressureResponse": {
+            "type": "object",
+            "properties": {
+                "generated_at": {
+                    "type": "string"
+                },
+                "includability": {
+                    "$ref": "#/definitions/api.MempoolIncludabilityResponse"
+                },
+                "max_fee_per_blob_gas": {
+                    "$ref": "#/definitions/api.MempoolFeeDistributionResponse"
+                },
+                "network_id": {
+                    "type": "integer"
+                },
+                "network_name": {
+                    "type": "string"
+                },
+                "pending_blob_count": {
+                    "type": "integer"
+                },
+                "pending_blob_gas": {
+                    "type": "integer"
+                },
+                "pending_tx_age": {
+                    "$ref": "#/definitions/api.MempoolAgeStatsResponse"
+                },
+                "pending_unique_senders": {
+                    "type": "integer"
+                },
+                "sample_limit": {
+                    "type": "integer"
+                },
+                "sample_truncated": {
+                    "type": "boolean"
                 }
             }
         },

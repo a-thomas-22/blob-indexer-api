@@ -164,6 +164,70 @@ definitions:
       recent_blocks_above_target:
         type: integer
     type: object
+  api.MempoolAgeStatsResponse:
+    properties:
+      average_age_seconds:
+        type: number
+      newest_age_seconds:
+        type: number
+      newest_timestamp:
+        type: string
+      oldest_age_seconds:
+        type: number
+      oldest_timestamp:
+        type: string
+    type: object
+  api.MempoolFeeDistributionResponse:
+    properties:
+      avg:
+        type: string
+      max:
+        type: string
+      median:
+        type: string
+      min:
+        type: string
+      p95:
+        type: string
+    type: object
+  api.MempoolIncludabilityResponse:
+    properties:
+      latest_blob_base_fee:
+        type: string
+      likely_includable_count:
+        type: integer
+      pricing_available:
+        type: boolean
+      underpriced_count:
+        type: integer
+      unknown_pricing_count:
+        type: integer
+    type: object
+  api.MempoolPressureResponse:
+    properties:
+      generated_at:
+        type: string
+      includability:
+        $ref: '#/definitions/api.MempoolIncludabilityResponse'
+      max_fee_per_blob_gas:
+        $ref: '#/definitions/api.MempoolFeeDistributionResponse'
+      network_id:
+        type: integer
+      network_name:
+        type: string
+      pending_blob_count:
+        type: integer
+      pending_blob_gas:
+        type: integer
+      pending_tx_age:
+        $ref: '#/definitions/api.MempoolAgeStatsResponse'
+      pending_unique_senders:
+        type: integer
+      sample_limit:
+        type: integer
+      sample_truncated:
+        type: boolean
+    type: object
   api.PricingResponse:
     properties:
       blob_params:
@@ -492,6 +556,39 @@ paths:
           schema:
             $ref: '#/definitions/api.Response'
       summary: Get pending blobs from mempool
+      tags:
+      - blobs
+  /blob/mempool/pressure:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve bounded aggregate pressure metrics for pending blob transactions
+      parameters:
+      - description: 'Network name or chain ID (default: first enabled network)'
+        in: query
+        name: network
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.MempoolPressureResponse'
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get blob mempool pressure
       tags:
       - blobs
   /blob/pricing:

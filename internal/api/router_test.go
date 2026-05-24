@@ -584,6 +584,194 @@ func TestGetMempoolBlobs_DBError(t *testing.T) {
 	}
 }
 
+func TestGetMempoolPressure_Success(t *testing.T) {
+	oldest := time.Now().Add(-5 * time.Minute).UTC()
+	newest := time.Now().Add(-30 * time.Second).UTC()
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			switch {
+			case strings.Contains(query, "FROM block_metrics"):
+				if got := args[0]; got != 42 {
+					t.Fatalf("expected network arg 42, got %v", got)
+				}
+				baseFee := dest.(*string)
+				*baseFee = "1000"
+				return nil
+			case strings.Contains(query, "limited_pending"):
+				if got := args[0]; got != 42 {
+					t.Fatalf("expected network arg 42, got %v", got)
+				}
+				if got := args[1]; got != mempoolPressureSampleLimit+1 {
+					t.Fatalf("expected sample overflow limit %d, got %v", mempoolPressureSampleLimit+1, got)
+				}
+				if got := args[2]; got != mempoolPressureSampleLimit {
+					t.Fatalf("expected sample limit %d, got %v", mempoolPressureSampleLimit, got)
+				}
+				if got := args[3]; got != "1000" {
+					t.Fatalf("expected latest base fee arg 1000, got %v", got)
+				}
+				pressure := dest.(*mempoolPressureAggregate)
+				*pressure = mempoolPressureAggregate{
+					PendingBlobCount:     3,
+					PendingBlobGas:       393216,
+					PendingUniqueSenders: 2,
+					MaxFeeMin:            "900",
+					MaxFeeAvg:            "1300",
+					MaxFeeMedian:         "1200",
+					MaxFeeP95:            "1800",
+					MaxFeeMax:            "1800",
+					OldestAgeSeconds:     300,
+					NewestAgeSeconds:     30,
+					AverageAgeSeconds:    120,
+					OldestTimestamp:      sql.NullTime{Time: oldest, Valid: true},
+					NewestTimestamp:      sql.NullTime{Time: newest, Valid: true},
+					LikelyIncludable:     2,
+					Underpriced:          1,
+					SampleTruncated:      true,
+				}
+				return nil
+			default:
+				t.Fatalf("unexpected query: %s", query)
+				return nil
+			}
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetMempoolPressure(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Success bool                    `json:"success"`
+		Data    MempoolPressureResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success=true")
+	}
+	if resp.Data.PendingBlobCount != 3 {
+		t.Fatalf("expected pending blob count 3, got %d", resp.Data.PendingBlobCount)
+	}
+	if resp.Data.MaxFeePerBlobGas.P95 != "1800" {
+		t.Fatalf("expected p95 1800, got %q", resp.Data.MaxFeePerBlobGas.P95)
+	}
+	if !resp.Data.Includability.PricingAvailable {
+		t.Fatal("expected pricing to be available")
+	}
+	if resp.Data.Includability.LikelyIncludableCount != 2 || resp.Data.Includability.UnderpricedCount != 1 {
+		t.Fatalf("unexpected includability counts: %+v", resp.Data.Includability)
+	}
+	if !resp.Data.SampleTruncated {
+		t.Fatal("expected sample_truncated=true")
+	}
+}
+
+func TestGetMempoolPressure_NoBlockMetrics(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			switch {
+			case strings.Contains(query, "FROM block_metrics"):
+				return sql.ErrNoRows
+			case strings.Contains(query, "limited_pending"):
+				if args[3] != nil {
+					t.Fatalf("expected nil base fee arg without block metrics, got %v", args[3])
+				}
+				pressure := dest.(*mempoolPressureAggregate)
+				*pressure = mempoolPressureAggregate{
+					PendingBlobCount:     2,
+					PendingBlobGas:       262144,
+					PendingUniqueSenders: 2,
+					MaxFeeMin:            "0",
+					MaxFeeAvg:            "0",
+					MaxFeeMedian:         "0",
+					MaxFeeP95:            "0",
+					MaxFeeMax:            "0",
+					UnknownPricing:       2,
+				}
+				return nil
+			default:
+				t.Fatalf("unexpected query: %s", query)
+				return nil
+			}
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetMempoolPressure(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Success bool                    `json:"success"`
+		Data    MempoolPressureResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Data.Includability.PricingAvailable {
+		t.Fatal("expected pricing_available=false")
+	}
+	if resp.Data.Includability.LatestBlobBaseFee != "0" {
+		t.Fatalf("expected default latest base fee 0, got %q", resp.Data.Includability.LatestBlobBaseFee)
+	}
+	if resp.Data.Includability.UnknownPricingCount != 2 {
+		t.Fatalf("expected unknown pricing count 2, got %d", resp.Data.Includability.UnknownPricingCount)
+	}
+}
+
+func TestGetMempoolPressure_BaseFeeDBError(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if strings.Contains(query, "FROM block_metrics") {
+				return fmt.Errorf("base fee query failed")
+			}
+			t.Fatalf("unexpected query after base fee failure: %s", query)
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetMempoolPressure(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
+func TestGetMempoolPressure_AggregateDBError(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			switch {
+			case strings.Contains(query, "FROM block_metrics"):
+				baseFee := dest.(*string)
+				*baseFee = "1000"
+				return nil
+			case strings.Contains(query, "limited_pending"):
+				return fmt.Errorf("pressure query failed")
+			default:
+				t.Fatalf("unexpected query: %s", query)
+				return nil
+			}
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetMempoolPressure(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
 func TestGetBlobByTxHash_Success(t *testing.T) {
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
