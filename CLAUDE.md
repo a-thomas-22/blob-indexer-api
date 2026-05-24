@@ -109,8 +109,8 @@ Managed by **release-please** (`.github/workflows/release-please.yml`). The app 
 - On merge to `main`, release-please maintains a running release PR with changelog
 - Merging the release PR creates a GitHub Release + tag, which triggers Docker/Helm publish workflows
 - Config: `release-please-config.json`, `.release-please-manifest.json`
-- Docker images: `registry.ahkc.win/a-thomas-22/blob-indexer-api-api`, `registry.ahkc.win/a-thomas-22/blob-indexer-api-indexer`
-- Helm charts: `oci://registry.ahkc.win/a-thomas-22/charts/blob-indexer`
+- Docker images: `registry.ahkc.win/public/blob-indexer-api-api`, `registry.ahkc.win/public/blob-indexer-api-indexer`
+- Helm charts: `oci://registry.ahkc.win/public/charts/blob-indexer`
 
 ## Deployment
 
