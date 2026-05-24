@@ -13,6 +13,7 @@ COVERAGE_PACKAGES ?= ./internal/... ./docs
 COVERAGE_DIR=coverage
 COVERAGE_FILE=$(COVERAGE_DIR)/coverage.out
 COVERAGE_HTML=$(COVERAGE_DIR)/coverage.html
+SWAG_VERSION=v1.16.6
 
 all: test build
 
@@ -102,7 +103,7 @@ seed-data:
 
 # Swagger documentation
 swagger:
-	swag init -g cmd/api/main.go -o docs
+	$(GOCMD) run github.com/swaggo/swag/cmd/swag@$(SWAG_VERSION) init -g cmd/api/main.go -o docs
 
 # Helm commands
 helm-dep-update:

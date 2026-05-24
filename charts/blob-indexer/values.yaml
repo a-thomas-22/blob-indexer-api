@@ -14,6 +14,7 @@ api:
   resources: {}
 
 indexer:
+  enabled: true
   replicaCount: 1
   image: {}
   resources: {}

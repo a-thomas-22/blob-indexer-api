@@ -42,6 +42,26 @@ jobs:
             exit 1
           fi
 
+  swagger:
+    name: Swagger Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - name: Check generated Swagger docs
+        run: |
+          set -euo pipefail
+          make swagger
+          if [ -n "$(git diff -- docs)" ]; then
+            echo "::error::Swagger docs are out of date. Run 'make swagger' and commit the generated docs."
+            git diff -- docs
+            exit 1
+          fi
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
