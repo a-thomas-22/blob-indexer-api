@@ -36,7 +36,10 @@ jobs:
       - uses: azure/setup-helm@v5
 
       - name: Login to Harbor
-        run: echo "${{ secrets.REGISTRY_PASSWORD }}" | helm registry login "${REGISTRY}" -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: echo "${REGISTRY_PASSWORD}" | helm registry login "${REGISTRY}" -u "${REGISTRY_USERNAME}" --password-stdin
 
       - name: Package chart
         run: helm package charts/blob-indexer --version "${{ steps.version.outputs.version }}"
