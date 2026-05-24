@@ -93,6 +93,19 @@ definitions:
       utilization_ratio:
         type: string
     type: object
+  api.CategoryShareResponse:
+    properties:
+      blob_count:
+        type: integer
+      blob_share_percent:
+        type: number
+      category:
+        type: string
+      spend_share_percent:
+        type: number
+      total_cost_eth:
+        type: string
+    type: object
   api.DatabaseStats:
     properties:
       connection_count:
@@ -390,12 +403,29 @@ definitions:
       table_name:
         type: string
     type: object
+  api.UserBreakdownResponse:
+    properties:
+      category_shares:
+        items:
+          $ref: '#/definitions/api.CategoryShareResponse'
+        type: array
+      network_id:
+        type: integer
+      network_name:
+        type: string
+      window:
+        type: string
+    type: object
   api.UserResponse:
     properties:
       address:
         type: string
       blob_count:
         type: integer
+      blob_share_percent:
+        type: number
+      category:
+        type: string
       last_timestamp:
         type: string
       name:
@@ -404,6 +434,8 @@ definitions:
         type: integer
       network_name:
         type: string
+      spend_share_percent:
+        type: number
       total_cost_eth:
         type: string
     type: object
@@ -902,7 +934,8 @@ paths:
     get:
       consumes:
       - application/json
-      description: Retrieve the top users of blob transactions by count
+      description: Retrieve the top users of blob transactions by count or spend,
+        optionally scoped to a recent window
       parameters:
       - description: 'Network name or chain ID (default: first enabled network)'
         in: query
@@ -916,6 +949,21 @@ paths:
         in: query
         name: offset
         type: integer
+      - description: 'Sort users by count or spend (default: count)'
+        enum:
+        - count
+        - spend
+        in: query
+        name: sort
+        type: string
+      - description: 'Time window to aggregate (default: all)'
+        enum:
+        - 24h
+        - 7d
+        - all
+        in: query
+        name: window
+        type: string
       produces:
       - application/json
       responses:
@@ -981,6 +1029,48 @@ paths:
           schema:
             $ref: '#/definitions/api.Response'
       summary: Get user by address
+      tags:
+      - users
+  /users/breakdown:
+    get:
+      consumes:
+      - application/json
+      description: Retrieve category market share for blob senders, optionally scoped
+        to a recent window
+      parameters:
+      - description: 'Network name or chain ID (default: first enabled network)'
+        in: query
+        name: network
+        type: string
+      - description: 'Time window to aggregate (default: all)'
+        enum:
+        - 24h
+        - 7d
+        - all
+        in: query
+        name: window
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Success
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.UserBreakdownResponse'
+              type: object
+        "400":
+          description: Bad request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get blob user market breakdowns
       tags:
       - users
 schemes:
