@@ -19,6 +19,7 @@ jobs:
           types: |
             feat
             fix
+            deps
             docs
             style
             refactor

@@ -81,7 +81,7 @@ func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Hand
 
 	// Middleware — applied to all routes (including WebSocket upgrade).
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	r.Use(middleware.ClientIPFromRemoteAddr)
 	r.Use(SecurityHeadersMiddleware)
 	r.Use(MaxBytesMiddleware)
 	r.Use(RateLimitMiddleware(rateLimiter))
@@ -132,6 +132,7 @@ func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Hand
 			// User endpoints
 			r.Route("/users", func(r chi.Router) {
 				r.Get("/", api.GetTopBlobUsers)
+				r.Get("/{address}", api.GetUserByAddress)
 			})
 
 			// Stats endpoints

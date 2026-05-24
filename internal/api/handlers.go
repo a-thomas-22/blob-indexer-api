@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -268,6 +270,7 @@ func (a *API) respondSuccess(w http.ResponseWriter, data interface{}) {
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
 // @Param limit query int false "Number of blobs to return (default: 10, max: 100)"
 // @Param offset query int false "Number of blobs to skip for pagination (default: 0, max: 10000)"
+// @Param from query string false "Filter by sender address"
 // @Success 200 {object} Response{data=[]BlobResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -285,14 +288,30 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fromAddress := r.URL.Query().Get("from")
+
 	logger.Debug("Getting latest blobs",
 		zap.String("network", network.Name),
 		zap.Int("limit", limit),
 		zap.Int("offset", offset))
 
-	// Get the latest blobs
+	// Get the latest blobs, optionally filtered by sender address
 	var blobs []models.Blob
-	if err := a.db.SelectContext(r.Context(), &blobs, queryLatestBlobs, network.ChainID, limit, offset); err != nil {
+	if fromAddress != "" {
+		if !common.IsHexAddress(fromAddress) {
+			a.respondError(w, http.StatusBadRequest, "Invalid address format")
+			return
+		}
+		fromAddress = common.HexToAddress(fromAddress).Hex()
+		if err := a.db.SelectContext(r.Context(), &blobs, queryLatestBlobsByAddress, network.ChainID, fromAddress, limit, offset); err != nil {
+			logger.Error("Failed to get latest blobs by address",
+				zap.String("network", network.Name),
+				zap.String("from", fromAddress),
+				zap.Error(err))
+			a.respondError(w, http.StatusInternalServerError, "Failed to get latest blobs")
+			return
+		}
+	} else if err := a.db.SelectContext(r.Context(), &blobs, queryLatestBlobs, network.ChainID, limit, offset); err != nil {
 		logger.Error("Failed to get latest blobs",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -321,6 +340,7 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
 // @Param limit query int false "Number of blobs to return (default: 10, max: 100)"
 // @Param offset query int false "Number of blobs to skip for pagination (default: 0, max: 10000)"
+// @Param from query string false "Filter by sender address"
 // @Success 200 {object} Response{data=[]BlobResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -338,14 +358,30 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fromAddress := r.URL.Query().Get("from")
+
 	logger.Debug("Getting mempool blobs",
 		zap.String("network", network.Name),
 		zap.Int("limit", limit),
 		zap.Int("offset", offset))
 
-	// Get the pending blobs
+	// Get the pending blobs, optionally filtered by sender address
 	var blobs []models.Blob
-	if err := a.db.SelectContext(r.Context(), &blobs, queryMempoolBlobs, network.ChainID, limit, offset); err != nil {
+	if fromAddress != "" {
+		if !common.IsHexAddress(fromAddress) {
+			a.respondError(w, http.StatusBadRequest, "Invalid address format")
+			return
+		}
+		fromAddress = common.HexToAddress(fromAddress).Hex()
+		if err := a.db.SelectContext(r.Context(), &blobs, queryMempoolBlobsByAddress, network.ChainID, fromAddress, limit, offset); err != nil {
+			logger.Error("Failed to get pending blobs by address",
+				zap.String("network", network.Name),
+				zap.String("from", fromAddress),
+				zap.Error(err))
+			a.respondError(w, http.StatusInternalServerError, "Failed to get pending blobs")
+			return
+		}
+	} else if err := a.db.SelectContext(r.Context(), &blobs, queryMempoolBlobs, network.ChainID, limit, offset); err != nil {
 		logger.Error("Failed to get pending blobs",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -493,6 +529,61 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	a.cacheMu.Unlock()
 	a.respondSuccess(w, response)
+}
+
+// GetUserByAddress godoc
+// @Summary Get user by address
+// @Description Retrieve aggregated blob statistics for a specific sender address
+// @Tags users
+// @Accept json
+// @Produce json
+// @Param network query string false "Network name or chain ID (default: first enabled network)"
+// @Param address path string true "Ethereum address"
+// @Success 200 {object} Response{data=UserResponse} "Success"
+// @Failure 400 {object} Response "Bad request"
+// @Failure 404 {object} Response "User not found"
+// @Failure 500 {object} Response "Internal server error"
+// @Router /users/{address} [get]
+func (a *API) GetUserByAddress(w http.ResponseWriter, r *http.Request) {
+	network, err := a.getNetworkFromRequest(r)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	address := chi.URLParam(r, "address")
+	if address == "" || !common.IsHexAddress(address) {
+		a.respondError(w, http.StatusBadRequest, "Invalid address")
+		return
+	}
+	address = common.HexToAddress(address).Hex()
+
+	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
+	defer cancel()
+
+	var user models.BlobUserStats
+	if err := a.db.GetContext(queryCtx, &user, queryUserByAddress, network.ChainID, address); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			a.respondError(w, http.StatusNotFound, "User not found")
+			return
+		}
+		logger.Error("Failed to get user by address",
+			zap.String("network", network.Name),
+			zap.String("address", address),
+			zap.Error(err))
+		a.respondError(w, http.StatusInternalServerError, "Failed to get user")
+		return
+	}
+
+	a.respondSuccess(w, UserResponse{
+		NetworkID:     network.ChainID,
+		NetworkName:   network.Name,
+		Address:       user.Address,
+		Name:          user.Name,
+		BlobCount:     user.BlobCount,
+		TotalCostETH:  user.TotalCostETH,
+		LastTimestamp: user.LastTimestamp,
+	})
 }
 
 // GetBlobStats godoc
