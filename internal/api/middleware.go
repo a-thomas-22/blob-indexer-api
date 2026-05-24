@@ -121,6 +121,7 @@ func LoggerMiddleware(next http.Handler) http.Handler {
 			zap.Int("status", ww.Status()),
 			zap.Duration("duration", time.Since(start)),
 			zap.String("request_id", requestID),
+			zap.String("client_ip", clientIP(r)),
 			zap.String("remote_addr", r.RemoteAddr),
 			zap.String("user_agent", r.UserAgent()),
 		)
