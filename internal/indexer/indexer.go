@@ -42,11 +42,8 @@ const (
 	// DefaultWorkerCount is the default number of workers for parallel processing
 	DefaultWorkerCount = 4
 
-	// maxGapScanRetries is the normal retry budget before a block moves to slow safety-net retries.
+	// maxGapScanRetries is the total failure count before a block is considered permanently failed
 	maxGapScanRetries = 10
-
-	// failedBlockSafetyRetryInterval keeps failed blocks recoverable without retrying them every scan forever.
-	failedBlockSafetyRetryInterval = time.Hour
 
 	// bytesPerBlobGasUnit converts blob gas units to approximate blob bytes.
 	bytesPerBlobGasUnit = 128
@@ -122,7 +119,6 @@ type Indexer struct {
 	blockSub               *ethereum.BlockSubscription
 	pendingTxSub           *ethereum.PendingTxSubscription
 	failedBlocks           map[uint64]int // block number -> cumulative failure count
-	failedBlockNextRetry   map[uint64]time.Time
 	failedBlocksMu         sync.Mutex
 	reorgDetected          uint32              // atomic flag: 1 = reorg detected, main loop should reset
 	chainConfig            *params.ChainConfig // go-ethereum chain config for fork-aware blob math
@@ -168,7 +164,6 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		blockTaskCh:            make(chan BlockTask, 1000), // Buffer for block tasks
 		useWebsocket:           useWebsocket,
 		failedBlocks:           make(map[uint64]int),
-		failedBlockNextRetry:   make(map[uint64]time.Time),
 		chainConfig:            blobparams.ChainConfigForID(network.ChainID),
 	}
 }
@@ -458,7 +453,6 @@ func (i *Indexer) blockProcessingWorker(workerID int) {
 				// Clear from failed blocks tracking on success
 				i.failedBlocksMu.Lock()
 				delete(i.failedBlocks, task.BlockNumber)
-				delete(i.failedBlockNextRetry, task.BlockNumber)
 				i.failedBlocksMu.Unlock()
 
 				// Update the last indexed block
@@ -489,9 +483,6 @@ func (i *Indexer) updateLastIndexedBlock(blockNumber uint64) {
 // trackFailedBlock records a block that failed processing for later retry by the gap scanner
 func (i *Indexer) trackFailedBlock(blockNumber uint64) {
 	i.failedBlocksMu.Lock()
-	if i.failedBlocks == nil {
-		i.failedBlocks = make(map[uint64]int)
-	}
 	i.failedBlocks[blockNumber]++
 	i.failedBlocksMu.Unlock()
 }
@@ -1379,41 +1370,18 @@ func (i *Indexer) retryFailedBlocks() {
 		i.failedBlocksMu.Unlock()
 		return
 	}
-	if i.failedBlockNextRetry == nil {
-		i.failedBlockNextRetry = make(map[uint64]time.Time)
-	}
 
-	now := time.Now()
 	var toRetry []uint64
-	var safetyRetryCount int
-	var deferredCount int
 	for block, count := range i.failedBlocks {
 		if count <= maxGapScanRetries {
 			toRetry = append(toRetry, block)
-			continue
-		}
-
-		nextRetry, ok := i.failedBlockNextRetry[block]
-		if !ok {
-			nextRetry = now.Add(failedBlockSafetyRetryInterval)
-			i.failedBlockNextRetry[block] = nextRetry
-			deferredCount++
-			logger.Warn("Block exceeded retry budget; scheduling safety-net retry",
+		} else {
+			logger.Error("Block permanently failed, exceeded max retries",
 				zap.String("network", i.network.Name),
 				zap.Uint64("block", block),
-				zap.Int("total_attempts", count),
-				zap.Time("next_retry", nextRetry))
-			continue
+				zap.Int("total_attempts", count))
+			delete(i.failedBlocks, block)
 		}
-
-		if now.Before(nextRetry) {
-			deferredCount++
-			continue
-		}
-
-		toRetry = append(toRetry, block)
-		safetyRetryCount++
-		i.failedBlockNextRetry[block] = now.Add(failedBlockSafetyRetryInterval)
 	}
 	i.failedBlocksMu.Unlock()
 
@@ -1423,9 +1391,7 @@ func (i *Indexer) retryFailedBlocks() {
 
 	logger.Info("Gap scanner re-queuing failed blocks",
 		zap.String("network", i.network.Name),
-		zap.Int("count", len(toRetry)),
-		zap.Int("safety_retry_count", safetyRetryCount),
-		zap.Int("deferred_count", deferredCount))
+		zap.Int("count", len(toRetry)))
 
 	for _, blockNum := range toRetry {
 		select {

@@ -60,7 +60,6 @@ func newTestIndexer() *Indexer {
 		chainConfig:            blobparams.ChainConfigForID(network.ChainID),
 		blockTaskCh:            make(chan BlockTask, 1000),
 		failedBlocks:           make(map[uint64]int),
-		failedBlockNextRetry:   make(map[uint64]time.Time),
 		mu:                     sync.Mutex{},
 		failedBlocksMu:         sync.Mutex{},
 	}
@@ -225,44 +224,19 @@ func TestRetryFailedBlocks_ExceedsRetryLimit(t *testing.T) {
 
 	idx.retryFailedBlocks()
 
-	// Block should not be re-queued immediately, but it stays tracked for safety-net retries.
+	// Block should NOT be re-queued
 	select {
 	case task := <-idx.blockTaskCh:
 		t.Errorf("unexpected block task %d", task.BlockNumber)
 	default:
 		// expected - nothing queued
 	}
-	idx.failedBlocksMu.Lock()
-	defer idx.failedBlocksMu.Unlock()
-	if _, ok := idx.failedBlocks[100]; !ok {
-		t.Fatal("expected block 100 to remain tracked")
-	}
-	if _, ok := idx.failedBlockNextRetry[100]; !ok {
-		t.Fatal("expected block 100 to have a scheduled safety-net retry")
-	}
-}
-
-func TestRetryFailedBlocks_ExceedsRetryLimitSafetyRetryDue(t *testing.T) {
-	idx := newTestIndexer()
-	idx.failedBlocks[100] = maxGapScanRetries + 1
-	idx.failedBlockNextRetry[100] = time.Now().Add(-time.Minute)
-
-	idx.retryFailedBlocks()
-
-	select {
-	case task := <-idx.blockTaskCh:
-		if task.BlockNumber != 100 {
-			t.Errorf("expected block 100, got %d", task.BlockNumber)
-		}
-	default:
-		t.Error("expected block task to be queued")
-	}
 }
 
 func TestRetryFailedBlocks_MixedBlocks(t *testing.T) {
 	idx := newTestIndexer()
 	idx.failedBlocks[100] = 2                     // should retry
-	idx.failedBlocks[200] = maxGapScanRetries + 5 // should defer to safety-net retry
+	idx.failedBlocks[200] = maxGapScanRetries + 5 // should not retry
 
 	idx.retryFailedBlocks()
 
@@ -282,11 +256,6 @@ done:
 	}
 	if retried[200] {
 		t.Error("block 200 should not be retried")
-	}
-	idx.failedBlocksMu.Lock()
-	defer idx.failedBlocksMu.Unlock()
-	if _, ok := idx.failedBlocks[200]; !ok {
-		t.Fatal("expected block 200 to remain tracked")
 	}
 }
 
@@ -470,11 +439,8 @@ func TestRetryFailedBlocks_AllExceeded(t *testing.T) {
 	default:
 		// expected
 	}
-	if len(idx.failedBlocks) != 2 {
-		t.Fatalf("expected exceeded blocks to remain tracked, got %d entries", len(idx.failedBlocks))
-	}
-	if len(idx.failedBlockNextRetry) != 2 {
-		t.Fatalf("expected safety-net retries to be scheduled, got %d entries", len(idx.failedBlockNextRetry))
+	if len(idx.failedBlocks) != 0 {
+		t.Fatalf("expected permanently failed blocks to be removed, got %d entries", len(idx.failedBlocks))
 	}
 }
 
