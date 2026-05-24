@@ -29,7 +29,7 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 - Ethereum Client: go-ethereum (ethclient)
 - Configuration: Viper (YAML + environment variables)
 - Logging: Zap (structured JSON)
-- Migrations: golang-migrate
+- Migrations: golang-migrate via `cmd/migrate`, `make db-migrate`, or the Helm migration hook
 - API Docs: Swagger/OpenAPI (swag + http-swagger)
 - Deployment: Docker, Kubernetes with Helm, Tilt for development
 
@@ -182,6 +182,7 @@ NETWORK_SEPOLIA_ENABLED=true
 
 ```bash
 make build          # Build the binary
+make build-migrate  # Build the migration runner
 make run            # Build and run locally
 make test           # Run all tests
 make clean          # Remove built binary

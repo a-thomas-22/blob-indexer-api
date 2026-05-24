@@ -1,5 +1,6 @@
 database:
   url: "postgres://postgres:postgres@localhost:5432/blobindexer?sslmode=disable"
+  run_migrations: true
 
 server:
   port: 8080

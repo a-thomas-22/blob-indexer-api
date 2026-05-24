@@ -16,7 +16,8 @@ type AppResources struct {
 	Database *db.DB
 }
 
-// InitializeApp loads config, initializes context, connects DB, and runs migrations.
+// InitializeApp loads config, initializes context, connects DB, optionally runs
+// migrations, and syncs configured networks into the database.
 func InitializeApp(loadConfig func() (*config.Config, error)) (*AppResources, error) {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -31,10 +32,18 @@ func InitializeApp(loadConfig func() (*config.Config, error)) (*AppResources, er
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	if err := db.RunMigrations(cfg.Database.URL); err != nil {
+	if cfg.Database.RunMigrations {
+		if err := db.RunMigrations(cfg.Database.URL); err != nil {
+			_ = database.Close()
+			cancel()
+			return nil, fmt.Errorf("failed to run database migrations: %w", err)
+		}
+	}
+
+	if err := database.UpsertNetworks(ctx, cfg.Networks); err != nil {
 		_ = database.Close()
 		cancel()
-		return nil, fmt.Errorf("failed to run database migrations: %w", err)
+		return nil, fmt.Errorf("failed to sync configured networks: %w", err)
 	}
 
 	return &AppResources{

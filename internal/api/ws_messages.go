@@ -16,6 +16,11 @@ const (
 	EventUsersUpdate WSEventType = "users_update"
 	// EventPing is a heartbeat sent every 30s.
 	EventPing WSEventType = "ping"
+
+	// MempoolActionAdd indicates a pending blob transaction was observed.
+	MempoolActionAdd = "add"
+	// MempoolActionRemove indicates a pending blob transaction left the mempool.
+	MempoolActionRemove = "remove"
 )
 
 // AllEventTypes lists every subscribable event type.

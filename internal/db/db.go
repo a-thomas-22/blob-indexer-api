@@ -84,6 +84,27 @@ func RunMigrations(dbURL string) error {
 	return nil
 }
 
+// UpsertNetworks syncs configured networks into the networks table. The rest of
+// the schema uses chain_id as network_id, so this must run before indexed rows
+// are written when foreign keys are enabled.
+func (db *DB) UpsertNetworks(ctx context.Context, networks []config.NetworkConfig) error {
+	query := `
+		INSERT INTO networks (chain_id, name, start_block, is_enabled, updated_at)
+		VALUES ($1, $2, $3, $4, NOW())
+		ON CONFLICT (chain_id) DO UPDATE SET
+			name = EXCLUDED.name,
+			start_block = EXCLUDED.start_block,
+			is_enabled = EXCLUDED.is_enabled,
+			updated_at = NOW()
+	`
+	for _, network := range networks {
+		if _, err := db.ExecContext(ctx, query, network.ChainID, network.Name, network.StartBlock, network.Enabled); err != nil {
+			return fmt.Errorf("failed to upsert network %s (%d): %w", network.Name, network.ChainID, err)
+		}
+	}
+	return nil
+}
+
 // GetMetadata retrieves a metadata value by key
 func (db *DB) GetMetadata(ctx context.Context, key string) (string, error) {
 	var value string
@@ -111,8 +132,8 @@ func (db *DB) SetMetadata(ctx context.Context, key, value string) error {
 	query := `
 		INSERT INTO indexer_metadata (key, value)
 		VALUES ($1, $2)
-		ON CONFLICT (key) DO UPDATE SET value = $2
-		WHERE indexer_metadata.network_id IS NULL
+		ON CONFLICT (key) WHERE network_id IS NULL
+		DO UPDATE SET value = EXCLUDED.value
 	`
 	_, err := db.ExecContext(ctx, query, key, value)
 	if err != nil {

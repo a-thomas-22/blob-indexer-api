@@ -82,12 +82,16 @@ databaseSecret:
 database:
   sslMode: require
 
+migrations:
+  enabled: true
+
 
 # Application configuration -- rendered into a ConfigMap as YAML.
 # Maps directly to the Config struct in internal/config/config.go.
 appConfig:
   database:
     url: ""  # Set via externalDatabase.url or auto-constructed from postgresql.* values
+    run_migrations: false
   server:
     port: 8080
     dev_mode: false
