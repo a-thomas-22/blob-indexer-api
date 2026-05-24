@@ -28,6 +28,7 @@ type StatusResponse struct {
 // @Produce json
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
 // @Success 200 {object} Response{data=StatusResponse} "Success"
+// @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
 // @Router /status [get]
 func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {

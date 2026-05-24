@@ -32,6 +32,7 @@ type StatsResponse struct {
 // @Produce json
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
 // @Success 200 {object} Response{data=StatsResponse} "Success"
+// @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
 // @Router /stats [get]
 func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {

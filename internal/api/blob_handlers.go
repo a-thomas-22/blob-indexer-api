@@ -599,11 +599,19 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 	var blob models.Blob
 	query := queryBlobByTxHash
 	if err := a.db.GetContext(r.Context(), &blob, query, txHash, network.ChainID); err != nil {
-		logger.Warn("Blob not found",
+		if errors.Is(err, sql.ErrNoRows) {
+			logger.Warn("Blob not found",
+				zap.String("network", network.Name),
+				zap.String("tx_hash", txHash),
+				zap.Error(err))
+			a.respondError(w, http.StatusNotFound, "Blob not found")
+			return
+		}
+		logger.Error("Failed to get blob by tx hash",
 			zap.String("network", network.Name),
 			zap.String("tx_hash", txHash),
 			zap.Error(err))
-		a.respondError(w, http.StatusNotFound, "Blob not found")
+		a.respondError(w, http.StatusInternalServerError, "Failed to get blob")
 		return
 	}
 

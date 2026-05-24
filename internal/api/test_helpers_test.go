@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"reflect"
 	"time"
 
@@ -95,8 +94,5 @@ func setStructResult(dest, src interface{}) {
 	}
 	dv.Set(sv)
 }
-
-// suppress unused warnings
-var _ = fmt.Sprintf
 
 const validTestAddress = "0x1234567890abcdef1234567890abcdef12345678"

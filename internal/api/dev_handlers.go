@@ -29,7 +29,7 @@ type SystemMetrics struct {
 	NumGoroutine    int       `json:"num_goroutine"`
 	MemoryUsage     string    `json:"memory_usage"`
 	TotalRequests   int64     `json:"total_requests"`
-	ActiveRequests  int       `json:"active_requests"`
+	ActiveRequests  int64     `json:"active_requests"`
 	StartTime       time.Time `json:"start_time"`
 	CurrentTime     time.Time `json:"current_time"`
 	NumCPU          int       `json:"num_cpu"`
@@ -57,16 +57,16 @@ type DatabaseStats struct {
 	IdleConnections    int         `json:"idle_connections"`
 	InUseConnections   int         `json:"in_use_connections"`
 	MaxOpenConnections int         `json:"max_open_connections"`
-	LastMigrationTime  time.Time   `json:"last_migration_time"`
+	LastMigrationTime  *time.Time  `json:"last_migration_time,omitempty"`
 }
 
 // TableStat represents statistics for a single database table
 type TableStat struct {
-	TableName    string    `json:"table_name"`
-	RowCount     int       `json:"row_count"`
-	SizeBytes    int64     `json:"size_bytes"`
-	IndexCount   int       `json:"index_count"`
-	LastVacuumed time.Time `json:"last_vacuumed"`
+	TableName    string     `json:"table_name"`
+	RowCount     int        `json:"row_count"`
+	SizeBytes    int64      `json:"size_bytes"`
+	IndexCount   int        `json:"index_count"`
+	LastVacuumed *time.Time `json:"last_vacuumed,omitempty"`
 }
 
 // LogEntry represents a single log entry
@@ -106,12 +106,8 @@ type devDashboardResponse struct {
 func (a *API) DevMetrics(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting system metrics")
 
-	// Get current time
 	currentTime := time.Now()
-
-	// Calculate uptime
-	startTime := currentTime.Add(-1 * time.Hour) // Placeholder, should be actual start time
-	uptime := currentTime.Sub(startTime).String()
+	uptime := currentTime.Sub(a.startTime).Truncate(time.Second).String()
 
 	// Create metrics response
 	metrics := SystemMetrics{
@@ -119,9 +115,9 @@ func (a *API) DevMetrics(w http.ResponseWriter, r *http.Request) {
 		GoVersion:       runtime.Version(),
 		NumGoroutine:    runtime.NumGoroutine(),
 		MemoryUsage:     getMemoryUsage(),
-		TotalRequests:   1000, // Placeholder
-		ActiveRequests:  10,   // Placeholder
-		StartTime:       startTime,
+		TotalRequests:   atomic.LoadInt64(&a.totalRequests),
+		ActiveRequests:  atomic.LoadInt64(&a.activeRequests),
+		StartTime:       a.startTime,
 		CurrentTime:     currentTime,
 		NumCPU:          runtime.NumCPU(),
 		OperatingSystem: runtime.GOOS,
@@ -250,11 +246,10 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 		}
 
 		tableStats = append(tableStats, TableStat{
-			TableName:    table,
-			RowCount:     rowCount,
-			SizeBytes:    sizeBytes,
-			IndexCount:   indexCount,
-			LastVacuumed: time.Now().Add(-24 * time.Hour), // Placeholder
+			TableName:  table,
+			RowCount:   rowCount,
+			SizeBytes:  sizeBytes,
+			IndexCount: indexCount,
 		})
 	}
 
@@ -277,7 +272,6 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 		IdleConnections:    stats.Idle,
 		InUseConnections:   stats.InUse,
 		MaxOpenConnections: stats.MaxOpenConnections,
-		LastMigrationTime:  time.Now().Add(-7 * 24 * time.Hour), // Placeholder
 	}
 
 	a.respondSuccess(w, dbStats)

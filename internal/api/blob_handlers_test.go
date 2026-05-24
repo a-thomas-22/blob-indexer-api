@@ -450,8 +450,8 @@ func TestGetBlobByTxHash_DBError(t *testing.T) {
 	w := httptest.NewRecorder()
 	a.GetBlobByTxHash(w, req)
 
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d", w.Code)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
 	}
 }
 

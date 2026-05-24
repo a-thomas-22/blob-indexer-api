@@ -8,18 +8,40 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
 
 func TestDevMetrics(t *testing.T) {
 	a := newTestAPI()
+	a.startTime = time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	a.totalRequests = 7
+	a.activeRequests = 2
+
 	req := httptest.NewRequest(http.MethodGet, "/api/dev/metrics", http.NoBody)
 	w := httptest.NewRecorder()
 	a.DevMetrics(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Success bool          `json:"success"`
+		Data    SystemMetrics `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Data.StartTime.Equal(a.startTime) {
+		t.Fatalf("expected start time %s, got %s", a.startTime, resp.Data.StartTime)
+	}
+	if resp.Data.TotalRequests != 7 {
+		t.Fatalf("expected 7 total requests, got %d", resp.Data.TotalRequests)
+	}
+	if resp.Data.ActiveRequests != 2 {
+		t.Fatalf("expected 2 active requests, got %d", resp.Data.ActiveRequests)
 	}
 }
 
