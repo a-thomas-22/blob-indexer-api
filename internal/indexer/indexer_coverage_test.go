@@ -616,6 +616,31 @@ func TestUpdateCurrentChainHead(t *testing.T) {
 	}
 }
 
+func TestUpdateBackfillStatus(t *testing.T) {
+	idx := newTestIndexer()
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	observedAt := time.Date(2026, 5, 24, 10, 0, 0, 0, time.UTC)
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataBackfillActive, "true").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataBackfillStartBlock, "10").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataBackfillTargetBlock, "20").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataBackfillUpdatedAt, models.FormatMetadataTimestamp(observedAt)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	idx.updateBackfillStatus(true, 10, 20, observedAt)
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
 func TestReindex(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		idx := newTestIndexer()

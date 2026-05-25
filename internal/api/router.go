@@ -53,6 +53,16 @@ type freshnessMetadataRow struct {
 type networkFreshness struct {
 	LastIndexedBlock uint64
 	FreshnessResponse
+	backfill backfillMetadata
+}
+
+type backfillMetadata struct {
+	Active      bool
+	activeSet   bool
+	StartBlock  *uint64
+	TargetBlock *uint64
+	UpdatedAt   *time.Time
+	CompletedAt *time.Time
 }
 
 type routerOptions struct {
@@ -350,6 +360,18 @@ type FreshnessResponse struct {
 	WebSocketFreshnessAt *time.Time `json:"websocket_freshness_at,omitempty"`
 }
 
+// BackfillResponse contains the current historical catch-up status for a network.
+type BackfillResponse struct {
+	Active          bool       `json:"active"`
+	StartBlock      *uint64    `json:"start_block,omitempty"`
+	CurrentBlock    uint64     `json:"current_block"`
+	TargetBlock     *uint64    `json:"target_block,omitempty"`
+	RemainingBlocks *uint64    `json:"remaining_blocks,omitempty"`
+	ProgressPercent *float64   `json:"progress_percent,omitempty"`
+	UpdatedAt       *time.Time `json:"updated_at,omitempty"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+}
+
 // NetworkResponse is a response containing network information
 type NetworkResponse struct {
 	ChainID          int    `json:"chain_id"`
@@ -449,6 +471,32 @@ func (a *API) getNetworkFreshnessFromDB(ctx context.Context, networkID int) netw
 			if ok {
 				freshness.WebSocketFreshnessAt = &timestamp
 			}
+		case models.MetadataBackfillActive:
+			active, ok := parseMetadataBool(row.Value)
+			if ok {
+				freshness.backfill.Active = active
+				freshness.backfill.activeSet = true
+			}
+		case models.MetadataBackfillStartBlock:
+			block, ok := parseMetadataUint(row.Value)
+			if ok {
+				freshness.backfill.StartBlock = &block
+			}
+		case models.MetadataBackfillTargetBlock:
+			block, ok := parseMetadataUint(row.Value)
+			if ok {
+				freshness.backfill.TargetBlock = &block
+			}
+		case models.MetadataBackfillUpdatedAt:
+			timestamp, ok := parseMetadataTimestamp(row.Value)
+			if ok {
+				freshness.backfill.UpdatedAt = &timestamp
+			}
+		case models.MetadataBackfillCompletedAt:
+			timestamp, ok := parseMetadataTimestamp(row.Value)
+			if ok {
+				freshness.backfill.CompletedAt = &timestamp
+			}
 		}
 	}
 
@@ -468,7 +516,74 @@ func parseMetadataUint(value string) (uint64, bool) {
 	return parsed, err == nil
 }
 
+func parseMetadataBool(value string) (parsed, ok bool) {
+	parsed, err := strconv.ParseBool(value)
+	return parsed, err == nil
+}
+
 func parseMetadataTimestamp(value string) (time.Time, bool) {
 	parsed, err := models.ParseMetadataTimestamp(value)
 	return parsed, err == nil
+}
+
+func (f networkFreshness) backfillResponse() BackfillResponse {
+	targetBlock := maxUint64Ptr(f.backfill.TargetBlock, f.CurrentChainHead)
+	response := BackfillResponse{
+		Active:       f.backfill.Active,
+		StartBlock:   f.backfill.StartBlock,
+		CurrentBlock: f.LastIndexedBlock,
+		TargetBlock:  targetBlock,
+		UpdatedAt:    f.backfill.UpdatedAt,
+		CompletedAt:  f.backfill.CompletedAt,
+	}
+
+	if targetBlock != nil && *targetBlock <= f.LastIndexedBlock {
+		response.Active = false
+	} else if !f.backfill.activeSet && targetBlock != nil {
+		response.Active = true
+	}
+
+	if targetBlock != nil {
+		remaining := uint64(0)
+		if *targetBlock > f.LastIndexedBlock {
+			remaining = *targetBlock - f.LastIndexedBlock
+		}
+		response.RemainingBlocks = &remaining
+	}
+
+	if f.backfill.StartBlock != nil && targetBlock != nil {
+		progress := backfillProgressPercent(*f.backfill.StartBlock, f.LastIndexedBlock, *targetBlock)
+		response.ProgressPercent = &progress
+	}
+
+	return response
+}
+
+func maxUint64Ptr(a, b *uint64) *uint64 {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	case *a >= *b:
+		return a
+	default:
+		return b
+	}
+}
+
+func backfillProgressPercent(startBlock, currentBlock, targetBlock uint64) float64 {
+	if targetBlock <= startBlock {
+		if currentBlock >= targetBlock {
+			return 100
+		}
+		return 0
+	}
+	if currentBlock <= startBlock {
+		return 0
+	}
+	if currentBlock >= targetBlock {
+		return 100
+	}
+	return float64(currentBlock-startBlock) / float64(targetBlock-startBlock) * 100
 }

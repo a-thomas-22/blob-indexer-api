@@ -129,6 +129,21 @@ func TestMetadataConstants(t *testing.T) {
 	if MetadataWebSocketFreshnessAt != "websocket_freshness_at" {
 		t.Errorf("expected MetadataWebSocketFreshnessAt to be 'websocket_freshness_at', got %q", MetadataWebSocketFreshnessAt)
 	}
+	if MetadataBackfillActive != "backfill_active" {
+		t.Errorf("expected MetadataBackfillActive to be 'backfill_active', got %q", MetadataBackfillActive)
+	}
+	if MetadataBackfillStartBlock != "backfill_start_block" {
+		t.Errorf("expected MetadataBackfillStartBlock to be 'backfill_start_block', got %q", MetadataBackfillStartBlock)
+	}
+	if MetadataBackfillTargetBlock != "backfill_target_block" {
+		t.Errorf("expected MetadataBackfillTargetBlock to be 'backfill_target_block', got %q", MetadataBackfillTargetBlock)
+	}
+	if MetadataBackfillUpdatedAt != "backfill_updated_at" {
+		t.Errorf("expected MetadataBackfillUpdatedAt to be 'backfill_updated_at', got %q", MetadataBackfillUpdatedAt)
+	}
+	if MetadataBackfillCompletedAt != "backfill_completed_at" {
+		t.Errorf("expected MetadataBackfillCompletedAt to be 'backfill_completed_at', got %q", MetadataBackfillCompletedAt)
+	}
 }
 
 func TestMetadataTimestampRoundTrip(t *testing.T) {
