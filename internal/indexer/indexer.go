@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	geth "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -226,6 +227,19 @@ func (i *Indexer) updateWebSocketFreshness(observedAt time.Time) {
 	i.setNetworkMetadataValues(
 		metadataUpdate{key: models.MetadataWebSocketFreshnessAt, value: models.FormatMetadataTimestamp(observedAt)},
 	)
+}
+
+func (i *Indexer) updateBackfillStatus(active bool, startBlock, targetBlock uint64, observedAt time.Time) {
+	updates := []metadataUpdate{
+		{key: models.MetadataBackfillActive, value: strconv.FormatBool(active)},
+		{key: models.MetadataBackfillStartBlock, value: strconv.FormatUint(startBlock, 10)},
+		{key: models.MetadataBackfillTargetBlock, value: strconv.FormatUint(targetBlock, 10)},
+		{key: models.MetadataBackfillUpdatedAt, value: models.FormatMetadataTimestamp(observedAt)},
+	}
+	if !active {
+		updates = append(updates, metadataUpdate{key: models.MetadataBackfillCompletedAt, value: models.FormatMetadataTimestamp(observedAt)})
+	}
+	i.setNetworkMetadataValues(updates...)
 }
 
 // Start starts the indexer
@@ -558,6 +572,8 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 		zap.Uint64("start_block", startBlock))
 
 	currentBlock := startBlock
+	var backfillStartBlock uint64
+	backfillActive := false
 	ticker := time.NewTicker(i.pollingInterval)
 	defer ticker.Stop()
 
@@ -588,12 +604,23 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 				zap.Error(err))
 			continue
 		}
-		i.updateCurrentChainHead(latestBlock, time.Now())
+		observedAt := time.Now()
+		i.updateCurrentChainHead(latestBlock, observedAt)
 
 		// If we're caught up, wait for the next tick
 		if currentBlock > latestBlock {
+			if backfillActive {
+				i.updateBackfillStatus(false, backfillStartBlock, latestBlock, observedAt)
+				backfillActive = false
+			}
 			continue
 		}
+
+		if !backfillActive {
+			backfillStartBlock = currentBlock
+			backfillActive = true
+		}
+		i.updateBackfillStatus(true, backfillStartBlock, latestBlock, observedAt)
 
 		// Process blocks in batches
 		endBlock := currentBlock + uint64(i.batchSize) - 1
@@ -708,6 +735,12 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 	// Get the transaction details
 	tx, isPending, err := i.ethClient.GetTransactionByHash(i.ctx, hash)
 	if err != nil {
+		if errors.Is(err, geth.NotFound) {
+			logger.Debug("Pending transaction no longer available",
+				zap.String("network", i.network.Name),
+				zap.String("tx_hash", hash.Hex()))
+			return
+		}
 		logger.Error("Failed to get pending transaction",
 			zap.String("network", i.network.Name),
 			zap.String("tx_hash", hash.Hex()),

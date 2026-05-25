@@ -26,6 +26,11 @@ service:
   type: ClusterIP
   port: 8080
 
+devService:
+  enabled: false
+  type: ClusterIP
+  port: 8081
+
 ingress:
   enabled: false
   className: "nginx"
@@ -98,6 +103,7 @@ appConfig:
     schema_poll_interval: "2s"
   server:
     port: 8080
+    dev_port: 0
     dev_mode: false
   logging:
     level: "warn"

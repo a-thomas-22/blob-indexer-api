@@ -11,12 +11,13 @@ import (
 
 // StatusResponse is a response containing indexer status
 type StatusResponse struct {
-	NetworkID        int       `json:"network_id,omitempty"`
-	NetworkName      string    `json:"network_name,omitempty"`
-	LastIndexedBlock uint64    `json:"last_indexed_block"`
-	IndexerVersion   string    `json:"indexer_version"`
-	Uptime           string    `json:"uptime"`
-	LastIndexedTime  time.Time `json:"last_indexed_time"`
+	NetworkID        int              `json:"network_id,omitempty"`
+	NetworkName      string           `json:"network_name,omitempty"`
+	LastIndexedBlock uint64           `json:"last_indexed_block"`
+	IndexerVersion   string           `json:"indexer_version"`
+	Uptime           string           `json:"uptime"`
+	LastIndexedTime  time.Time        `json:"last_indexed_time"`
+	Backfill         BackfillResponse `json:"backfill"`
 	FreshnessResponse
 }
 
@@ -65,6 +66,7 @@ func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
 		IndexerVersion:    a.config.Indexer.Version,
 		Uptime:            uptime,
 		LastIndexedTime:   indexedTime,
+		Backfill:          freshness.backfillResponse(),
 		FreshnessResponse: freshness.FreshnessResponse,
 	}
 

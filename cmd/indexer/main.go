@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"math/big"
 	"os"
 	"os/signal"
 	"syscall"
@@ -64,6 +67,11 @@ func run() int {
 				zap.String("network", network.Name),
 				zap.Error(err))
 		}
+		if err := validateRPCChainID(ctx, ethClient, network); err != nil {
+			logger.Fatal("Ethereum RPC chain ID validation failed",
+				zap.String("network", network.Name),
+				zap.Error(err))
+		}
 
 		idx := indexer.New(ctx, database, ethClient, cfg, network)
 		indexers = append(indexers, idx)
@@ -96,4 +104,17 @@ func run() int {
 
 	logger.Info("Indexer shutdown complete")
 	return 0
+}
+
+func validateRPCChainID(ctx context.Context, ethClient *ethereum.Client, network config.NetworkConfig) error {
+	actual, err := ethClient.GetChainID(ctx)
+	if err != nil {
+		return err
+	}
+
+	expected := big.NewInt(int64(network.ChainID))
+	if actual.Cmp(expected) != 0 {
+		return fmt.Errorf("configured chain ID %d does not match RPC chain ID %s", network.ChainID, actual.String())
+	}
+	return nil
 }

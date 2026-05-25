@@ -34,6 +34,7 @@ func TestGetIndexerStatus_Success(t *testing.T) {
 func TestGetIndexerStatus_IncludesFreshness(t *testing.T) {
 	lastBlobTime := time.Date(2026, 5, 24, 10, 0, 0, 0, time.UTC)
 	indexedAt := lastBlobTime.Add(5 * time.Second)
+	backfillUpdatedAt := indexedAt.Add(3 * time.Second)
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
 			timestamp := dest.(**time.Time)
@@ -45,6 +46,10 @@ func TestGetIndexerStatus_IncludesFreshness(t *testing.T) {
 				{Key: models.MetadataLastIndexedBlock, Value: "300"},
 				{Key: models.MetadataCurrentChainHead, Value: "301"},
 				{Key: models.MetadataLastIndexedAt, Value: models.FormatMetadataTimestamp(indexedAt)},
+				{Key: models.MetadataBackfillActive, Value: "true"},
+				{Key: models.MetadataBackfillStartBlock, Value: "100"},
+				{Key: models.MetadataBackfillTargetBlock, Value: "301"},
+				{Key: models.MetadataBackfillUpdatedAt, Value: models.FormatMetadataTimestamp(backfillUpdatedAt)},
 			})
 			return nil
 		},
@@ -79,6 +84,67 @@ func TestGetIndexerStatus_IncludesFreshness(t *testing.T) {
 	}
 	if resp.Data.LastIndexedAt == nil || !resp.Data.LastIndexedAt.Equal(indexedAt) {
 		t.Fatalf("expected last indexed at %s, got %v", indexedAt, resp.Data.LastIndexedAt)
+	}
+	if !resp.Data.Backfill.Active {
+		t.Fatal("expected backfill to be active")
+	}
+	if resp.Data.Backfill.StartBlock == nil || *resp.Data.Backfill.StartBlock != 100 {
+		t.Fatalf("expected backfill start block 100, got %v", resp.Data.Backfill.StartBlock)
+	}
+	if resp.Data.Backfill.CurrentBlock != 300 {
+		t.Fatalf("expected backfill current block 300, got %d", resp.Data.Backfill.CurrentBlock)
+	}
+	if resp.Data.Backfill.TargetBlock == nil || *resp.Data.Backfill.TargetBlock != 301 {
+		t.Fatalf("expected backfill target block 301, got %v", resp.Data.Backfill.TargetBlock)
+	}
+	if resp.Data.Backfill.RemainingBlocks == nil || *resp.Data.Backfill.RemainingBlocks != 1 {
+		t.Fatalf("expected backfill remaining blocks 1, got %v", resp.Data.Backfill.RemainingBlocks)
+	}
+	if resp.Data.Backfill.ProgressPercent == nil || *resp.Data.Backfill.ProgressPercent <= 99 {
+		t.Fatalf("expected backfill progress above 99%%, got %v", resp.Data.Backfill.ProgressPercent)
+	}
+	if resp.Data.Backfill.UpdatedAt == nil || !resp.Data.Backfill.UpdatedAt.Equal(backfillUpdatedAt) {
+		t.Fatalf("expected backfill updated at %s, got %v", backfillUpdatedAt, resp.Data.Backfill.UpdatedAt)
+	}
+}
+
+func TestGetIndexerStatus_BackfillFallback(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return nil
+		},
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setSliceResult(dest, []freshnessMetadataRow{
+				{Key: models.MetadataLastIndexedBlock, Value: "10"},
+				{Key: models.MetadataCurrentChainHead, Value: "25"},
+			})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetIndexerStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Success bool           `json:"success"`
+		Data    StatusResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Data.Backfill.Active {
+		t.Fatal("expected lag fallback to mark backfill active")
+	}
+	if resp.Data.Backfill.TargetBlock == nil || *resp.Data.Backfill.TargetBlock != 25 {
+		t.Fatalf("expected target block 25, got %v", resp.Data.Backfill.TargetBlock)
+	}
+	if resp.Data.Backfill.RemainingBlocks == nil || *resp.Data.Backfill.RemainingBlocks != 15 {
+		t.Fatalf("expected remaining blocks 15, got %v", resp.Data.Backfill.RemainingBlocks)
 	}
 }
 

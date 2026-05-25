@@ -455,12 +455,17 @@ const (
 		WHERE network_id = $1
 			AND key IN (
 				'` + models.MetadataLastIndexedBlock + `',
-				'` + models.MetadataCurrentChainHead + `',
-				'` + models.MetadataChainHeadUpdatedAt + `',
-				'` + models.MetadataLastIndexedAt + `',
-				'` + models.MetadataWebSocketFreshnessAt + `'
-			)
-	`
+					'` + models.MetadataCurrentChainHead + `',
+					'` + models.MetadataChainHeadUpdatedAt + `',
+					'` + models.MetadataLastIndexedAt + `',
+					'` + models.MetadataWebSocketFreshnessAt + `',
+					'` + models.MetadataBackfillActive + `',
+					'` + models.MetadataBackfillStartBlock + `',
+					'` + models.MetadataBackfillTargetBlock + `',
+					'` + models.MetadataBackfillUpdatedAt + `',
+					'` + models.MetadataBackfillCompletedAt + `'
+				)
+		`
 
 	// queryNewBlobsSinceBlock retrieves confirmed blobs after a given block number.
 	queryNewBlobsSinceBlock = `
