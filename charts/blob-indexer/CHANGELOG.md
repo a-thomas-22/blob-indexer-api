@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.3.0...blob-indexer-chart-v0.4.0) (2026-05-25)
+
+
+### Features
+
+* load blob-list attributions dynamically ([#180](https://github.com/a-thomas-22/blob-indexer-api/issues/180)) ([1fb881a](https://github.com/a-thomas-22/blob-indexer-api/commit/1fb881ac66a5c0b4ee49889a45bea0786ffe42a4))
+
+
+### Bug Fixes
+
+* gate startup on database schema readiness ([#168](https://github.com/a-thomas-22/blob-indexer-api/issues/168)) ([787b17e](https://github.com/a-thomas-22/blob-indexer-api/commit/787b17e509a3c5dc1147b16fe7bfefa6e4556adc))
+* **helm:** use existing DB secret for migrations ([#165](https://github.com/a-thomas-22/blob-indexer-api/issues/165)) ([41905d3](https://github.com/a-thomas-22/blob-indexer-api/commit/41905d3234214b955c50666a8ee98de0661547d1))
+
 ## [0.3.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.2.0...blob-indexer-chart-v0.3.0) (2026-05-24)
 
 
