@@ -27,16 +27,13 @@ tags:
 defaultContentType: application/json
 servers:
   public:
-    url: '{host}/api/v1/ws?network={network}'
+    url: '{host}'
     protocol: wss
-    description: Public WebSocket endpoint. Use `ws` instead of `wss` for local HTTP development.
+    description: Public API host. Use `ws` instead of `wss` for local HTTP development.
     variables:
       host:
         default: localhost:8080
         description: API host and optional port, without scheme.
-      network:
-        default: mainnet
-        description: Network name or chain ID. If omitted by the client, the API uses the first enabled network.
 channels:
   /api/v1/ws:
     description: |
@@ -242,7 +239,6 @@ components:
       properties:
         subscribe:
           type: array
-          minItems: 1
           items:
             $ref: '#/components/schemas/SubscribableEventType'
       example:
