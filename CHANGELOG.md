@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.5.0...blob-indexer-api-v0.5.1) (2026-05-25)
+
+
+### Bug Fixes
+
+* **deps:** bump otel to v1.41.0 (CVE-2026-29181) ([#189](https://github.com/a-thomas-22/blob-indexer-api/issues/189)) ([86300c8](https://github.com/a-thomas-22/blob-indexer-api/commit/86300c80285f0adfb50cd1c6f21aae4a28389b63))
+* resume indexer backfill from persisted cursor ([#191](https://github.com/a-thomas-22/blob-indexer-api/issues/191)) ([79a91a2](https://github.com/a-thomas-22/blob-indexer-api/commit/79a91a2e87fc306c3568e8fbfe16c30272501fb1))
+
 ## [0.5.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.4.0...blob-indexer-api-v0.5.0) (2026-05-25)
 
 
