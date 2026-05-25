@@ -17,9 +17,14 @@ import (
 // Service handles attribution of blob transactions to known users
 type Service struct {
 	db *db.DB
-	// Map of known addresses to user names for quick lookups
+	// Map of active attribution mappings to user names for quick lookups.
 	knownUsers   map[string]string
 	knownUsersMu sync.RWMutex
+	claimsByAddr map[string][]Claim
+	claimsMu     sync.RWMutex
+	blobList     BlobListConfig
+	refreshMu    sync.Mutex
+	refreshing   bool
 	// Network ID
 	networkID int
 }
@@ -37,32 +42,32 @@ func NewService(database *db.DB, networkID ...int) *Service {
 	}
 
 	return &Service{
-		db:         database,
-		knownUsers: make(map[string]string),
-		networkID:  effectiveNetworkID,
+		db:           database,
+		knownUsers:   make(map[string]string),
+		claimsByAddr: make(map[string][]Claim),
+		networkID:    effectiveNetworkID,
 	}
 }
 
-// Initialize loads known users from the database
+// ConfigureBlobList configures dynamic blob-list attribution loading.
+func (s *Service) ConfigureBlobList(cfg BlobListConfig) {
+	s.blobList = cfg.withDefaults()
+}
+
+// Initialize loads attribution mappings and starts background refreshes.
 func (s *Service) Initialize(ctx context.Context) error {
 	logger.Info("Initializing attribution service", zap.Int("network_id", s.networkID))
 
-	// Load known users from the database
-	var users []models.BlobUser
-	query := "SELECT * FROM blob_users WHERE network_id = $1"
-	if err := s.db.SelectContext(ctx, &users, query, s.networkID); err != nil {
-		logger.Error("Failed to load known users",
-			zap.Int("network_id", s.networkID),
-			zap.Error(err))
-		return err
+	if s.blobList.Enabled {
+		if err := s.RefreshBlobList(ctx); err != nil {
+			logger.Error("Failed to refresh blob-list attributions",
+				zap.Int("network_id", s.networkID),
+				zap.Error(err))
+		}
+		s.startBlobListRefresh(ctx)
 	}
 
-	// Populate the known users map
 	s.knownUsersMu.Lock()
-	s.knownUsers = make(map[string]string, len(users))
-	for _, user := range users {
-		s.knownUsers[normalizeAddress(user.Address)] = user.Name
-	}
 	knownUsersCount := len(s.knownUsers)
 	s.knownUsersMu.Unlock()
 
@@ -77,18 +82,36 @@ func (s *Service) SetNetworkID(networkID int) {
 	s.networkID = networkID
 }
 
-// GetUserAttribution gets the user attribution for an address
+// GetUserAttribution gets the current user attribution for an address.
 func (s *Service) GetUserAttribution(address string) string {
-	// Normalize the address
 	normalizedAddress := normalizeAddress(address)
 
-	// Check if the address is a known user
 	s.knownUsersMu.RLock()
 	if name, ok := s.knownUsers[normalizedAddress]; ok {
 		s.knownUsersMu.RUnlock()
 		return name
 	}
 	s.knownUsersMu.RUnlock()
+
+	return ""
+}
+
+// GetUserAttributionForBlock gets the user attribution for an address at a
+// specific block. A negative block number means the current active attribution.
+func (s *Service) GetUserAttributionForBlock(address string, blockNumber int64) string {
+	if blockNumber < 0 {
+		return s.GetUserAttribution(address)
+	}
+
+	// Normalize the address
+	normalizedAddress := normalizeAddress(address)
+
+	s.claimsMu.RLock()
+	if claim, ok := s.bestClaimForBlockLocked(normalizedAddress, blockNumber); ok {
+		s.claimsMu.RUnlock()
+		return claim.Name
+	}
+	s.claimsMu.RUnlock()
 
 	// Unknown user
 	return ""

@@ -107,6 +107,11 @@ appConfig:
     batch_size: 500
     polling_interval: "15s"
     mempool_polling_interval: "30s"
+  attribution:
+    blob_list_enabled: true
+    blob_list_base_url: "https://raw.githubusercontent.com/ahkc4/blob-list/main/artifacts/by-chain"
+    blob_list_refresh_interval: "1h"
+    blob_list_request_timeout: "10s"
   networks:
     - name: "mainnet"
       chain_id: 1

@@ -23,6 +23,11 @@ data:
       batch_size: {{ .Values.appConfig.indexer.batch_size }}
       polling_interval: {{ .Values.appConfig.indexer.polling_interval }}
       mempool_polling_interval: {{ .Values.appConfig.indexer.mempool_polling_interval }}
+    attribution:
+      blob_list_enabled: {{ .Values.appConfig.attribution.blob_list_enabled }}
+      blob_list_base_url: {{ .Values.appConfig.attribution.blob_list_base_url | quote }}
+      blob_list_refresh_interval: {{ .Values.appConfig.attribution.blob_list_refresh_interval | quote }}
+      blob_list_request_timeout: {{ .Values.appConfig.attribution.blob_list_request_timeout | quote }}
     {{- if .Values.appConfig.networks }}
     networks:
       {{- toYaml .Values.appConfig.networks | nindent 6 }}

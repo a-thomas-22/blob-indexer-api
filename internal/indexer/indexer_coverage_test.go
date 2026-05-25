@@ -430,24 +430,6 @@ func TestRunBlockIndexer_ResetsOnReorgSignal(t *testing.T) {
 }
 
 func TestStart_ErrorsAndSuccessPath(t *testing.T) {
-	t.Run("attribution init error", func(t *testing.T) {
-		idx := newTestIndexer()
-		idxDB, mock := newMockIndexerDB(t)
-		idx.db = idxDB
-		idx.ethClient, _ = newMockEthClient(t, 0)
-		idx.attribution = attribution.NewService(idxDB)
-		idx.attribution.SetNetworkID(idx.network.ChainID)
-
-		mock.ExpectQuery("SELECT \\* FROM blob_users WHERE network_id = \\$1").
-			WithArgs(idx.network.ChainID).
-			WillReturnError(errors.New("load users failed"))
-
-		err := idx.Start()
-		if err == nil || !strings.Contains(err.Error(), "failed to initialize attribution service") {
-			t.Fatalf("expected attribution init error, got %v", err)
-		}
-	})
-
 	t.Run("last indexed block lookup error", func(t *testing.T) {
 		idx := newTestIndexer()
 		idxDB, mock := newMockIndexerDB(t)
@@ -456,10 +438,6 @@ func TestStart_ErrorsAndSuccessPath(t *testing.T) {
 		idx.attribution = attribution.NewService(idxDB)
 		idx.attribution.SetNetworkID(idx.network.ChainID)
 
-		userRows := sqlmock.NewRows([]string{"id", "network_id", "address", "name", "description", "category", "first_seen", "last_seen"})
-		mock.ExpectQuery("SELECT \\* FROM blob_users WHERE network_id = \\$1").
-			WithArgs(idx.network.ChainID).
-			WillReturnRows(userRows)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = $2")).
 			WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock).
 			WillReturnError(errors.New("metadata lookup failed"))
@@ -479,10 +457,6 @@ func TestStart_ErrorsAndSuccessPath(t *testing.T) {
 		idx.attribution = attribution.NewService(idxDB)
 		idx.attribution.SetNetworkID(idx.network.ChainID)
 
-		userRows := sqlmock.NewRows([]string{"id", "network_id", "address", "name", "description", "category", "first_seen", "last_seen"})
-		mock.ExpectQuery("SELECT \\* FROM blob_users WHERE network_id = \\$1").
-			WithArgs(idx.network.ChainID).
-			WillReturnRows(userRows)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = $2")).
 			WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock).
 			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("0"))
@@ -505,10 +479,6 @@ func TestStart_ErrorsAndSuccessPath(t *testing.T) {
 		idx.attribution = attribution.NewService(idxDB)
 		idx.attribution.SetNetworkID(idx.network.ChainID)
 
-		userRows := sqlmock.NewRows([]string{"id", "network_id", "address", "name", "description", "category", "first_seen", "last_seen"})
-		mock.ExpectQuery("SELECT \\* FROM blob_users WHERE network_id = \\$1").
-			WithArgs(idx.network.ChainID).
-			WillReturnRows(userRows)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = $2")).
 			WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock).
 			WillReturnError(sql.ErrNoRows)
@@ -534,10 +504,6 @@ func TestStart_ErrorsAndSuccessPath(t *testing.T) {
 		idx.attribution = attribution.NewService(idxDB)
 		idx.attribution.SetNetworkID(idx.network.ChainID)
 
-		userRows := sqlmock.NewRows([]string{"id", "network_id", "address", "name", "description", "category", "first_seen", "last_seen"})
-		mock.ExpectQuery("SELECT \\* FROM blob_users WHERE network_id = \\$1").
-			WithArgs(idx.network.ChainID).
-			WillReturnRows(userRows)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = $2")).
 			WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock).
 			WillReturnError(sql.ErrNoRows)
