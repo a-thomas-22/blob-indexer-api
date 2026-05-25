@@ -55,14 +55,19 @@ type DatabaseConfig struct {
 
 // ServerConfig holds the server configuration
 type ServerConfig struct {
-	Port            int           `mapstructure:"port" yaml:"port"`
-	DevPort         int           `mapstructure:"dev_port" yaml:"dev_port"`
-	DevMode         bool          `mapstructure:"dev_mode" yaml:"dev_mode"`
-	ReadTimeout     time.Duration `mapstructure:"read_timeout" yaml:"read_timeout"`
-	WriteTimeout    time.Duration `mapstructure:"write_timeout" yaml:"write_timeout"`
-	IdleTimeout     time.Duration `mapstructure:"idle_timeout" yaml:"idle_timeout"`
-	DevAPIKey       string        `mapstructure:"dev_api_key" yaml:"dev_api_key"`
-	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout" yaml:"shutdown_timeout"`
+	Port                    int           `mapstructure:"port" yaml:"port"`
+	DevPort                 int           `mapstructure:"dev_port" yaml:"dev_port"`
+	DevMode                 bool          `mapstructure:"dev_mode" yaml:"dev_mode"`
+	ReadTimeout             time.Duration `mapstructure:"read_timeout" yaml:"read_timeout"`
+	WriteTimeout            time.Duration `mapstructure:"write_timeout" yaml:"write_timeout"`
+	IdleTimeout             time.Duration `mapstructure:"idle_timeout" yaml:"idle_timeout"`
+	DevAPIKey               string        `mapstructure:"dev_api_key" yaml:"dev_api_key"`
+	ShutdownTimeout         time.Duration `mapstructure:"shutdown_timeout" yaml:"shutdown_timeout"`
+	TrustedIPHeaders        []string      `mapstructure:"trusted_ip_headers" yaml:"trusted_ip_headers"`
+	RateLimitRPS            float64       `mapstructure:"rate_limit_rps" yaml:"rate_limit_rps"`
+	RateLimitBurst          int           `mapstructure:"rate_limit_burst" yaml:"rate_limit_burst"`
+	AggregateRateLimitRPS   float64       `mapstructure:"aggregate_rate_limit_rps" yaml:"aggregate_rate_limit_rps"`
+	AggregateRateLimitBurst int           `mapstructure:"aggregate_rate_limit_burst" yaml:"aggregate_rate_limit_burst"`
 }
 
 // CORSConfig holds browser cross-origin request settings for the API.
@@ -152,6 +157,11 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("server.idle_timeout", "120s")
 	v.SetDefault("server.dev_api_key", "")
 	v.SetDefault("server.shutdown_timeout", "15s")
+	v.SetDefault("server.trusted_ip_headers", []string{})
+	v.SetDefault("server.rate_limit_rps", 100)
+	v.SetDefault("server.rate_limit_burst", 200)
+	v.SetDefault("server.aggregate_rate_limit_rps", 5)
+	v.SetDefault("server.aggregate_rate_limit_burst", 20)
 	v.SetDefault("cors.enabled", true)
 	v.SetDefault("cors.allowed_origins", []string{
 		defaultCORSOriginLocalhost3000,
@@ -279,6 +289,7 @@ func loadConfig() (*Config, error) {
 	if devAPIKey := os.Getenv("DEV_API_KEY"); devAPIKey != "" {
 		v.Set("server.dev_api_key", devAPIKey)
 	}
+	setEnvCSV(v, "TRUSTED_IP_HEADERS", "server.trusted_ip_headers")
 
 	applyCORSEnvOverrides(v)
 

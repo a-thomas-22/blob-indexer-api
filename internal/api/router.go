@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	httpSwagger "github.com/swaggo/http-swagger"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 
 	apidocs "github.com/a-thomas-22/blob-indexer-api/docs"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
@@ -31,6 +32,10 @@ type API struct {
 	cacheMu        sync.RWMutex
 	statsCache     map[int]statsCacheEntry
 	topUsersCache  map[string]topUsersCacheEntry
+	aggregateGroup singleflight.Group
+	breakdownCache map[string]userBreakdownCacheEntry
+	rollingCache   map[string]rollingStatsCacheEntry
+	mempoolCache   map[int]mempoolPressureCacheEntry
 	hub            *Hub
 	poller         *Poller
 }
@@ -42,6 +47,21 @@ type statsCacheEntry struct {
 
 type topUsersCacheEntry struct {
 	response  []UserResponse
+	expiresAt time.Time
+}
+
+type userBreakdownCacheEntry struct {
+	response  UserBreakdownResponse
+	expiresAt time.Time
+}
+
+type rollingStatsCacheEntry struct {
+	response  RollingStatsResponse
+	expiresAt time.Time
+}
+
+type mempoolPressureCacheEntry struct {
+	response  MempoolPressureResponse
 	expiresAt time.Time
 }
 
@@ -124,14 +144,17 @@ func newAPI(ctx context.Context, db DBProvider, cfg *config.Config) *API {
 	}()
 
 	api := &API{
-		db:            db,
-		networks:      networks,
-		config:        cfg,
-		startTime:     time.Now(),
-		statsCache:    make(map[int]statsCacheEntry),
-		topUsersCache: make(map[string]topUsersCacheEntry),
-		hub:           hub,
-		poller:        poller,
+		db:             db,
+		networks:       networks,
+		config:         cfg,
+		startTime:      time.Now(),
+		statsCache:     make(map[int]statsCacheEntry),
+		topUsersCache:  make(map[string]topUsersCacheEntry),
+		breakdownCache: make(map[string]userBreakdownCacheEntry),
+		rollingCache:   make(map[string]rollingStatsCacheEntry),
+		mempoolCache:   make(map[int]mempoolPressureCacheEntry),
+		hub:            hub,
+		poller:         poller,
 	}
 
 	return api
@@ -141,8 +164,10 @@ func (a *API) newRouter(opts routerOptions) http.Handler {
 	cfg := a.config
 	r := chi.NewRouter()
 
-	// Rate limiter: 100 requests/second per IP with burst of 200
-	rateLimiter := NewRateLimiter(100, 200)
+	clientIPs := newClientIPResolver(cfg.Server.TrustedIPHeaders)
+	rateLimiter := NewRateLimiter(cfg.Server.RateLimitRPS, cfg.Server.RateLimitBurst)
+	aggregateRateLimiter := NewRateLimiter(cfg.Server.AggregateRateLimitRPS, cfg.Server.AggregateRateLimitBurst)
+	aggregateLimit := RateLimitMiddlewareWithResolver(aggregateRateLimiter, clientIPs)
 
 	// Middleware — applied to all routes (including WebSocket upgrade).
 	r.Use(middleware.RequestID)
@@ -150,8 +175,8 @@ func (a *API) newRouter(opts routerOptions) http.Handler {
 	r.Use(SecurityHeadersMiddleware)
 	r.Use(CORSMiddleware(cfg.CORS))
 	r.Use(MaxBytesMiddleware)
-	r.Use(RateLimitMiddleware(rateLimiter))
-	r.Use(LoggerMiddleware)
+	r.Use(RateLimitMiddlewareWithResolver(rateLimiter, clientIPs))
+	r.Use(LoggerMiddlewareWithResolver(clientIPs))
 	r.Use(ContentTypeJSON)
 	r.Use(middleware.Recoverer)
 	r.Use(a.requestCounterMiddleware)
@@ -167,7 +192,7 @@ func (a *API) newRouter(opts routerOptions) http.Handler {
 	// Versioned API routes under /api/v1
 	r.Route("/api/v1", func(r chi.Router) {
 		if opts.includePublicRoutes {
-			a.mountPublicRoutes(r)
+			a.mountPublicRoutes(r, aggregateLimit)
 		}
 
 		if opts.includeDevRoutes {
@@ -197,7 +222,7 @@ func serveAsyncAPI(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(apidocs.AsyncAPIYAML)
 }
 
-func (a *API) mountPublicRoutes(r chi.Router) {
+func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) http.Handler) {
 	// WebSocket endpoint — no request timeout so connections persist.
 	r.Get("/ws", a.HandleWebSocket)
 
@@ -215,23 +240,23 @@ func (a *API) mountPublicRoutes(r chi.Router) {
 		r.Route("/blob", func(r chi.Router) {
 			r.Get("/latest", a.GetLatestBlobs)
 			r.Get("/mempool", a.GetMempoolBlobs)
-			r.Get("/mempool/pressure", a.GetMempoolPressure)
+			r.With(aggregateLimit).Get("/mempool/pressure", a.GetMempoolPressure)
 			r.Get("/pricing", a.GetBlobPricing)
 			r.Get("/{txHash}", a.GetBlobByTxHash)
 		})
 
 		// User endpoints
 		r.Route("/users", func(r chi.Router) {
-			r.Get("/", a.GetTopBlobUsers)
-			r.Get("/unattributed", a.GetTopUnattributedBlobUsers)
-			r.Get("/breakdown", a.GetUserBreakdown)
-			r.Get("/{address}", a.GetUserByAddress)
+			r.With(aggregateLimit).Get("/", a.GetTopBlobUsers)
+			r.With(aggregateLimit).Get("/unattributed", a.GetTopUnattributedBlobUsers)
+			r.With(aggregateLimit).Get("/breakdown", a.GetUserBreakdown)
+			r.With(aggregateLimit).Get("/{address}", a.GetUserByAddress)
 		})
 
 		// Stats endpoints
 		r.Route("/stats", func(r chi.Router) {
-			r.Get("/", a.GetBlobStats)
-			r.Get("/windows", a.GetRollingStatsWindows)
+			r.With(aggregateLimit).Get("/", a.GetBlobStats)
+			r.With(aggregateLimit).Get("/windows", a.GetRollingStatsWindows)
 		})
 
 		// Status endpoint

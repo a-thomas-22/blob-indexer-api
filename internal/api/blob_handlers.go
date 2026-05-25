@@ -482,18 +482,57 @@ func (a *API) GetMempoolPressure(w http.ResponseWriter, r *http.Request) {
 
 	logger.Debug("Getting mempool pressure", zap.String("network", network.Name))
 
-	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
+	a.cacheMu.RLock()
+	if cached, ok := a.mempoolCache[network.ChainID]; ok && time.Now().Before(cached.expiresAt) {
+		a.cacheMu.RUnlock()
+		a.respondSuccess(w, cached.response)
+		return
+	}
+	a.cacheMu.RUnlock()
+
+	cacheKey := "mempool_pressure:" + strconv.Itoa(network.ChainID)
+	value, err, _ := a.aggregateGroup.Do(cacheKey, func() (interface{}, error) {
+		a.cacheMu.RLock()
+		if cached, ok := a.mempoolCache[network.ChainID]; ok && time.Now().Before(cached.expiresAt) {
+			a.cacheMu.RUnlock()
+			return cached.response, nil
+		}
+		a.cacheMu.RUnlock()
+
+		return a.queryMempoolPressure(r.Context(), network.ChainID, network.Name)
+	})
+	if err != nil {
+		logger.Error("Failed to get mempool pressure",
+			zap.String("network", network.Name),
+			zap.Error(err))
+		a.respondError(w, http.StatusInternalServerError, "Failed to get mempool pressure")
+		return
+	}
+
+	response, ok := value.(MempoolPressureResponse)
+	if !ok {
+		logger.Error("Failed to get mempool pressure",
+			zap.String("network", network.Name),
+			zap.String("reason", "unexpected cache value type"))
+		a.respondError(w, http.StatusInternalServerError, "Failed to get mempool pressure")
+		return
+	}
+	logger.Debug("Returning mempool pressure",
+		zap.String("network", network.Name),
+		zap.Int("pending_blob_count", response.PendingBlobCount),
+		zap.Bool("pricing_available", response.Includability.PricingAvailable))
+	a.respondSuccess(w, response)
+}
+
+func (a *API) queryMempoolPressure(ctx context.Context, networkID int, networkName string) (MempoolPressureResponse, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, aggregateQueryTimeout)
 	defer cancel()
 
 	latestBaseFee := "0"
 	pricingAvailable := false
-	if err := a.db.GetContext(queryCtx, &latestBaseFee, queryLatestBlobBaseFee, network.ChainID); err != nil {
+	if err := a.db.GetContext(queryCtx, &latestBaseFee, queryLatestBlobBaseFee, networkID); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
-			logger.Error("Failed to get latest blob base fee",
-				zap.String("network", network.Name),
-				zap.Error(err))
-			a.respondError(w, http.StatusInternalServerError, "Failed to get mempool pressure")
-			return
+			return MempoolPressureResponse{}, err
 		}
 	} else {
 		pricingAvailable = true
@@ -509,21 +548,17 @@ func (a *API) GetMempoolPressure(w http.ResponseWriter, r *http.Request) {
 		queryCtx,
 		&pressure,
 		queryMempoolPressure,
-		network.ChainID,
+		networkID,
 		mempoolPressureSampleLimit+1,
 		mempoolPressureSampleLimit,
 		latestBaseFeeArg,
 	); err != nil {
-		logger.Error("Failed to get mempool pressure",
-			zap.String("network", network.Name),
-			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get mempool pressure")
-		return
+		return MempoolPressureResponse{}, err
 	}
 
 	response := MempoolPressureResponse{
-		NetworkID:            network.ChainID,
-		NetworkName:          network.Name,
+		NetworkID:            networkID,
+		NetworkName:          networkName,
 		PendingBlobCount:     pressure.PendingBlobCount,
 		PendingBlobGas:       pressure.PendingBlobGas,
 		PendingUniqueSenders: pressure.PendingUniqueSenders,
@@ -553,11 +588,13 @@ func (a *API) GetMempoolPressure(w http.ResponseWriter, r *http.Request) {
 		GeneratedAt:     time.Now().UTC(),
 	}
 
-	logger.Debug("Returning mempool pressure",
-		zap.String("network", network.Name),
-		zap.Int("pending_blob_count", response.PendingBlobCount),
-		zap.Bool("pricing_available", response.Includability.PricingAvailable))
-	a.respondSuccess(w, response)
+	a.cacheMu.Lock()
+	a.mempoolCache[networkID] = mempoolPressureCacheEntry{
+		response:  response,
+		expiresAt: time.Now().Add(aggregateCacheTTL),
+	}
+	a.cacheMu.Unlock()
+	return response, nil
 }
 
 // GetBlobByTxHash godoc

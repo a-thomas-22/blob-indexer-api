@@ -293,6 +293,40 @@ func TestGetMempoolPressure_NoBlockMetrics(t *testing.T) {
 	}
 }
 
+func TestGetMempoolPressure_CacheHit(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			t.Fatal("DB should not be called on cache hit")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	a.mempoolCache[42] = mempoolPressureCacheEntry{
+		response: MempoolPressureResponse{
+			NetworkID:        42,
+			PendingBlobCount: 5,
+		},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetMempoolPressure(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Success bool                    `json:"success"`
+		Data    MempoolPressureResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success || resp.Data.PendingBlobCount != 5 {
+		t.Fatalf("unexpected cached response: %+v", resp)
+	}
+}
+
 func TestGetMempoolPressure_BaseFeeDBError(t *testing.T) {
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {

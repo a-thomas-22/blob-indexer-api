@@ -300,6 +300,44 @@ func TestGetUserBreakdown_InvalidWindow(t *testing.T) {
 	}
 }
 
+func TestGetUserBreakdown_CacheHit(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			t.Fatal("DB should not be called on cache hit")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	cacheKey := fmt.Sprintf("breakdown:%d:%s", 42, userWindowAll)
+	a.breakdownCache[cacheKey] = userBreakdownCacheEntry{
+		response: UserBreakdownResponse{
+			NetworkID: 42,
+			Window:    string(userWindowAll),
+			CategoryShares: []CategoryShareResponse{
+				{Category: "rollup", BlobCount: 3},
+			},
+		},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetUserBreakdown(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Success bool                  `json:"success"`
+		Data    UserBreakdownResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success || len(resp.Data.CategoryShares) != 1 || resp.Data.CategoryShares[0].Category != "rollup" {
+		t.Fatalf("unexpected cached response: %+v", resp)
+	}
+}
+
 func TestGetTopBlobUsers_DBError(t *testing.T) {
 	db := &mockDB{
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {

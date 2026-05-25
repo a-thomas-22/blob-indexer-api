@@ -6,6 +6,11 @@ server:
   port: 8080
   dev_port: 8081
   dev_mode: true
+  trusted_ip_headers: []
+  rate_limit_rps: 100
+  rate_limit_burst: 200
+  aggregate_rate_limit_rps: 5
+  aggregate_rate_limit_burst: 20
 
 cors:
   enabled: true

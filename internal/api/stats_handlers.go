@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -55,6 +56,37 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 	}
 	a.cacheMu.RUnlock()
 
+	cacheKey := fmt.Sprintf("stats:%d", network.ChainID)
+	value, err, _ := a.aggregateGroup.Do(cacheKey, func() (interface{}, error) {
+		a.cacheMu.RLock()
+		if cached, ok := a.statsCache[network.ChainID]; ok && time.Now().Before(cached.expiresAt) {
+			a.cacheMu.RUnlock()
+			return cached.response, nil
+		}
+		a.cacheMu.RUnlock()
+
+		return a.queryBlobStats(r.Context(), network.ChainID, network.Name)
+	})
+	if err != nil {
+		logger.Error("Failed to get blob statistics",
+			zap.String("network", network.Name),
+			zap.Error(err))
+		a.respondError(w, http.StatusInternalServerError, "Failed to get blob statistics")
+		return
+	}
+
+	response, ok := value.(StatsResponse)
+	if !ok {
+		logger.Error("Unexpected blob statistics cache value type",
+			zap.String("network", network.Name))
+		a.respondError(w, http.StatusInternalServerError, "Failed to get blob statistics")
+		return
+	}
+
+	a.respondSuccess(w, response)
+}
+
+func (a *API) queryBlobStats(ctx context.Context, networkID int, networkName string) (StatsResponse, error) {
 	var stats struct {
 		TotalBlobs          int       `db:"total_blobs"`
 		TotalConfirmedBlobs int       `db:"total_confirmed_blobs"`
@@ -65,34 +97,30 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 		LastIndexedTime     time.Time `db:"last_indexed_time"`
 	}
 
-	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
+	queryCtx, cancel := context.WithTimeout(ctx, aggregateQueryTimeout)
 	defer cancel()
-	if err := a.db.GetContext(queryCtx, &stats, queryBlobStats, network.ChainID); err != nil {
-		logger.Error("Failed to get blob statistics",
-			zap.String("network", network.Name),
-			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get blob statistics")
-		return
+	if err := a.db.GetContext(queryCtx, &stats, queryBlobStats, networkID); err != nil {
+		return StatsResponse{}, err
 	}
 
 	response := StatsResponse{
-		NetworkID:           network.ChainID,
-		NetworkName:         network.Name,
+		NetworkID:           networkID,
+		NetworkName:         networkName,
 		TotalBlobs:          stats.TotalBlobs,
 		TotalConfirmedBlobs: stats.TotalConfirmedBlobs,
 		TotalPendingBlobs:   stats.TotalPendingBlobs,
 		AverageBaseFee:      stats.AverageBaseFee,
 		AverageTip:          stats.AverageTip,
 		AverageTotalCost:    stats.AverageTotalCost,
-		LastIndexedBlock:    a.getLastIndexedBlockFromDB(r.Context(), network.ChainID),
+		LastIndexedBlock:    a.getLastIndexedBlockFromDB(ctx, networkID),
 		LastIndexedTime:     stats.LastIndexedTime,
 	}
 
 	a.cacheMu.Lock()
-	a.statsCache[network.ChainID] = statsCacheEntry{
+	a.statsCache[networkID] = statsCacheEntry{
 		response:  response,
 		expiresAt: time.Now().Add(aggregateCacheTTL),
 	}
 	a.cacheMu.Unlock()
-	a.respondSuccess(w, response)
+	return response, nil
 }

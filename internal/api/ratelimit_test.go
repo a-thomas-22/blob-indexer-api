@@ -171,6 +171,79 @@ func TestRateLimitMiddleware_IgnoresXRealIP(t *testing.T) {
 	}
 }
 
+func TestRateLimitMiddleware_UsesTrustedCFConnectingIP(t *testing.T) {
+	rl := &RateLimiter{
+		visitors: make(map[string]*visitor),
+		rate:     10,
+		burst:    1,
+	}
+	resolver := newClientIPResolver([]string{"CF-Connecting-IP"})
+
+	handler := RateLimitMiddlewareWithResolver(rl, resolver)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("CF-Connecting-IP", "198.51.100.25")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if _, ok := rl.visitors["198.51.100.25"]; !ok {
+		t.Error("visitor should be tracked by trusted CF-Connecting-IP header")
+	}
+	if _, ok := rl.visitors["203.0.113.10"]; ok {
+		t.Error("visitor should not fall back to remote address when trusted header is valid")
+	}
+}
+
+func TestRateLimitMiddleware_IgnoresCFConnectingIPByDefault(t *testing.T) {
+	rl := &RateLimiter{
+		visitors: make(map[string]*visitor),
+		rate:     10,
+		burst:    1,
+	}
+
+	handler := RateLimitMiddleware(rl)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("CF-Connecting-IP", "198.51.100.25")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if _, ok := rl.visitors["198.51.100.25"]; ok {
+		t.Error("visitor should not be tracked by untrusted CF-Connecting-IP header")
+	}
+	if _, ok := rl.visitors["203.0.113.10"]; !ok {
+		t.Error("visitor should be tracked by normalized remote address")
+	}
+}
+
+func TestClientIPResolver_UsesFirstForwardedForAddress(t *testing.T) {
+	resolver := newClientIPResolver([]string{"X-Forwarded-For"})
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("X-Forwarded-For", "198.51.100.25, 198.51.100.26")
+
+	if got := resolver.IP(req); got != "198.51.100.25" {
+		t.Fatalf("expected first X-Forwarded-For address, got %q", got)
+	}
+}
+
+func TestClientIPResolver_InvalidTrustedHeaderFallsBack(t *testing.T) {
+	resolver := newClientIPResolver([]string{"CF-Connecting-IP"})
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("CF-Connecting-IP", "not-an-ip")
+
+	if got := resolver.IP(req); got != "203.0.113.10" {
+		t.Fatalf("expected fallback remote address, got %q", got)
+	}
+}
+
 func TestRateLimitMiddleware_UsesClientIPContext(t *testing.T) {
 	rl := &RateLimiter{
 		visitors: make(map[string]*visitor),
