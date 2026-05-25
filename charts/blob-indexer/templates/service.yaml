@@ -1,3 +1,6 @@
+{{- if and .Values.devService.enabled (eq (int (.Values.appConfig.server.dev_port | default 0)) 0) }}
+{{- fail "appConfig.server.dev_port must be set when devService.enabled=true" }}
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -14,3 +17,23 @@ spec:
   selector:
     {{- include "blob-indexer.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: api
+{{- if .Values.devService.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "blob-indexer.fullname" . }}-dev
+  labels:
+    {{- include "blob-indexer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api-dev
+spec:
+  type: {{ .Values.devService.type }}
+  ports:
+    - port: {{ .Values.devService.port }}
+      targetPort: dev-http
+      protocol: TCP
+      name: dev-http
+  selector:
+    {{- include "blob-indexer.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+{{- end }}

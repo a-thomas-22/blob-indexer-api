@@ -4,6 +4,7 @@ database:
 
 server:
   port: 8080
+  dev_port: 8081
   dev_mode: true
 
 logging:

@@ -13,6 +13,9 @@ indexer:
   image:
     repository: blob-indexer-indexer
 
+devService:
+  enabled: true
+
 ingress:
   enabled: true
   hosts:
@@ -33,6 +36,7 @@ appConfig:
   database:
     url: "postgres://postgres:postgres@blob-indexer-postgresql:5432/blobindexer?sslmode=disable"
   server:
+    dev_port: 8081
     dev_mode: true
   logging:
     level: "debug"

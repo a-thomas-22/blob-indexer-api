@@ -4,7 +4,13 @@
 allow_k8s_contexts('kind-dev')
 
 # === Configuration ===
-port = str(local('grep -A 2 "server:" tilt-config.yaml | grep "port:" | awk \'{print $2}\'', quiet=True)).strip()
+port = str(local('grep -A 3 "server:" tilt-config.yaml | grep -E "^[[:space:]]+port:" | awk \'{print $2}\'', quiet=True)).strip()
+dev_port = str(local('grep -A 3 "server:" tilt-config.yaml | grep -E "^[[:space:]]+dev_port:" | awk \'{print $2}\'', quiet=True)).strip()
+api_port_forwards = [port + ':' + port]
+dashboard_port = port
+if dev_port != '' and dev_port != '0':
+    api_port_forwards.append(dev_port + ':' + dev_port)
+    dashboard_port = dev_port
 
 # === Docker Builds ===
 docker_build(
@@ -106,7 +112,7 @@ k8s_resource(
 
 k8s_resource(
     'blob-indexer-api',
-    port_forwards=[port + ':' + port],
+    port_forwards=api_port_forwards,
     resource_deps=['app-config', 'blob-indexer-postgresql'],
 )
 
@@ -132,6 +138,6 @@ local_resource(
 
 local_resource(
     'dev-dashboard',
-    'echo "Development dashboard available at: http://localhost:' + port + '/api/dev/dashboard"',
+    'echo "Development dashboard available at: http://localhost:' + dashboard_port + '/api/v1/dev/dashboard"',
     labels=['dev-tools'],
 )

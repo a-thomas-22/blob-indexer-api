@@ -58,7 +58,7 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 - `GET /api/v1/ws?network=mainnet` - Subscribe to live blob, stats, and user updates
 
 ### Development Endpoints
-These endpoints are available only when `server.dev_mode` is enabled, and can be protected with `server.dev_api_key`:
+These endpoints are available only when `server.dev_mode` is enabled, and can be protected with `server.dev_api_key`. Set `server.dev_port` to serve them from a dedicated listener instead of the main API listener:
 - `GET /api/v1/dev/metrics` - System-wide metrics (memory, goroutines, uptime)
 - `GET /api/v1/dev/indexers` - Per-network indexer status
 - `GET /api/v1/dev/database` - Database statistics
@@ -108,6 +108,7 @@ database:
 
 server:
   port: 8080
+  dev_port: 8081 # optional; 0 keeps dev endpoints on the main API listener
   dev_mode: true
 
 logging:
@@ -146,6 +147,7 @@ Alternatively, you can use environment variables:
 
 - `DB_URL` - PostgreSQL connection string
 - `PORT` - API server port (default: 8080)
+- `DEV_PORT` - Optional dedicated dev endpoint port (default: 0, disabled)
 - `DEV_MODE` - Enable development mode (default: false)
 - `LOG_LEVEL` - Logging level (default: info)
 - `LOG_FORMAT` - Logging format (default: json)
@@ -248,6 +250,8 @@ databaseSecret:
 ```
 
 For multi-replica deployments, configure edge rate limiting on Ingress so limits are enforced across all pods. Set `ingress.annotations` in Helm values (for example with NGINX: `nginx.ingress.kubernetes.io/limit-rps` and `nginx.ingress.kubernetes.io/limit-burst-multiplier`).
+
+To expose dev endpoints through a separate Kubernetes Service, set `appConfig.server.dev_port` and enable `devService`. The chart will create `<release>-dev` targeting only `/api/v1/dev/*` on the dedicated listener.
 
 ## Releases
 
