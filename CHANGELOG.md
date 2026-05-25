@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.4.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.3.0...blob-indexer-api-v0.4.0) (2026-05-25)
+
+
+### Features
+
+* add blob display helpers ([#177](https://github.com/a-thomas-22/blob-indexer-api/issues/177)) ([f54d701](https://github.com/a-thomas-22/blob-indexer-api/commit/f54d7011c28378ca191567c4711c020a32f0a22c))
+* add blob market pressure indicators ([#171](https://github.com/a-thomas-22/blob-indexer-api/issues/171)) ([1542aaa](https://github.com/a-thomas-22/blob-indexer-api/commit/1542aaa213e17257ebdc196cc59a6a7f8b022453))
+* add blob mempool pressure endpoint ([#172](https://github.com/a-thomas-22/blob-indexer-api/issues/172)) ([f6c9d12](https://github.com/a-thomas-22/blob-indexer-api/commit/f6c9d125880f2190cd070e9420f56108933b8904))
+* add blob user breakdowns ([#175](https://github.com/a-thomas-22/blob-indexer-api/issues/175)) ([fcfab6a](https://github.com/a-thomas-22/blob-indexer-api/commit/fcfab6af87939841725ab2261f1ac9f6001b907d))
+* add rolling blob market stats ([#173](https://github.com/a-thomas-22/blob-indexer-api/issues/173)) ([ed4246c](https://github.com/a-thomas-22/blob-indexer-api/commit/ed4246c69d0abbb3901154075590803b6f6e38cb))
+* add top unattributed blob users endpoint ([#178](https://github.com/a-thomas-22/blob-indexer-api/issues/178)) ([35f7352](https://github.com/a-thomas-22/blob-indexer-api/commit/35f73528c9d216c514c42dccb7af44fa2f37f491))
+* expose blob space occupancy ([#170](https://github.com/a-thomas-22/blob-indexer-api/issues/170)) ([17cebbd](https://github.com/a-thomas-22/blob-indexer-api/commit/17cebbd089192b9905e83df2085e1681c3ccc1ab))
+* expose indexer freshness ([#176](https://github.com/a-thomas-22/blob-indexer-api/issues/176)) ([5855971](https://github.com/a-thomas-22/blob-indexer-api/commit/585597186269c0fcdf20469966796874155fb6b9))
+* expose realized blob costs ([#169](https://github.com/a-thomas-22/blob-indexer-api/issues/169)) ([f30802a](https://github.com/a-thomas-22/blob-indexer-api/commit/f30802aac96d1df23a6fa0dcda323b191b25392f))
+* load blob-list attributions dynamically ([#180](https://github.com/a-thomas-22/blob-indexer-api/issues/180)) ([1fb881a](https://github.com/a-thomas-22/blob-indexer-api/commit/1fb881ac66a5c0b4ee49889a45bea0786ffe42a4))
+
+
+### Bug Fixes
+
+* gate startup on database schema readiness ([#168](https://github.com/a-thomas-22/blob-indexer-api/issues/168)) ([787b17e](https://github.com/a-thomas-22/blob-indexer-api/commit/787b17e509a3c5dc1147b16fe7bfefa6e4556adc))
+* **helm:** use existing DB secret for migrations ([#165](https://github.com/a-thomas-22/blob-indexer-api/issues/165)) ([41905d3](https://github.com/a-thomas-22/blob-indexer-api/commit/41905d3234214b955c50666a8ee98de0661547d1))
+* keep failed block retries recoverable ([#166](https://github.com/a-thomas-22/blob-indexer-api/issues/166)) ([8656ac3](https://github.com/a-thomas-22/blob-indexer-api/commit/8656ac33abd04c35110cddf8b0fe4445841dab09))
+
 ## [0.3.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.2.0...blob-indexer-api-v0.3.0) (2026-05-24)
 
 
