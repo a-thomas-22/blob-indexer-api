@@ -127,6 +127,11 @@ const (
 	MetadataChainHeadUpdatedAt   = "current_chain_head_updated_at"
 	MetadataLastIndexedAt        = "last_indexed_at"
 	MetadataWebSocketFreshnessAt = "websocket_freshness_at"
+	MetadataBackfillActive       = "backfill_active"
+	MetadataBackfillStartBlock   = "backfill_start_block"
+	MetadataBackfillTargetBlock  = "backfill_target_block"
+	MetadataBackfillUpdatedAt    = "backfill_updated_at"
+	MetadataBackfillCompletedAt  = "backfill_completed_at"
 )
 
 // FormatMetadataTimestamp serializes metadata timestamps consistently.

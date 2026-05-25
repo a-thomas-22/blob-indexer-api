@@ -228,6 +228,19 @@ func (i *Indexer) updateWebSocketFreshness(observedAt time.Time) {
 	)
 }
 
+func (i *Indexer) updateBackfillStatus(active bool, startBlock, targetBlock uint64, observedAt time.Time) {
+	updates := []metadataUpdate{
+		{key: models.MetadataBackfillActive, value: strconv.FormatBool(active)},
+		{key: models.MetadataBackfillStartBlock, value: strconv.FormatUint(startBlock, 10)},
+		{key: models.MetadataBackfillTargetBlock, value: strconv.FormatUint(targetBlock, 10)},
+		{key: models.MetadataBackfillUpdatedAt, value: models.FormatMetadataTimestamp(observedAt)},
+	}
+	if !active {
+		updates = append(updates, metadataUpdate{key: models.MetadataBackfillCompletedAt, value: models.FormatMetadataTimestamp(observedAt)})
+	}
+	i.setNetworkMetadataValues(updates...)
+}
+
 // Start starts the indexer
 func (i *Indexer) Start() error {
 	logger.Info("Starting indexer...",
@@ -558,6 +571,8 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 		zap.Uint64("start_block", startBlock))
 
 	currentBlock := startBlock
+	var backfillStartBlock uint64
+	backfillActive := false
 	ticker := time.NewTicker(i.pollingInterval)
 	defer ticker.Stop()
 
@@ -588,12 +603,23 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 				zap.Error(err))
 			continue
 		}
-		i.updateCurrentChainHead(latestBlock, time.Now())
+		observedAt := time.Now()
+		i.updateCurrentChainHead(latestBlock, observedAt)
 
 		// If we're caught up, wait for the next tick
 		if currentBlock > latestBlock {
+			if backfillActive {
+				i.updateBackfillStatus(false, backfillStartBlock, latestBlock, observedAt)
+				backfillActive = false
+			}
 			continue
 		}
+
+		if !backfillActive {
+			backfillStartBlock = currentBlock
+			backfillActive = true
+		}
+		i.updateBackfillStatus(true, backfillStartBlock, latestBlock, observedAt)
 
 		// Process blocks in batches
 		endBlock := currentBlock + uint64(i.batchSize) - 1
