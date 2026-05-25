@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.4.0...blob-indexer-chart-v0.5.0) (2026-05-25)
+
+
+### Features
+
+* serve dev API on separate port ([#183](https://github.com/a-thomas-22/blob-indexer-api/issues/183)) ([2b0079d](https://github.com/a-thomas-22/blob-indexer-api/commit/2b0079d1d0f430a1fa669c61d1476ceb26fccff9))
+
 ## [0.4.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.3.0...blob-indexer-chart-v0.4.0) (2026-05-25)
 
 
