@@ -131,6 +131,21 @@ server:
   dev_port: 8081 # optional; 0 keeps dev endpoints on the main API listener
   dev_mode: true
 
+cors:
+  enabled: true
+  allowed_origins:
+    - "http://localhost:3000"
+    - "http://localhost:3001"
+    - "http://127.0.0.1:3000"
+    - "http://127.0.0.1:3001"
+  allowed_origin_patterns: []
+  allow_all_origins: false
+  allowed_methods: ["GET", "OPTIONS"]
+  allowed_headers: ["Accept", "Content-Type", "Authorization"]
+  exposed_headers: ["Content-Length", "ETag"]
+  allow_credentials: false
+  max_age_seconds: 86400
+
 logging:
   level: "info"
   format: "json"
@@ -174,6 +189,15 @@ Alternatively, you can use environment variables:
 - `INDEXER_VERSION` - Version of the indexer
 - `DEV_API_KEY` - Optional API key for development endpoints
 - `CONFIG_PATH` - Path to YAML configuration file (optional)
+- `CORS_ENABLED` - Enable browser CORS responses (default: true)
+- `CORS_ALLOWED_ORIGINS` - Comma-separated list of exact browser origins
+- `CORS_ALLOWED_ORIGIN_PATTERNS` - Comma-separated wildcard origin patterns for preview deploys
+- `CORS_ALLOW_ALL_ORIGINS` - Allow any request origin while still echoing the origin (default: false)
+- `CORS_ALLOWED_METHODS` - Comma-separated allowed methods (default: GET,OPTIONS)
+- `CORS_ALLOWED_HEADERS` - Comma-separated allowed request headers
+- `CORS_EXPOSED_HEADERS` - Comma-separated response headers exposed to browsers
+- `CORS_ALLOW_CREDENTIALS` - Send `Access-Control-Allow-Credentials: true` (default: false)
+- `CORS_MAX_AGE_SECONDS` - Preflight cache duration in seconds (default: 86400)
 
 For backward compatibility, you can configure a single network using:
 - `RPC_URL` - Ethereum node endpoint

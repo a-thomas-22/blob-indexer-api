@@ -16,9 +16,20 @@ import (
 )
 
 const (
-	networkMainnet = "mainnet"
-	networkSepolia = "sepolia"
-	maskedValue    = "****"
+	networkMainnet                 = "mainnet"
+	networkSepolia                 = "sepolia"
+	maskedValue                    = "****"
+	defaultCORSOriginLocalhost3000 = "http://localhost:3000"
+	defaultCORSOriginLocalhost3001 = "http://localhost:3001"
+	defaultCORSOriginLoopback3000  = "http://127.0.0.1:3000"
+	defaultCORSOriginLoopback3001  = "http://127.0.0.1:3001"
+	corsMethodGET                  = "GET"
+	corsMethodOptions              = "OPTIONS"
+	corsHeaderAccept               = "Accept"
+	corsHeaderContentType          = "Content-Type"
+	corsHeaderAuthorization        = "Authorization"
+	corsHeaderContentLength        = "Content-Length"
+	corsHeaderETag                 = "ETag"
 )
 
 // NetworkConfig holds the configuration for a single Ethereum network
@@ -52,6 +63,19 @@ type ServerConfig struct {
 	IdleTimeout     time.Duration `mapstructure:"idle_timeout" yaml:"idle_timeout"`
 	DevAPIKey       string        `mapstructure:"dev_api_key" yaml:"dev_api_key"`
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout" yaml:"shutdown_timeout"`
+}
+
+// CORSConfig holds browser cross-origin request settings for the API.
+type CORSConfig struct {
+	Enabled               bool     `mapstructure:"enabled" yaml:"enabled"`
+	AllowedOrigins        []string `mapstructure:"allowed_origins" yaml:"allowed_origins"`
+	AllowedOriginPatterns []string `mapstructure:"allowed_origin_patterns" yaml:"allowed_origin_patterns"`
+	AllowAllOrigins       bool     `mapstructure:"allow_all_origins" yaml:"allow_all_origins"`
+	AllowedMethods        []string `mapstructure:"allowed_methods" yaml:"allowed_methods"`
+	AllowedHeaders        []string `mapstructure:"allowed_headers" yaml:"allowed_headers"`
+	ExposedHeaders        []string `mapstructure:"exposed_headers" yaml:"exposed_headers"`
+	AllowCredentials      bool     `mapstructure:"allow_credentials" yaml:"allow_credentials"`
+	MaxAgeSeconds         int      `mapstructure:"max_age_seconds" yaml:"max_age_seconds"`
 }
 
 // LoggingConfig holds the logging configuration
@@ -93,6 +117,7 @@ type WebSocketConfig struct {
 type Config struct {
 	Database    DatabaseConfig    `mapstructure:"database" yaml:"database"`
 	Server      ServerConfig      `mapstructure:"server" yaml:"server"`
+	CORS        CORSConfig        `mapstructure:"cors" yaml:"cors"`
 	Logging     LoggingConfig     `mapstructure:"logging" yaml:"logging"`
 	Indexer     IndexerConfig     `mapstructure:"indexer" yaml:"indexer"`
 	Attribution AttributionConfig `mapstructure:"attribution" yaml:"attribution"`
@@ -127,6 +152,20 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("server.idle_timeout", "120s")
 	v.SetDefault("server.dev_api_key", "")
 	v.SetDefault("server.shutdown_timeout", "15s")
+	v.SetDefault("cors.enabled", true)
+	v.SetDefault("cors.allowed_origins", []string{
+		defaultCORSOriginLocalhost3000,
+		defaultCORSOriginLocalhost3001,
+		defaultCORSOriginLoopback3000,
+		defaultCORSOriginLoopback3001,
+	})
+	v.SetDefault("cors.allowed_origin_patterns", []string{})
+	v.SetDefault("cors.allow_all_origins", false)
+	v.SetDefault("cors.allowed_methods", []string{corsMethodGET, corsMethodOptions})
+	v.SetDefault("cors.allowed_headers", []string{corsHeaderAccept, corsHeaderContentType, corsHeaderAuthorization})
+	v.SetDefault("cors.exposed_headers", []string{corsHeaderContentLength, corsHeaderETag})
+	v.SetDefault("cors.allow_credentials", false)
+	v.SetDefault("cors.max_age_seconds", 86400)
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")
 	v.SetDefault("database.run_migrations", false)
@@ -241,6 +280,8 @@ func loadConfig() (*Config, error) {
 		v.Set("server.dev_api_key", devAPIKey)
 	}
 
+	applyCORSEnvOverrides(v)
+
 	// Indexer version - direct environment variable override
 	if version := os.Getenv("INDEXER_VERSION"); version != "" {
 		v.Set("indexer.version", version)
@@ -309,6 +350,7 @@ func loadConfig() (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+	cfg.CORS = normalizeCORSConfig(cfg.CORS)
 
 	// Process network-specific environment variables
 	// This needs to be done after unmarshaling because we need the network names
@@ -394,6 +436,62 @@ func parseDuration(v *viper.Viper, key, label string) (time.Duration, error) {
 	return duration, nil
 }
 
+func applyCORSEnvOverrides(v *viper.Viper) {
+	setEnvValue(v, "CORS_ENABLED", "cors.enabled")
+	setEnvCSV(v, "CORS_ALLOWED_ORIGINS", "cors.allowed_origins")
+	setEnvCSV(v, "CORS_ALLOWED_ORIGIN_PATTERNS", "cors.allowed_origin_patterns")
+	setEnvValue(v, "CORS_ALLOW_ALL_ORIGINS", "cors.allow_all_origins")
+	setEnvCSV(v, "CORS_ALLOWED_METHODS", "cors.allowed_methods")
+	setEnvCSV(v, "CORS_ALLOWED_HEADERS", "cors.allowed_headers")
+	setEnvCSV(v, "CORS_EXPOSED_HEADERS", "cors.exposed_headers")
+	setEnvValue(v, "CORS_ALLOW_CREDENTIALS", "cors.allow_credentials")
+	setEnvValue(v, "CORS_MAX_AGE_SECONDS", "cors.max_age_seconds")
+}
+
+func setEnvValue(v *viper.Viper, envName, key string) {
+	if value, ok := os.LookupEnv(envName); ok {
+		v.Set(key, value)
+	}
+}
+
+func setEnvCSV(v *viper.Viper, envName, key string) {
+	if value, ok := os.LookupEnv(envName); ok {
+		v.Set(key, parseCommaSeparatedList(value))
+	}
+}
+
+func parseCommaSeparatedList(value string) []string {
+	parts := strings.Split(value, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			values = append(values, part)
+		}
+	}
+	return values
+}
+
+func normalizeCORSConfig(cfg CORSConfig) CORSConfig {
+	cfg.AllowedOrigins = normalizeStringList(cfg.AllowedOrigins)
+	cfg.AllowedOriginPatterns = normalizeStringList(cfg.AllowedOriginPatterns)
+	cfg.AllowedMethods = normalizeStringList(cfg.AllowedMethods)
+	cfg.AllowedHeaders = normalizeStringList(cfg.AllowedHeaders)
+	cfg.ExposedHeaders = normalizeStringList(cfg.ExposedHeaders)
+	return cfg
+}
+
+func normalizeStringList(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			normalized = append(normalized, value)
+		}
+	}
+	return normalized
+}
+
 // LoadForAPI loads configuration with relaxed validation (no RPC URL requirement).
 func LoadForAPI() (*Config, error) {
 	cfg, err := loadConfig()
@@ -424,6 +522,9 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 	logger.Info("Validating configuration")
 
 	if err := validateServerPorts(cfg); err != nil {
+		return err
+	}
+	if err := validateCORSConfig(cfg); err != nil {
 		return err
 	}
 
@@ -481,6 +582,13 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 	}
 
 	logger.Info("Configuration validation successful")
+	return nil
+}
+
+func validateCORSConfig(cfg *Config) error {
+	if cfg.CORS.MaxAgeSeconds < 0 {
+		return fmt.Errorf("cors.max_age_seconds must be greater than or equal to 0")
+	}
 	return nil
 }
 

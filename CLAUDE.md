@@ -85,10 +85,11 @@ Run `make ci` to execute all checks locally. GHA CI is a backstop — catch issu
 
 Individual checks you can run:
 - `make test` — quick test run (no coverage threshold)
+- `make test-coverage` — tests with the same 90% coverage threshold enforced by CI
 - `make test-race` — tests with `-race` flag
 - `make lint-fix` — lint with auto-fix
 
-After any code change, at minimum run: `make fmt && make lint && make test`
+After any code change, at minimum run: `make fmt && make lint && make test-coverage`
 
 PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `deps:`, `docs:`, `style:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`, `chore:`, `revert:`. Do not add assistant or tooling prefixes such as `[codex]`.
 

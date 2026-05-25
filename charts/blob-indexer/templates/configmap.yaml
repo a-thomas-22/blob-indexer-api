@@ -16,6 +16,21 @@ data:
       port: {{ .Values.appConfig.server.port }}
       dev_port: {{ .Values.appConfig.server.dev_port | default 0 }}
       dev_mode: {{ .Values.appConfig.server.dev_mode }}
+    cors:
+      enabled: {{ .Values.appConfig.cors.enabled }}
+      allowed_origins:
+        {{- toYaml .Values.appConfig.cors.allowed_origins | nindent 8 }}
+      allowed_origin_patterns:
+        {{- toYaml .Values.appConfig.cors.allowed_origin_patterns | nindent 8 }}
+      allow_all_origins: {{ .Values.appConfig.cors.allow_all_origins }}
+      allowed_methods:
+        {{- toYaml .Values.appConfig.cors.allowed_methods | nindent 8 }}
+      allowed_headers:
+        {{- toYaml .Values.appConfig.cors.allowed_headers | nindent 8 }}
+      exposed_headers:
+        {{- toYaml .Values.appConfig.cors.exposed_headers | nindent 8 }}
+      allow_credentials: {{ .Values.appConfig.cors.allow_credentials }}
+      max_age_seconds: {{ .Values.appConfig.cors.max_age_seconds }}
     logging:
       level: {{ .Values.appConfig.logging.level | quote }}
       format: {{ .Values.appConfig.logging.format | quote }}
