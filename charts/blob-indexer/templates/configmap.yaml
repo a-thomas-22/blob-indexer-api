@@ -14,6 +14,7 @@ data:
       schema_poll_interval: {{ .Values.appConfig.database.schema_poll_interval | quote }}
     server:
       port: {{ .Values.appConfig.server.port }}
+      dev_port: {{ .Values.appConfig.server.dev_port | default 0 }}
       dev_mode: {{ .Values.appConfig.server.dev_mode }}
     logging:
       level: {{ .Values.appConfig.logging.level | quote }}

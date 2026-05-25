@@ -55,9 +55,46 @@ type networkFreshness struct {
 	FreshnessResponse
 }
 
-// NewRouter creates a new API router. The provided context controls the
+type routerOptions struct {
+	name                string
+	includePublicRoutes bool
+	includeDevRoutes    bool
+	includeSwagger      bool
+}
+
+// NewRouter creates the main API router. The provided context controls the
 // lifetime of background goroutines (WebSocket hub and poller).
 func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Handler {
+	router, _ := NewRouters(ctx, db, cfg)
+	return router
+}
+
+// NewRouters creates the public API router and, when server.dev_port is set, a
+// dedicated dev API router. Both routers share the same API state and
+// background goroutines.
+func NewRouters(ctx context.Context, db DBProvider, cfg *config.Config) (publicRouter, devRouter http.Handler) {
+	api := newAPI(ctx, db, cfg)
+
+	publicRouter = api.newRouter(routerOptions{
+		name:                "api",
+		includePublicRoutes: true,
+		includeDevRoutes:    cfg.Server.DevPort == 0,
+		includeSwagger:      true,
+	})
+
+	if cfg.Server.DevPort == 0 {
+		return publicRouter, nil
+	}
+
+	devRouter = api.newRouter(routerOptions{
+		name:             "dev-api",
+		includeDevRoutes: true,
+	})
+
+	return publicRouter, devRouter
+}
+
+func newAPI(ctx context.Context, db DBProvider, cfg *config.Config) *API {
 	networks := make(map[int]config.NetworkConfig)
 	for _, n := range cfg.GetEnabledNetworks() {
 		networks[n.ChainID] = n
@@ -86,6 +123,11 @@ func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Hand
 		poller:        poller,
 	}
 
+	return api
+}
+
+func (a *API) newRouter(opts routerOptions) http.Handler {
+	cfg := a.config
 	r := chi.NewRouter()
 
 	// Rate limiter: 100 requests/second per IP with burst of 200
@@ -100,7 +142,7 @@ func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Hand
 	r.Use(LoggerMiddleware)
 	r.Use(ContentTypeJSON)
 	r.Use(middleware.Recoverer)
-	r.Use(api.requestCounterMiddleware)
+	r.Use(a.requestCounterMiddleware)
 
 	// CORS — AllowCredentials is false since this is a public read API.
 	// Using wildcard origins with credentials enabled is a security risk.
@@ -113,67 +155,98 @@ func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Hand
 		MaxAge:           3600,
 	}))
 
-	// Swagger UI
-	r.Get("/swagger/*", httpSwagger.Handler(
-		httpSwagger.URL("/swagger/doc.json"), // The URL pointing to API definition
-	))
+	if opts.includeSwagger {
+		// Swagger UI
+		r.Get("/swagger/*", httpSwagger.Handler(
+			httpSwagger.URL("/swagger/doc.json"), // The URL pointing to API definition
+		))
+	}
 
 	// Versioned API routes under /api/v1
 	r.Route("/api/v1", func(r chi.Router) {
-		// WebSocket endpoint — no request timeout so connections persist.
-		r.Get("/ws", api.HandleWebSocket)
+		if opts.includePublicRoutes {
+			a.mountPublicRoutes(r)
+		}
 
-		// REST endpoints — with request timeout.
-		r.Group(func(r chi.Router) {
-			r.Use(middleware.Timeout(60 * time.Second))
-
-			// Networks endpoint
-			r.Route("/networks", func(r chi.Router) {
-				r.Get("/", api.GetNetworks)
-				r.Get("/{chainId}", api.GetNetworkStatus)
+		if opts.includeDevRoutes {
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.Timeout(60 * time.Second))
+				a.mountDevRoutes(r)
 			})
-
-			// Blob endpoints
-			r.Route("/blob", func(r chi.Router) {
-				r.Get("/latest", api.GetLatestBlobs)
-				r.Get("/mempool", api.GetMempoolBlobs)
-				r.Get("/mempool/pressure", api.GetMempoolPressure)
-				r.Get("/pricing", api.GetBlobPricing)
-				r.Get("/{txHash}", api.GetBlobByTxHash)
-			})
-
-			// User endpoints
-			r.Route("/users", func(r chi.Router) {
-				r.Get("/", api.GetTopBlobUsers)
-				r.Get("/unattributed", api.GetTopUnattributedBlobUsers)
-				r.Get("/breakdown", api.GetUserBreakdown)
-				r.Get("/{address}", api.GetUserByAddress)
-			})
-
-			// Stats endpoints
-			r.Route("/stats", func(r chi.Router) {
-				r.Get("/", api.GetBlobStats)
-				r.Get("/windows", api.GetRollingStatsWindows)
-			})
-
-			// Status endpoint
-			r.Get("/status", api.GetIndexerStatus)
-
-			// Development endpoints — all gated behind dev mode
-			r.Route("/dev", func(r chi.Router) {
-				r.Use(DevModeMiddleware(cfg.Server.DevMode))
-				r.Use(DevAPIKeyMiddleware(cfg.Server.DevAPIKey))
-
-				r.Get("/metrics", api.DevMetrics)
-				r.Get("/indexers", api.DevIndexers)
-				r.Get("/database", api.DevDatabase)
-				r.Get("/logs", api.DevLogs)
-				r.Get("/queries", api.DevQueries)
-				r.Get("/dashboard", api.DevDashboard)
-			})
-		})
+		}
 	})
 
+	mountLegacyAPIRedirects(r)
+
+	logger.Info("API routes initialized",
+		zap.String("router", opts.name),
+		zap.String("api_base", "/api/v1"),
+		zap.String("swagger_ui", "/swagger/index.html"),
+		zap.Bool("public_routes", opts.includePublicRoutes),
+		zap.Bool("dev_routes", opts.includeDevRoutes),
+		zap.Bool("dev_mode", cfg.Server.DevMode))
+
+	return r
+}
+
+func (a *API) mountPublicRoutes(r chi.Router) {
+	// WebSocket endpoint — no request timeout so connections persist.
+	r.Get("/ws", a.HandleWebSocket)
+
+	// REST endpoints — with request timeout.
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.Timeout(60 * time.Second))
+
+		// Networks endpoint
+		r.Route("/networks", func(r chi.Router) {
+			r.Get("/", a.GetNetworks)
+			r.Get("/{chainId}", a.GetNetworkStatus)
+		})
+
+		// Blob endpoints
+		r.Route("/blob", func(r chi.Router) {
+			r.Get("/latest", a.GetLatestBlobs)
+			r.Get("/mempool", a.GetMempoolBlobs)
+			r.Get("/mempool/pressure", a.GetMempoolPressure)
+			r.Get("/pricing", a.GetBlobPricing)
+			r.Get("/{txHash}", a.GetBlobByTxHash)
+		})
+
+		// User endpoints
+		r.Route("/users", func(r chi.Router) {
+			r.Get("/", a.GetTopBlobUsers)
+			r.Get("/unattributed", a.GetTopUnattributedBlobUsers)
+			r.Get("/breakdown", a.GetUserBreakdown)
+			r.Get("/{address}", a.GetUserByAddress)
+		})
+
+		// Stats endpoints
+		r.Route("/stats", func(r chi.Router) {
+			r.Get("/", a.GetBlobStats)
+			r.Get("/windows", a.GetRollingStatsWindows)
+		})
+
+		// Status endpoint
+		r.Get("/status", a.GetIndexerStatus)
+	})
+}
+
+func (a *API) mountDevRoutes(r chi.Router) {
+	// Development endpoints — all gated behind dev mode.
+	r.Route("/dev", func(r chi.Router) {
+		r.Use(DevModeMiddleware(a.config.Server.DevMode))
+		r.Use(DevAPIKeyMiddleware(a.config.Server.DevAPIKey))
+
+		r.Get("/metrics", a.DevMetrics)
+		r.Get("/indexers", a.DevIndexers)
+		r.Get("/database", a.DevDatabase)
+		r.Get("/logs", a.DevLogs)
+		r.Get("/queries", a.DevQueries)
+		r.Get("/dashboard", a.DevDashboard)
+	})
+}
+
+func mountLegacyAPIRedirects(r chi.Router) {
 	// Backward compatibility: redirect /api/* to /api/v1/* with 301 Moved Permanently
 	r.HandleFunc("/api/*", func(w http.ResponseWriter, r *http.Request) {
 		// Strip the "/api" prefix and prepend "/api/v1"
@@ -188,13 +261,6 @@ func NewRouter(ctx context.Context, db DBProvider, cfg *config.Config) http.Hand
 		w.Header().Set("Location", location)
 		w.WriteHeader(http.StatusMovedPermanently)
 	})
-
-	logger.Info("API routes initialized",
-		zap.String("api_base", "/api/v1"),
-		zap.String("swagger_ui", "/swagger/index.html"),
-		zap.Bool("dev_mode", cfg.Server.DevMode))
-
-	return r
 }
 
 // getNetworkFromRequest gets the network from the request query parameters.

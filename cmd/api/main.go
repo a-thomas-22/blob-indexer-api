@@ -71,44 +71,78 @@ func main() {
 	logger.InitializeWithConfig(cfg.Logging.Level, cfg.Logging.Format)
 	defer cancel()
 
-	router := api.NewRouter(ctx, database, cfg)
-	server := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:           router,
-		ReadTimeout:       cfg.Server.ReadTimeout,
-		WriteTimeout:      cfg.Server.WriteTimeout,
-		IdleTimeout:       cfg.Server.IdleTimeout,
-		ReadHeaderTimeout: 10 * time.Second,
+	publicRouter, devRouter := api.NewRouters(ctx, database, cfg)
+	servers := []namedServer{
+		{
+			name:   "api",
+			server: newHTTPServer(cfg.Server.Port, publicRouter, cfg),
+		},
+	}
+	if devRouter != nil {
+		servers = append(servers, namedServer{
+			name:   "dev-api",
+			server: newHTTPServer(cfg.Server.DevPort, devRouter, cfg),
+		})
 	}
 
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
 
-	go func() {
-		logger.Info("API server listening", zap.Int("port", cfg.Server.Port))
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("Server error", zap.Error(err))
-			cancel()
-		}
-	}()
+	serverErrors := make(chan serverError, len(servers))
+	for _, srv := range servers {
+		go func() {
+			logger.Info("API server listening",
+				zap.String("server", srv.name),
+				zap.String("addr", srv.server.Addr))
+			if err := srv.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				serverErrors <- serverError{name: srv.name, err: err}
+			}
+		}()
+	}
 
 	select {
 	case <-shutdown:
 		logger.Info("Shutdown signal received")
 	case <-ctx.Done():
 		logger.Info("Context canceled")
+	case err := <-serverErrors:
+		logger.Error("Server error", zap.String("server", err.name), zap.Error(err.err))
+		cancel()
 	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer shutdownCancel()
 
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("Server shutdown error", zap.Error(err))
+	for _, srv := range servers {
+		if err := srv.server.Shutdown(shutdownCtx); err != nil {
+			logger.Error("Server shutdown error", zap.String("server", srv.name), zap.Error(err))
+		}
 	}
-	logger.Info("HTTP server shutdown complete")
+	logger.Info("HTTP servers shutdown complete")
 
 	if err := database.Close(); err != nil {
 		logger.Warn("Database close returned error", zap.Error(err))
 	}
 	logger.Info("API server shutdown complete")
+}
+
+type namedServer struct {
+	name   string
+	server *http.Server
+}
+
+type serverError struct {
+	name string
+	err  error
+}
+
+func newHTTPServer(port int, handler http.Handler, cfg *config.Config) *http.Server {
+	return &http.Server{
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           handler,
+		ReadTimeout:       cfg.Server.ReadTimeout,
+		WriteTimeout:      cfg.Server.WriteTimeout,
+		IdleTimeout:       cfg.Server.IdleTimeout,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 }

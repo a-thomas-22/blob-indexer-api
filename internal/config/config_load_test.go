@@ -127,6 +127,35 @@ networks:
 	}
 }
 
+func TestLoad_DevPortOverride(t *testing.T) {
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "config.yaml")
+	configContent := `
+database:
+  url: "postgres://localhost:5432/db"
+networks:
+  - name: testnet
+    chain_id: 1
+    rpc_url: "http://localhost:8545"
+    start_block: "0"
+    enabled: true
+`
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CONFIG_PATH", configFile)
+	t.Setenv("DEV_PORT", "3001")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Server.DevPort != 3001 {
+		t.Errorf("expected dev port 3001, got %d", cfg.Server.DevPort)
+	}
+}
+
 func TestLoad_DevModeOverride(t *testing.T) {
 	dir := t.TempDir()
 	configFile := filepath.Join(dir, "config.yaml")

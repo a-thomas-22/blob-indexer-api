@@ -45,6 +45,7 @@ type DatabaseConfig struct {
 // ServerConfig holds the server configuration
 type ServerConfig struct {
 	Port            int           `mapstructure:"port" yaml:"port"`
+	DevPort         int           `mapstructure:"dev_port" yaml:"dev_port"`
 	DevMode         bool          `mapstructure:"dev_mode" yaml:"dev_mode"`
 	ReadTimeout     time.Duration `mapstructure:"read_timeout" yaml:"read_timeout"`
 	WriteTimeout    time.Duration `mapstructure:"write_timeout" yaml:"write_timeout"`
@@ -119,6 +120,7 @@ func loadConfig() (*Config, error) {
 
 	// Set default values
 	v.SetDefault("server.port", 8080)
+	v.SetDefault("server.dev_port", 0)
 	v.SetDefault("server.dev_mode", false)
 	v.SetDefault("server.read_timeout", "30s")
 	v.SetDefault("server.write_timeout", "30s")
@@ -222,6 +224,11 @@ func loadConfig() (*Config, error) {
 	// Server port - direct environment variable override
 	if portStr := os.Getenv("PORT"); portStr != "" {
 		v.Set("server.port", portStr) // Viper will handle the conversion
+	}
+
+	// Development server port - direct environment variable override
+	if devPortStr := os.Getenv("DEV_PORT"); devPortStr != "" {
+		v.Set("server.dev_port", devPortStr) // Viper will handle the conversion
 	}
 
 	// Development mode - direct environment variable override
@@ -416,6 +423,10 @@ func ValidateForAPI(cfg *Config) error {
 func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 	logger.Info("Validating configuration")
 
+	if err := validateServerPorts(cfg); err != nil {
+		return err
+	}
+
 	// Validate database URL
 	if cfg.Database.URL == "" {
 		if os.Getenv("DB_URL") == "" {
@@ -470,6 +481,18 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 	}
 
 	logger.Info("Configuration validation successful")
+	return nil
+}
+
+func validateServerPorts(cfg *Config) error {
+	if cfg.Server.DevPort < 0 || cfg.Server.DevPort > 65535 {
+		return fmt.Errorf("server.dev_port must be between 0 and 65535")
+	}
+
+	if cfg.Server.DevPort != 0 && cfg.Server.DevPort == cfg.Server.Port {
+		return fmt.Errorf("server.dev_port must differ from server.port")
+	}
+
 	return nil
 }
 

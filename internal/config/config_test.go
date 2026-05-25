@@ -43,6 +43,34 @@ func TestValidateForAPI_NoRPCRequired(t *testing.T) {
 	}
 }
 
+func TestValidateForAPI_DevPortMustDifferFromMainPort(t *testing.T) {
+	cfg := &Config{
+		Database: DatabaseConfig{URL: "postgres://localhost/test"},
+		Server:   ServerConfig{Port: 8080, DevPort: 8080},
+		Networks: []NetworkConfig{
+			{Name: "test", ChainID: 1, Enabled: true},
+		},
+	}
+
+	if err := ValidateForAPI(cfg); err == nil {
+		t.Fatal("expected validation error when dev_port equals port")
+	}
+}
+
+func TestValidateForAPI_DevPortAllowsDisabledDedicatedListener(t *testing.T) {
+	cfg := &Config{
+		Database: DatabaseConfig{URL: "postgres://localhost/test"},
+		Server:   ServerConfig{Port: 8080, DevPort: 0},
+		Networks: []NetworkConfig{
+			{Name: "test", ChainID: 1, Enabled: true},
+		},
+	}
+
+	if err := ValidateForAPI(cfg); err != nil {
+		t.Fatalf("expected validation to pass with dev_port disabled, got: %v", err)
+	}
+}
+
 func TestValidateConfig_RequiresRPC(t *testing.T) {
 	cfg := &Config{
 		Database: DatabaseConfig{URL: "postgres://localhost/test"},

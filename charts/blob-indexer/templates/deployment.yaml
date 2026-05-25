@@ -44,6 +44,11 @@ spec:
             - name: http
               containerPort: {{ .Values.appConfig.server.port }}
               protocol: TCP
+            {{- if .Values.appConfig.server.dev_port }}
+            - name: dev-http
+              containerPort: {{ .Values.appConfig.server.dev_port }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: CONFIG_PATH
               value: /etc/config/config.yaml
