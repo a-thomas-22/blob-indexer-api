@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.5.0...blob-indexer-chart-v0.5.1) (2026-05-25)
+
+
+### Bug Fixes
+
+* **helm:** update chart app version to 0.5.1 ([46fa332](https://github.com/a-thomas-22/blob-indexer-api/commit/46fa332eb7f902dc20d2d8d87708586ebf75db33))
+
 ## [0.5.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.4.0...blob-indexer-chart-v0.5.0) (2026-05-25)
 
 
