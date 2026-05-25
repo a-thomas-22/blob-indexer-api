@@ -11,7 +11,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
 	httpSwagger "github.com/swaggo/http-swagger"
 	"go.uber.org/zap"
 
@@ -149,23 +148,13 @@ func (a *API) newRouter(opts routerOptions) http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.ClientIPFromRemoteAddr)
 	r.Use(SecurityHeadersMiddleware)
+	r.Use(CORSMiddleware(cfg.CORS))
 	r.Use(MaxBytesMiddleware)
 	r.Use(RateLimitMiddleware(rateLimiter))
 	r.Use(LoggerMiddleware)
 	r.Use(ContentTypeJSON)
 	r.Use(middleware.Recoverer)
 	r.Use(a.requestCounterMiddleware)
-
-	// CORS — AllowCredentials is false since this is a public read API.
-	// Using wildcard origins with credentials enabled is a security risk.
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Content-Type"},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: false,
-		MaxAge:           3600,
-	}))
 
 	if opts.includeSwagger {
 		// Swagger UI

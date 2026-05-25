@@ -99,6 +99,34 @@ func TestNewRouter_DevModeDisabled(t *testing.T) {
 	}
 }
 
+func TestNewRouter_CORSPreflightForAPIRoute(t *testing.T) {
+	cfg := &config.Config{
+		Server:  config.ServerConfig{Port: 8080, DevMode: false},
+		CORS:    testCORSConfig(),
+		Indexer: config.IndexerConfig{Version: "test"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler := NewRouter(ctx, nil, cfg)
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/stats?network=mainnet", http.NoBody)
+	req.Header.Set("Origin", "http://localhost:3000")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	req.Header.Set("Access-Control-Request-Headers", "content-type")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3000" {
+		t.Fatalf("expected CORS origin echo, got %q", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Methods"); got != "GET, OPTIONS" {
+		t.Fatalf("expected allowed methods, got %q", got)
+	}
+}
+
 func TestAsyncAPISpecEndpoint(t *testing.T) {
 	cfg := &config.Config{
 		Server:  config.ServerConfig{Port: 8080},

@@ -13,7 +13,7 @@ import (
 var wsUpgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// Allow all origins — matches the existing CORS config for this public API.
+	// WebSocket origin checks are handled separately from HTTP CORS.
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
