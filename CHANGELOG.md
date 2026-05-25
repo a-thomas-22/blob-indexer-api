@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.4.0...blob-indexer-api-v0.5.0) (2026-05-25)
+
+
+### Features
+
+* expose backfill activity in status ([#182](https://github.com/a-thomas-22/blob-indexer-api/issues/182)) ([c6fc2f8](https://github.com/a-thomas-22/blob-indexer-api/commit/c6fc2f8c902499d06acbbc9409bcf61549aa9b80))
+* serve dev API on separate port ([#183](https://github.com/a-thomas-22/blob-indexer-api/issues/183)) ([2b0079d](https://github.com/a-thomas-22/blob-indexer-api/commit/2b0079d1d0f430a1fa669c61d1476ceb26fccff9))
+
+
+### Bug Fixes
+
+* quiet stale pending transaction lookups ([#184](https://github.com/a-thomas-22/blob-indexer-api/issues/184)) ([ec531b6](https://github.com/a-thomas-22/blob-indexer-api/commit/ec531b61c729ce2f8d072fbcb9f084f5e598a82d))
+
 ## [0.4.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.3.0...blob-indexer-api-v0.4.0) (2026-05-25)
 
 
