@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
@@ -94,5 +96,34 @@ func TestNewRouter_DevModeDisabled(t *testing.T) {
 	handler := NewRouter(ctx, nil, cfg)
 	if handler == nil {
 		t.Fatal("expected non-nil handler")
+	}
+}
+
+func TestAsyncAPISpecEndpoint(t *testing.T) {
+	cfg := &config.Config{
+		Server:  config.ServerConfig{Port: 8080},
+		Indexer: config.IndexerConfig{Version: "test"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler := NewRouter(ctx, nil, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/asyncapi.yaml", http.NoBody)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected asyncapi endpoint to return 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/yaml") {
+		t.Fatalf("expected application/yaml content type, got %q", ct)
+	}
+	body, err := io.ReadAll(w.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "asyncapi:") || !strings.Contains(text, "new_block") {
+		t.Fatalf("asyncapi response missing expected websocket schema content")
 	}
 }

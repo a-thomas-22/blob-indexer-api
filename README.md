@@ -18,6 +18,7 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 - Chain reorganization detection via block hash tracking
 - Structured JSON logging with configurable levels
 - Swagger/OpenAPI documentation
+- AsyncAPI WebSocket message documentation
 - Development dashboard with metrics, indexer status, and database stats
 
 ## Tech Stack
@@ -29,7 +30,7 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 - Configuration: Viper (YAML + environment variables)
 - Logging: Zap (structured JSON)
 - Migrations: golang-migrate via `cmd/migrate`, `make db-migrate`, or Helm-managed migration containers
-- API Docs: Swagger/OpenAPI (swag + http-swagger)
+- API Docs: Swagger/OpenAPI (swag + http-swagger), plus AsyncAPI for WebSocket messages
 - Deployment: Docker, Kubernetes with Helm, Tilt for development
 
 ## API Endpoints
@@ -57,6 +58,19 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 ### WebSocket Endpoint
 - `GET /api/v1/ws?network=mainnet` - Subscribe to live blob, stats, and user updates
 
+WebSocket clients receive raw JSON text frames with a top-level `type` field
+and a type-specific `data` payload. The committed AsyncAPI contract is in
+`docs/asyncapi.yaml`, and the API serves it at `GET /asyncapi.yaml`.
+
+Clients may send an optional subscription filter after connecting:
+
+```json
+{"subscribe":["new_block","mempool_update","stats_update","users_update"]}
+```
+
+If no subscription filter is sent, all event types are delivered. The server
+also sends an application-level `{"type":"ping"}` heartbeat every 30 seconds.
+
 ### Development Endpoints
 These endpoints are available only when `server.dev_mode` is enabled, and can be protected with `server.dev_api_key`. Set `server.dev_port` to serve them from a dedicated listener instead of the main API listener:
 - `GET /api/v1/dev/metrics` - System-wide metrics (memory, goroutines, uptime)
@@ -83,6 +97,12 @@ make swagger
 ```
 
 Generated Swagger files are intentionally ignored by Git. Build, test, Docker, and CI targets generate them when they need the `docs` package.
+
+The WebSocket message contract is documented separately with AsyncAPI:
+
+```
+http://localhost:8080/asyncapi.yaml
+```
 
 ## Development
 

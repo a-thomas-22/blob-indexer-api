@@ -15,6 +15,7 @@ import (
 	httpSwagger "github.com/swaggo/http-swagger"
 	"go.uber.org/zap"
 
+	apidocs "github.com/a-thomas-22/blob-indexer-api/docs"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
@@ -171,6 +172,7 @@ func (a *API) newRouter(opts routerOptions) http.Handler {
 		r.Get("/swagger/*", httpSwagger.Handler(
 			httpSwagger.URL("/swagger/doc.json"), // The URL pointing to API definition
 		))
+		r.Get("/asyncapi.yaml", serveAsyncAPI)
 	}
 
 	// Versioned API routes under /api/v1
@@ -198,6 +200,12 @@ func (a *API) newRouter(opts routerOptions) http.Handler {
 		zap.Bool("dev_mode", cfg.Server.DevMode))
 
 	return r
+}
+
+func serveAsyncAPI(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(apidocs.AsyncAPIYAML)
 }
 
 func (a *API) mountPublicRoutes(r chi.Router) {
