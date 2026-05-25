@@ -83,6 +83,8 @@ type blobListClaim struct {
 type blobListSyncStats struct {
 	Claims              int
 	CurrentUsers        int
+	CurrentBlock        int64
+	ChangedAddresses    int
 	BlobsCleared        int64
 	BlobsReattributed   int64
 	PendingReattributed int64
@@ -111,12 +113,13 @@ func (s *Service) RefreshBlobList(ctx context.Context) error {
 		}
 	}
 
-	s.setClaims(claims)
+	s.setClaims(claims, stats.CurrentBlock)
 
 	logger.Info("Blob-list attributions refreshed",
 		zap.Int("network_id", s.networkID),
 		zap.Int("claims", stats.Claims),
 		zap.Int("current_users", stats.CurrentUsers),
+		zap.Int("changed_addresses", stats.ChangedAddresses),
 		zap.Int64("blobs_cleared", stats.BlobsCleared),
 		zap.Int64("blobs_reattributed", stats.BlobsReattributed),
 		zap.Int64("pending_reattributed", stats.PendingReattributed),
@@ -227,7 +230,7 @@ func (s *Service) blobListURL(cfg BlobListConfig) string {
 	return fmt.Sprintf("%s/eip155-%d.json", baseURL, s.networkID)
 }
 
-func (s *Service) setClaims(claims []Claim) {
+func (s *Service) setClaims(claims []Claim, currentBlock ...int64) {
 	claimsByAddr := make(map[string][]Claim)
 	for _, claim := range claims {
 		claim.Address = normalizeAddress(claim.Address)
@@ -237,7 +240,11 @@ func (s *Service) setClaims(claims []Claim) {
 		sortClaims(claimsByAddr[address])
 	}
 
-	currentUsers := bestCurrentClaims(claims)
+	atBlock := int64(-1)
+	if len(currentBlock) > 0 {
+		atBlock = currentBlock[0]
+	}
+	currentUsers := bestClaimsAtBlock(claims, atBlock)
 
 	s.claimsMu.Lock()
 	s.claimsByAddr = claimsByAddr
@@ -266,7 +273,7 @@ func (claim Claim) matchesBlock(blockNumber int64) bool {
 		return false
 	}
 	if blockNumber < 0 {
-		return strings.EqualFold(claim.Status, claimStatusActive) && claim.ValidToBlock == nil
+		return strings.EqualFold(claim.Status, claimStatusActive) && claim.ValidToBlock == nil && claim.ValidFromBlock <= 0
 	}
 	if blockNumber < claim.ValidFromBlock {
 		return false
@@ -315,10 +322,10 @@ func claimScore(claim Claim) int {
 	return score
 }
 
-func bestCurrentClaims(claims []Claim) map[string]Claim {
+func bestClaimsAtBlock(claims []Claim, blockNumber int64) map[string]Claim {
 	best := make(map[string]Claim)
 	for _, claim := range claims {
-		if !claim.matchesBlock(-1) {
+		if !claim.matchesBlock(blockNumber) {
 			continue
 		}
 		existing, ok := best[claim.Address]
@@ -329,18 +336,76 @@ func bestCurrentClaims(claims []Claim) map[string]Claim {
 	return best
 }
 
-func claimAddresses(claims []Claim) []string {
-	seen := make(map[string]struct{})
-	for _, claim := range claims {
-		seen[claim.Address] = struct{}{}
+func changedClaimAddresses(previous, current []Claim) []string {
+	previousByAddress := claimsByAddress(previous)
+	currentByAddress := claimsByAddress(current)
+	addresses := make(map[string]struct{}, len(previousByAddress)+len(currentByAddress))
+	for address := range previousByAddress {
+		addresses[address] = struct{}{}
+	}
+	for address := range currentByAddress {
+		addresses[address] = struct{}{}
 	}
 
-	addresses := make([]string, 0, len(seen))
-	for address := range seen {
-		addresses = append(addresses, address)
+	changed := make([]string, 0, len(addresses))
+	for address := range addresses {
+		if !sameClaims(previousByAddress[address], currentByAddress[address]) {
+			changed = append(changed, address)
+		}
 	}
-	sort.Strings(addresses)
-	return addresses
+	sort.Strings(changed)
+	return changed
+}
+
+func claimsByAddress(claims []Claim) map[string][]Claim {
+	byAddress := make(map[string][]Claim)
+	for _, claim := range claims {
+		claim.Address = normalizeAddress(claim.Address)
+		byAddress[claim.Address] = append(byAddress[claim.Address], claim)
+	}
+	for address := range byAddress {
+		sortClaims(byAddress[address])
+	}
+	return byAddress
+}
+
+func sameClaims(a, b []Claim) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !sameClaim(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameClaim(a, b Claim) bool {
+	if a.NetworkID != b.NetworkID ||
+		a.Source != b.Source ||
+		a.Address != b.Address ||
+		a.EntityID != b.EntityID ||
+		a.Name != b.Name ||
+		a.Category != b.Category ||
+		a.Role != b.Role ||
+		a.Confidence != b.Confidence ||
+		a.Status != b.Status ||
+		a.ValidFromBlock != b.ValidFromBlock {
+		return false
+	}
+	if (a.ValidToBlock == nil) != (b.ValidToBlock == nil) {
+		return false
+	}
+	return a.ValidToBlock == nil || *a.ValidToBlock == *b.ValidToBlock
+}
+
+func makeAddressSet(addresses []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		set[address] = struct{}{}
+	}
+	return set
 }
 
 func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobListSyncStats, error) {
@@ -359,6 +424,14 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 		WHERE network_id = $1 AND source = $2
 	`, s.networkID, blobListSource); err != nil {
 		return stats, fmt.Errorf("failed to load previous blob-list claims: %w", err)
+	}
+
+	if err := tx.GetContext(ctx, &stats.CurrentBlock, `
+		SELECT COALESCE(MAX(block_number), -1)
+		FROM blobs
+		WHERE network_id = $1 AND block_number >= 0
+	`, s.networkID); err != nil {
+		return stats, fmt.Errorf("failed to load latest attribution block: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -381,9 +454,12 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 		}
 	}
 
-	currentUsers := bestCurrentClaims(claims)
-	previousCurrentUsers := bestCurrentClaims(previous)
+	currentUsers := bestClaimsAtBlock(claims, stats.CurrentBlock)
+	previousCurrentUsers := bestClaimsAtBlock(previous, stats.CurrentBlock)
+	changedAddresses := changedClaimAddresses(previous, claims)
+	changedAddressSet := makeAddressSet(changedAddresses)
 	stats.CurrentUsers = len(currentUsers)
+	stats.ChangedAddresses = len(changedAddresses)
 
 	if len(previousCurrentUsers) > 0 {
 		deletedAddresses := make([]string, 0)
@@ -395,7 +471,7 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 		if len(deletedAddresses) > 0 {
 			res, err := tx.ExecContext(ctx, `
 				DELETE FROM blob_users
-				WHERE network_id = $1 AND LOWER(address) = ANY($2)
+				WHERE network_id = $1 AND address = ANY($2)
 			`, s.networkID, pq.Array(deletedAddresses))
 			if err != nil {
 				return stats, fmt.Errorf("failed to delete stale blob users: %w", err)
@@ -419,15 +495,14 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 		stats.BlobUsersUpserted++
 	}
 
-	addresses := claimAddresses(append(previous, claims...))
-	if len(addresses) > 0 {
+	if len(changedAddresses) > 0 {
 		res, err := tx.ExecContext(ctx, `
 			UPDATE blobs
 			SET user_attribution = ''
 			WHERE network_id = $1
 				AND LOWER(from_address) = ANY($2)
 				AND COALESCE(user_attribution, '') <> ''
-		`, s.networkID, pq.Array(addresses))
+		`, s.networkID, pq.Array(changedAddresses))
 		if err != nil {
 			return stats, fmt.Errorf("failed to clear old blob attributions: %w", err)
 		}
@@ -436,6 +511,9 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 
 	sortClaimsForApplication(claims)
 	for _, claim := range claims {
+		if _, ok := changedAddressSet[claim.Address]; !ok {
+			continue
+		}
 		if strings.EqualFold(claim.Status, claimStatusDisputed) {
 			continue
 		}
@@ -447,6 +525,9 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 	}
 
 	for _, claim := range currentUsers {
+		if _, ok := changedAddressSet[claim.Address]; !ok {
+			continue
+		}
 		res, err := tx.ExecContext(ctx, `
 			UPDATE blobs
 			SET user_attribution = $1

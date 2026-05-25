@@ -749,8 +749,8 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 		return
 	}
 
-	// Get the current user attribution for the pending transaction.
-	userAttribution := i.attribution.GetUserAttribution(from)
+	// Get the user attribution at the latest known head for the pending transaction.
+	userAttribution := i.attribution.GetUserAttributionForBlock(from, int64(latestBlockNum))
 
 	metrics := calculateBlobMetrics(tx, blobBaseFee)
 
@@ -1264,8 +1264,8 @@ func (i *Indexer) processPendingTransactions() error {
 			continue
 		}
 
-		// Get the current user attribution for the pending transaction.
-		userAttribution := i.attribution.GetUserAttribution(from)
+		// Get the user attribution at the latest known head for the pending transaction.
+		userAttribution := i.attribution.GetUserAttributionForBlock(from, int64(latestBlockNum))
 
 		metrics := calculateBlobMetrics(tx, blobBaseFee)
 

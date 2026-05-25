@@ -12,6 +12,11 @@ CREATE TABLE IF NOT EXISTS blob_attribution_claims (
     valid_from_block BIGINT NOT NULL,
     valid_to_block BIGINT,
     updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_blob_attribution_claims_network_chain_id
+        FOREIGN KEY (network_id)
+        REFERENCES networks(chain_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
     UNIQUE(network_id, source, address, entity_id, role, valid_from_block)
 );
 
@@ -20,3 +25,6 @@ CREATE INDEX IF NOT EXISTS idx_blob_attribution_claims_network_source
 
 CREATE INDEX IF NOT EXISTS idx_blob_attribution_claims_address
     ON blob_attribution_claims(network_id, address);
+
+CREATE INDEX IF NOT EXISTS idx_blobs_network_lower_from_address
+    ON blobs(network_id, LOWER(from_address));

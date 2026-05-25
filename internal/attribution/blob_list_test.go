@@ -56,7 +56,7 @@ func TestGetUserAttributionForBlock_UsesBlobListClaims(t *testing.T) {
 			Status:         "disputed",
 			ValidFromBlock: 200,
 		},
-	})
+	}, 250)
 
 	if got := svc.GetUserAttributionForBlock(testBlobListAddress, 150); got != "Old Base" {
 		t.Fatalf("expected historical attribution Old Base, got %q", got)
@@ -117,6 +117,9 @@ func TestRefreshBlobList_SyncsClaimsAndReattributesExistingBlobs(t *testing.T) {
 	mock.ExpectQuery("SELECT network_id, source, address, entity_id, name, category, role, confidence, status, valid_from_block, valid_to_block").
 		WithArgs(1, blobListSource).
 		WillReturnRows(rows)
+	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(block_number\\), -1\\)").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(int64(123)))
 	mock.ExpectExec("DELETE FROM blob_attribution_claims").
 		WithArgs(1, blobListSource).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -307,6 +310,7 @@ func TestMatchesBlock(t *testing.T) {
 	}{
 		{"disputed always false", Claim{Status: claimStatusDisputed, ValidFromBlock: 0}, 50, false},
 		{"current with open range", Claim{Status: claimStatusActive, ValidFromBlock: 0}, -1, true},
+		{"current with future open range", Claim{Status: claimStatusActive, ValidFromBlock: 100}, -1, false},
 		{"current with closed range", Claim{Status: claimStatusActive, ValidFromBlock: 0, ValidToBlock: &to}, -1, false},
 		{"before valid", Claim{Status: claimStatusActive, ValidFromBlock: 100}, 50, false},
 		{"after valid", Claim{Status: claimStatusActive, ValidFromBlock: 0, ValidToBlock: &to}, 250, false},

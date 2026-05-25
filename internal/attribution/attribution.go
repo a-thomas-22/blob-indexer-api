@@ -84,12 +84,25 @@ func (s *Service) SetNetworkID(networkID int) {
 
 // GetUserAttribution gets the current user attribution for an address.
 func (s *Service) GetUserAttribution(address string) string {
-	return s.GetUserAttributionForBlock(address, -1)
+	normalizedAddress := normalizeAddress(address)
+
+	s.knownUsersMu.RLock()
+	if name, ok := s.knownUsers[normalizedAddress]; ok {
+		s.knownUsersMu.RUnlock()
+		return name
+	}
+	s.knownUsersMu.RUnlock()
+
+	return ""
 }
 
 // GetUserAttributionForBlock gets the user attribution for an address at a
 // specific block. A negative block number means the current active attribution.
 func (s *Service) GetUserAttributionForBlock(address string, blockNumber int64) string {
+	if blockNumber < 0 {
+		return s.GetUserAttribution(address)
+	}
+
 	// Normalize the address
 	normalizedAddress := normalizeAddress(address)
 
@@ -99,19 +112,6 @@ func (s *Service) GetUserAttributionForBlock(address string, blockNumber int64) 
 		return claim.Name
 	}
 	s.claimsMu.RUnlock()
-
-	if blockNumber >= 0 {
-		return ""
-	}
-
-	// Check if the address is a configured mapping. This map is populated from
-	// attribution mappings, not from blob_users database state.
-	s.knownUsersMu.RLock()
-	if name, ok := s.knownUsers[normalizedAddress]; ok {
-		s.knownUsersMu.RUnlock()
-		return name
-	}
-	s.knownUsersMu.RUnlock()
 
 	// Unknown user
 	return ""
