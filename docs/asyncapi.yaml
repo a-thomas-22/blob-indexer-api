@@ -1,0 +1,382 @@
+asyncapi: '2.6.0'
+id: urn:github.com:a-thomas-22:blob-indexer-api:websocket
+info:
+  title: Blob Indexer WebSocket API
+  version: '1.0.0'
+  description: |
+    Realtime WebSocket contract for Blob Indexer clients.
+
+    The WebSocket endpoint sends JSON text frames directly. Messages are not
+    wrapped in the REST API `{ success, data, error }` envelope. Each server
+    message has a `type` discriminator and, except for heartbeat pings, a
+    `data` payload whose schema depends on `type`.
+  contact:
+    name: API Support
+    url: https://github.com/a-thomas-22/blob-indexer-api
+    email: support@example.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+tags:
+  - name: realtime
+    description: WebSocket events pushed by the Blob Indexer API.
+  - name: blobs
+    description: Blob transaction events.
+  - name: stats
+    description: Aggregate blob statistics.
+defaultContentType: application/json
+servers:
+  public:
+    url: '{host}/api/v1/ws?network={network}'
+    protocol: wss
+    description: Public WebSocket endpoint. Use `ws` instead of `wss` for local HTTP development.
+    variables:
+      host:
+        default: localhost:8080
+        description: API host and optional port, without scheme.
+      network:
+        default: mainnet
+        description: Network name or chain ID. If omitted by the client, the API uses the first enabled network.
+channels:
+  /api/v1/ws:
+    description: |
+      Upgrade this HTTP GET route to a WebSocket connection. Events are scoped
+      to the `network` query parameter selected at connection time.
+    bindings:
+      ws:
+        bindingVersion: '0.1.0'
+        query:
+          type: object
+          properties:
+            network:
+              oneOf:
+                - type: string
+                  description: Network name, for example `mainnet` or `sepolia`.
+                - type: integer
+                  description: Chain ID, for example `1` or `11155111`.
+    publish:
+      operationId: receiveRealtimeBlobEvents
+      summary: Server publishes realtime blob events to connected clients.
+      description: |
+        By default the server sends all event types for the selected network.
+        The server also sends an application-level `{ "type": "ping" }`
+        heartbeat every 30 seconds, plus WebSocket protocol ping frames.
+      message:
+        oneOf:
+          - $ref: '#/components/messages/NewBlockEvent'
+          - $ref: '#/components/messages/MempoolUpdateEvent'
+          - $ref: '#/components/messages/StatsUpdateEvent'
+          - $ref: '#/components/messages/UsersUpdateEvent'
+          - $ref: '#/components/messages/PingEvent'
+    subscribe:
+      operationId: sendSubscriptionFilter
+      summary: Client optionally sends a subscription filter.
+      description: |
+        Send this after connection open to restrict event delivery. Sending no
+        filter means all subscribable events. Empty `subscribe` arrays and
+        unparseable messages are ignored. The server does not send an ack.
+      message:
+        $ref: '#/components/messages/SubscribeMessage'
+components:
+  messages:
+    NewBlockEvent:
+      messageId: newBlockEvent
+      name: new_block
+      title: New Block Event
+      summary: A newly indexed block containing blobs.
+      payload:
+        $ref: '#/components/schemas/NewBlockEvent'
+    MempoolUpdateEvent:
+      messageId: mempoolUpdateEvent
+      name: mempool_update
+      title: Mempool Update Event
+      summary: A pending blob transaction entered or left the mempool snapshot.
+      payload:
+        $ref: '#/components/schemas/MempoolUpdateEvent'
+    StatsUpdateEvent:
+      messageId: statsUpdateEvent
+      name: stats_update
+      title: Stats Update Event
+      summary: Aggregate blob statistics changed.
+      payload:
+        $ref: '#/components/schemas/StatsUpdateEvent'
+    UsersUpdateEvent:
+      messageId: usersUpdateEvent
+      name: users_update
+      title: Users Update Event
+      summary: Top blob user rankings changed.
+      payload:
+        $ref: '#/components/schemas/UsersUpdateEvent'
+    PingEvent:
+      messageId: pingEvent
+      name: ping
+      title: Ping Event
+      summary: Application-level heartbeat.
+      payload:
+        $ref: '#/components/schemas/PingEvent'
+    SubscribeMessage:
+      messageId: subscribeMessage
+      name: subscribe
+      title: Subscription Filter
+      summary: Client-to-server event filter.
+      payload:
+        $ref: '#/components/schemas/SubscribeMessage'
+  schemas:
+    SubscribableEventType:
+      type: string
+      enum:
+        - new_block
+        - mempool_update
+        - stats_update
+        - users_update
+    DecimalString:
+      type: string
+      description: Decimal-encoded numeric value. Large integer and ETH values are serialized as strings.
+      example: '0.001'
+    WeiString:
+      type: string
+      description: Decimal-encoded wei value serialized as a string.
+      example: '1000000000'
+    ISODateTime:
+      type: string
+      format: date-time
+      example: '2026-03-09T14:00:00Z'
+    NewBlockEvent:
+      type: object
+      required:
+        - type
+        - data
+      properties:
+        type:
+          type: string
+          enum:
+            - new_block
+        data:
+          $ref: '#/components/schemas/NewBlockData'
+    NewBlockData:
+      type: object
+      required:
+        - block_number
+        - blob_count
+        - timestamp
+        - blobs
+      properties:
+        block_number:
+          type: integer
+          format: int64
+        blob_count:
+          type: integer
+        timestamp:
+          $ref: '#/components/schemas/ISODateTime'
+        blobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/BlobResponse'
+    MempoolUpdateEvent:
+      type: object
+      required:
+        - type
+        - data
+      properties:
+        type:
+          type: string
+          enum:
+            - mempool_update
+        data:
+          $ref: '#/components/schemas/MempoolUpdateData'
+    MempoolUpdateData:
+      type: object
+      required:
+        - action
+        - blob
+      properties:
+        action:
+          type: string
+          enum:
+            - add
+            - remove
+          description: '`add` includes the observed pending blob row. `remove` is a tx-level signal and only includes `tx_hash`, `network_id`, and `network_name`.'
+        blob:
+          $ref: '#/components/schemas/BlobResponse'
+    StatsUpdateEvent:
+      type: object
+      required:
+        - type
+        - data
+      properties:
+        type:
+          type: string
+          enum:
+            - stats_update
+        data:
+          $ref: '#/components/schemas/StatsResponse'
+    UsersUpdateEvent:
+      type: object
+      required:
+        - type
+        - data
+      properties:
+        type:
+          type: string
+          enum:
+            - users_update
+        data:
+          type: array
+          description: Top 10 users for all time, sorted by blob count.
+          items:
+            $ref: '#/components/schemas/UserResponse'
+    PingEvent:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum:
+            - ping
+      description: Heartbeat with no `data` field.
+    SubscribeMessage:
+      type: object
+      required:
+        - subscribe
+      properties:
+        subscribe:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/SubscribableEventType'
+      example:
+        subscribe:
+          - new_block
+          - stats_update
+    BlobResponse:
+      type: object
+      description: |
+        Blob row shape shared with REST blob endpoints. WebSocket `new_block`
+        and `mempool_update` add events include the available blob fields.
+        `mempool_update` remove events are minimal and identify the transaction
+        to remove by `tx_hash`.
+      properties:
+        network_id:
+          type: integer
+        network_name:
+          type: string
+        block_number:
+          type: integer
+          format: int64
+        blob_index:
+          type: integer
+        tx_hash:
+          type: string
+          example: '0xabc123'
+        transaction_url:
+          type: string
+          format: uri
+        from_address:
+          type: string
+          example: '0x0000000000000000000000000000000000000000'
+        from_address_url:
+          type: string
+          format: uri
+        block_url:
+          type: string
+          format: uri
+        user_attribution:
+          type: string
+        blob_size_bytes:
+          type: integer
+          format: int64
+        base_fee_per_blob_gas:
+          $ref: '#/components/schemas/WeiString'
+        base_fee_per_blob_gas_gwei:
+          $ref: '#/components/schemas/DecimalString'
+        tip_per_blob_gas:
+          $ref: '#/components/schemas/WeiString'
+        tip_per_blob_gas_gwei:
+          $ref: '#/components/schemas/DecimalString'
+        total_cost_eth:
+          $ref: '#/components/schemas/DecimalString'
+        timestamp:
+          $ref: '#/components/schemas/ISODateTime'
+        confirmed:
+          type: boolean
+        max_fee_per_blob_gas:
+          $ref: '#/components/schemas/WeiString'
+        max_fee_per_blob_gas_gwei:
+          $ref: '#/components/schemas/DecimalString'
+        blob_gas_used:
+          type: integer
+          format: int64
+        realized_cost_wei:
+          $ref: '#/components/schemas/WeiString'
+        max_cost_wei:
+          $ref: '#/components/schemas/WeiString'
+        fee_cap_headroom_wei:
+          $ref: '#/components/schemas/WeiString'
+        fee_cap_headroom_percent:
+          $ref: '#/components/schemas/DecimalString'
+    StatsResponse:
+      type: object
+      description: Network identity comes from the connection query. `network_id` and `network_name` may be omitted in WebSocket stats updates.
+      required:
+        - total_blobs
+        - total_confirmed_blobs
+        - total_pending_blobs
+        - average_base_fee
+        - average_tip
+        - average_total_cost
+        - last_indexed_block
+        - last_indexed_time
+      properties:
+        network_id:
+          type: integer
+        network_name:
+          type: string
+        total_blobs:
+          type: integer
+        total_confirmed_blobs:
+          type: integer
+        total_pending_blobs:
+          type: integer
+        average_base_fee:
+          $ref: '#/components/schemas/WeiString'
+        average_tip:
+          $ref: '#/components/schemas/WeiString'
+        average_total_cost:
+          $ref: '#/components/schemas/DecimalString'
+        last_indexed_block:
+          type: integer
+          format: int64
+        last_indexed_time:
+          $ref: '#/components/schemas/ISODateTime'
+    UserResponse:
+      type: object
+      required:
+        - network_id
+        - address
+        - blob_count
+        - total_cost_eth
+        - last_timestamp
+      properties:
+        network_id:
+          type: integer
+        network_name:
+          type: string
+        address:
+          type: string
+        name:
+          type: string
+        category:
+          type: string
+        blob_count:
+          type: integer
+        total_cost_eth:
+          $ref: '#/components/schemas/DecimalString'
+        last_timestamp:
+          $ref: '#/components/schemas/ISODateTime'
+        blob_share_percent:
+          type: number
+          format: double
+        spend_share_percent:
+          type: number
+          format: double
