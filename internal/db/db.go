@@ -164,6 +164,50 @@ func (db *DB) GetIndexedBlockHash(ctx context.Context, networkID int, blockNumbe
 	return hash, nil
 }
 
+// GetFirstUnindexedBlock returns the first missing indexed_blocks row in the
+// inclusive range. If the range is fully indexed, it returns targetBlock + 1.
+func (db *DB) GetFirstUnindexedBlock(ctx context.Context, networkID int, startBlock, targetBlock uint64) (uint64, error) {
+	if startBlock > targetBlock {
+		return targetBlock + 1, nil
+	}
+
+	var blockNumber uint64
+	query := `
+		WITH indexed AS (
+			SELECT
+				block_number,
+				LEAD(block_number) OVER (ORDER BY block_number) AS next_block
+			FROM indexed_blocks
+			WHERE network_id = $1
+				AND block_number >= $2
+				AND block_number <= $3
+		),
+		candidates AS (
+			SELECT $2::bigint AS block_number
+			WHERE NOT EXISTS (
+				SELECT 1 FROM indexed_blocks
+				WHERE network_id = $1 AND block_number = $2
+			)
+			UNION ALL
+			SELECT block_number + 1
+			FROM indexed
+			WHERE next_block IS NOT NULL
+				AND next_block > block_number + 1
+			UNION ALL
+			SELECT MAX(block_number) + 1
+			FROM indexed
+			HAVING MAX(block_number) IS NOT NULL
+				AND MAX(block_number) < $3
+		)
+		SELECT COALESCE(MIN(block_number), $3::bigint + 1) FROM candidates
+	`
+	if err := db.GetContext(ctx, &blockNumber, query, networkID, startBlock, targetBlock); err != nil {
+		return 0, fmt.Errorf("failed to get first unindexed block for network %d range %d-%d: %w", networkID, startBlock, targetBlock, err)
+	}
+
+	return blockNumber, nil
+}
+
 // DeleteBlobsFromBlock deletes all blobs at or above the given block number for a network.
 func (db *DB) DeleteBlobsFromBlock(ctx context.Context, networkID int, fromBlock int64) error {
 	query := "DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2"

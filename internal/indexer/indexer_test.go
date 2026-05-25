@@ -180,12 +180,27 @@ func TestCalculateBlobMetrics_UsesRealizedBlobBaseFeeCost(t *testing.T) {
 func TestDetermineStartBlock_NumericBlock(t *testing.T) {
 	idx := newTestIndexer()
 	idx.network.StartBlock = "12345"
+	idx.lastIndexedBlock = 0
 	block, err := idx.determineStartBlock()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if block != 12345 {
 		t.Errorf("expected 12345, got %d", block)
+	}
+}
+
+func TestDetermineStartBlock_NumericBlockWithExistingProgress(t *testing.T) {
+	idx := newTestIndexer()
+	idx.network.StartBlock = "12345"
+	idx.lastIndexedBlock = 20000
+
+	block, err := idx.determineStartBlock()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if block != 20001 {
+		t.Errorf("expected 20001, got %d", block)
 	}
 }
 

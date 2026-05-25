@@ -129,6 +129,7 @@ const (
 	MetadataWebSocketFreshnessAt = "websocket_freshness_at"
 	MetadataBackfillActive       = "backfill_active"
 	MetadataBackfillStartBlock   = "backfill_start_block"
+	MetadataBackfillCurrentBlock = "backfill_current_block"
 	MetadataBackfillTargetBlock  = "backfill_target_block"
 	MetadataBackfillUpdatedAt    = "backfill_updated_at"
 	MetadataBackfillCompletedAt  = "backfill_completed_at"

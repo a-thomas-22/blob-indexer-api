@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,6 +58,18 @@ var errReorgDetected = errors.New("chain reorganization detected")
 // BlockTask represents a task to process a block
 type BlockTask struct {
 	BlockNumber uint64
+}
+
+type indexerMetadataRow struct {
+	Key   string `db:"key"`
+	Value string `db:"value"`
+}
+
+type backfillCursorState struct {
+	active       bool
+	activeSet    bool
+	currentBlock *uint64
+	targetBlock  *uint64
 }
 
 type blobMetrics struct {
@@ -139,13 +150,11 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		RequestTimeout:  cfg.Attribution.BlobListRequestTimeout,
 	})
 
-	// Determine the number of workers: use config value, or fall back to CPU-based heuristic
+	// Determine the number of workers. The configured/default value is honored
+	// directly so pods do not silently fan out based on node CPU count.
 	workerCount := cfg.Indexer.WorkerCount
 	if workerCount <= 0 {
 		workerCount = DefaultWorkerCount
-	}
-	if runtime.NumCPU() > 2 && cfg.Indexer.WorkerCount == DefaultWorkerCount {
-		workerCount = runtime.NumCPU() - 1 // Leave one core free
 	}
 
 	// Check if the client supports websockets
@@ -229,10 +238,11 @@ func (i *Indexer) updateWebSocketFreshness(observedAt time.Time) {
 	)
 }
 
-func (i *Indexer) updateBackfillStatus(active bool, startBlock, targetBlock uint64, observedAt time.Time) {
+func (i *Indexer) updateBackfillStatus(active bool, startBlock, currentBlock, targetBlock uint64, observedAt time.Time) {
 	updates := []metadataUpdate{
 		{key: models.MetadataBackfillActive, value: strconv.FormatBool(active)},
 		{key: models.MetadataBackfillStartBlock, value: strconv.FormatUint(startBlock, 10)},
+		{key: models.MetadataBackfillCurrentBlock, value: strconv.FormatUint(currentBlock, 10)},
 		{key: models.MetadataBackfillTargetBlock, value: strconv.FormatUint(targetBlock, 10)},
 		{key: models.MetadataBackfillUpdatedAt, value: models.FormatMetadataTimestamp(observedAt)},
 	}
@@ -398,47 +408,34 @@ func (i *Indexer) getLastIndexedBlock() (uint64, error) {
 
 // determineStartBlock determines the starting block for indexing
 func (i *Indexer) determineStartBlock() (uint64, error) {
-	// If a specific start block is configured, use that
+	lastBlock := atomic.LoadUint64(&i.lastIndexedBlock)
+
 	if i.network.StartBlock != "" {
-		// Check if it's a relative block number (e.g., "LATEST-1000")
-		if strings.HasPrefix(i.network.StartBlock, "LATEST") {
-			// Get the latest block number
-			latestBlock, err := i.ethClient.GetLatestBlockNumber(i.ctx)
-			if err != nil {
-				return 0, fmt.Errorf("failed to get latest block number: %w", err)
-			}
-			i.updateCurrentChainHead(latestBlock, time.Now())
-
-			// Parse the offset
-			parts := strings.Split(i.network.StartBlock, "-")
-			if len(parts) == 2 {
-				offset, err := strconv.ParseUint(parts[1], 10, 64)
-				if err != nil {
-					return 0, fmt.Errorf("failed to parse offset in StartBlock: %w", err)
-				}
-
-				// Calculate the start block
-				if offset > latestBlock {
-					return 0, nil
-				}
-				return latestBlock - offset, nil
-			}
-
-			// No offset, use the latest block
-			return latestBlock, nil
-		}
-
-		// Parse the block number
-		blockNumber, err := strconv.ParseUint(i.network.StartBlock, 10, 64)
+		configuredStart, targetBlock, targetKnown, err := i.resolveConfiguredStartBlock()
 		if err != nil {
-			return 0, fmt.Errorf("failed to parse StartBlock: %w", err)
+			return 0, err
 		}
 
-		return blockNumber, nil
+		if lastBlock > 0 {
+			resumeBlock, ok, err := i.backfillResumeBlock(configuredStart, targetBlock, targetKnown)
+			if err != nil {
+				return 0, err
+			}
+			if ok {
+				return resumeBlock, nil
+			}
+
+			nextBlock := lastBlock + 1
+			if nextBlock < configuredStart {
+				return configuredStart, nil
+			}
+			return nextBlock, nil
+		}
+
+		return configuredStart, nil
 	}
 
 	// If we have a last indexed block, start from the next block
-	lastBlock := atomic.LoadUint64(&i.lastIndexedBlock)
 	if lastBlock > 0 {
 		return lastBlock + 1, nil
 	}
@@ -446,6 +443,141 @@ func (i *Indexer) determineStartBlock() (uint64, error) {
 	// Otherwise, start from the EIP-4844 activation block (this is a placeholder)
 	// In a real implementation, you would use the actual EIP-4844 activation block
 	return 0, nil
+}
+
+func (i *Indexer) resolveConfiguredStartBlock() (startBlock, targetBlock uint64, targetKnown bool, err error) {
+	if strings.HasPrefix(i.network.StartBlock, "LATEST") {
+		latestBlock, err := i.ethClient.GetLatestBlockNumber(i.ctx)
+		if err != nil {
+			return 0, 0, false, fmt.Errorf("failed to get latest block number: %w", err)
+		}
+		i.updateCurrentChainHead(latestBlock, time.Now())
+
+		parts := strings.Split(i.network.StartBlock, "-")
+		if len(parts) == 2 {
+			offset, err := strconv.ParseUint(parts[1], 10, 64)
+			if err != nil {
+				return 0, 0, false, fmt.Errorf("failed to parse offset in StartBlock: %w", err)
+			}
+
+			if offset > latestBlock {
+				return 0, latestBlock, true, nil
+			}
+			return latestBlock - offset, latestBlock, true, nil
+		}
+
+		return latestBlock, latestBlock, true, nil
+	}
+
+	blockNumber, err := strconv.ParseUint(i.network.StartBlock, 10, 64)
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("failed to parse StartBlock: %w", err)
+	}
+	return blockNumber, 0, false, nil
+}
+
+func (i *Indexer) backfillResumeBlock(configuredStart, targetBlock uint64, targetKnown bool) (resumeBlock uint64, ok bool, err error) {
+	if i.db == nil {
+		return 0, false, nil
+	}
+
+	state, err := i.getBackfillCursorState()
+	if err != nil {
+		return 0, false, err
+	}
+	if !state.activeSet || !state.active {
+		return 0, false, nil
+	}
+
+	if state.currentBlock != nil {
+		if *state.currentBlock < configuredStart {
+			logger.Info("Resuming active backfill from configured start",
+				zap.String("network", i.network.Name),
+				zap.Uint64("configured_start_block", configuredStart),
+				zap.Uint64("backfill_current_block", *state.currentBlock))
+			return configuredStart, true, nil
+		}
+		logger.Info("Resuming active backfill from metadata cursor",
+			zap.String("network", i.network.Name),
+			zap.Uint64("backfill_current_block", *state.currentBlock),
+			zap.Uint64("resume_block", *state.currentBlock+1))
+		return *state.currentBlock + 1, true, nil
+	}
+
+	if state.targetBlock != nil {
+		targetBlock = *state.targetBlock
+		targetKnown = true
+	}
+	if !targetKnown {
+		latestBlock, err := i.ethClient.GetLatestBlockNumber(i.ctx)
+		if err != nil {
+			return 0, false, fmt.Errorf("failed to get latest block number for backfill resume: %w", err)
+		}
+		targetBlock = latestBlock
+		i.updateCurrentChainHead(latestBlock, time.Now())
+	}
+	if configuredStart > targetBlock {
+		return targetBlock + 1, true, nil
+	}
+
+	resumeBlock, err = i.db.GetFirstUnindexedBlock(i.ctx, i.network.ChainID, configuredStart, targetBlock)
+	if err != nil {
+		return 0, false, err
+	}
+	logger.Info("Resuming active backfill from first unindexed block",
+		zap.String("network", i.network.Name),
+		zap.Uint64("configured_start_block", configuredStart),
+		zap.Uint64("target_block", targetBlock),
+		zap.Uint64("resume_block", resumeBlock))
+	return resumeBlock, true, nil
+}
+
+func (i *Indexer) getBackfillCursorState() (backfillCursorState, error) {
+	var rows []indexerMetadataRow
+	query := `
+		SELECT key, value
+		FROM indexer_metadata
+		WHERE network_id = $1
+			AND key IN ($2, $3, $4)
+	`
+	if err := i.db.SelectContext(
+		i.ctx,
+		&rows,
+		query,
+		i.network.ChainID,
+		models.MetadataBackfillActive,
+		models.MetadataBackfillCurrentBlock,
+		models.MetadataBackfillTargetBlock,
+	); err != nil {
+		return backfillCursorState{}, fmt.Errorf("failed to get backfill cursor metadata: %w", err)
+	}
+
+	var state backfillCursorState
+	for _, row := range rows {
+		switch row.Key {
+		case models.MetadataBackfillActive:
+			active, err := strconv.ParseBool(row.Value)
+			if err != nil {
+				return backfillCursorState{}, fmt.Errorf("failed to parse backfill active metadata: %w", err)
+			}
+			state.active = active
+			state.activeSet = true
+		case models.MetadataBackfillCurrentBlock:
+			block, err := strconv.ParseUint(row.Value, 10, 64)
+			if err != nil {
+				return backfillCursorState{}, fmt.Errorf("failed to parse backfill current block metadata: %w", err)
+			}
+			state.currentBlock = &block
+		case models.MetadataBackfillTargetBlock:
+			block, err := strconv.ParseUint(row.Value, 10, 64)
+			if err != nil {
+				return backfillCursorState{}, fmt.Errorf("failed to parse backfill target block metadata: %w", err)
+			}
+			state.targetBlock = &block
+		}
+	}
+
+	return state, nil
 }
 
 // blockProcessingWorker processes blocks from the task channel with inline retries
@@ -610,7 +742,7 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 		// If we're caught up, wait for the next tick
 		if currentBlock > latestBlock {
 			if backfillActive {
-				i.updateBackfillStatus(false, backfillStartBlock, latestBlock, observedAt)
+				i.updateBackfillStatus(false, backfillStartBlock, latestBlock, latestBlock, observedAt)
 				backfillActive = false
 			}
 			continue
@@ -620,7 +752,6 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 			backfillStartBlock = currentBlock
 			backfillActive = true
 		}
-		i.updateBackfillStatus(true, backfillStartBlock, latestBlock, observedAt)
 
 		// Process blocks in batches
 		endBlock := currentBlock + uint64(i.batchSize) - 1
@@ -632,6 +763,7 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 			zap.String("network", i.network.Name),
 			zap.Uint64("start_block", currentBlock),
 			zap.Uint64("end_block", endBlock))
+		i.updateBackfillStatus(true, backfillStartBlock, endBlock, latestBlock, observedAt)
 
 		// Queue blocks for processing — blocks on send until channel has space
 		for blockNumber := currentBlock; blockNumber <= endBlock; blockNumber++ {
