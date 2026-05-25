@@ -95,6 +95,18 @@ func (c *Client) IsWebsocket() bool {
 	return c.isWebsocket
 }
 
+// GetChainID retrieves the chain ID reported by the connected RPC node.
+func (c *Client) GetChainID(ctx context.Context) (*big.Int, error) {
+	chainID, err := c.ethClient.ChainID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get chain ID: %w", err)
+	}
+	if chainID == nil {
+		return nil, fmt.Errorf("chain ID is missing")
+	}
+	return chainID, nil
+}
+
 // SubscribeToNewHeads subscribes to new block headers
 func (c *Client) SubscribeToNewHeads(ctx context.Context, id string) (*BlockSubscription, error) {
 	if !c.isWebsocket {

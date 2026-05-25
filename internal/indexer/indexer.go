@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	geth "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -708,6 +709,12 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 	// Get the transaction details
 	tx, isPending, err := i.ethClient.GetTransactionByHash(i.ctx, hash)
 	if err != nil {
+		if errors.Is(err, geth.NotFound) {
+			logger.Debug("Pending transaction no longer available",
+				zap.String("network", i.network.Name),
+				zap.String("tx_hash", hash.Hex()))
+			return
+		}
 		logger.Error("Failed to get pending transaction",
 			zap.String("network", i.network.Name),
 			zap.String("tx_hash", hash.Hex()),

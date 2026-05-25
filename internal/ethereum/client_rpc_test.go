@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -40,6 +41,8 @@ type rpcEthService struct {
 	txByHash    *types.Transaction
 	txByHashErr error
 	txByHashNil bool
+	chainID     *big.Int
+	chainIDErr  error
 }
 
 func (e *rpcEthService) headerPayload(number uint64) (map[string]interface{}, error) {
@@ -125,6 +128,17 @@ func (e *rpcEthService) GetTransactionByHash(_ context.Context, _ common.Hash) (
 		return nil, nil
 	}
 	return e.txPayload(e.txByHash, false)
+}
+
+func (e *rpcEthService) ChainId(_ context.Context) (*hexutil.Big, error) { //nolint:revive // RPC exposes eth_chainId from ChainId.
+	if e.chainIDErr != nil {
+		return nil, e.chainIDErr
+	}
+	chainID := e.chainID
+	if chainID == nil {
+		chainID = big.NewInt(1)
+	}
+	return (*hexutil.Big)(new(big.Int).Set(chainID)), nil
 }
 
 func (e *rpcEthService) NewHeads(ctx context.Context) (*rpc.Subscription, error) {
@@ -380,6 +394,32 @@ func TestGetLatestBlockNumber_MissingNumber(t *testing.T) {
 	if _, err := c.GetLatestBlockNumber(context.Background()); err == nil {
 		t.Fatal("expected error when latest header number is missing")
 	}
+}
+
+func TestGetChainID(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		ethSvc := &rpcEthService{chainID: big.NewInt(11155111)}
+		c := newRPCClient(t, ethSvc, &rpcTxpoolService{}, false)
+		defer c.Close()
+
+		chainID, err := c.GetChainID(context.Background())
+		if err != nil {
+			t.Fatalf("GetChainID() error = %v", err)
+		}
+		if chainID.Int64() != 11155111 {
+			t.Fatalf("expected chain ID 11155111, got %s", chainID)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		ethSvc := &rpcEthService{chainIDErr: errors.New("chain unavailable")}
+		c := newRPCClient(t, ethSvc, &rpcTxpoolService{}, false)
+		defer c.Close()
+
+		if _, err := c.GetChainID(context.Background()); err == nil {
+			t.Fatal("expected GetChainID to fail")
+		}
+	})
 }
 
 func TestGetPendingTransactions_FromPendingBlock(t *testing.T) {
