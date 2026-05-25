@@ -69,6 +69,102 @@ networks:
 	}
 }
 
+func TestLoad_CORSDefaults(t *testing.T) {
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "config.yaml")
+	configContent := `
+database:
+  url: "postgres://localhost:5432/db"
+networks:
+  - name: testnet
+    chain_id: 1
+    rpc_url: "http://localhost:8545"
+    start_block: "0"
+    enabled: true
+`
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CONFIG_PATH", configFile)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !cfg.CORS.Enabled {
+		t.Fatal("expected CORS to be enabled by default")
+	}
+	assertStringSlicesEqual(t, cfg.CORS.AllowedOrigins, []string{
+		defaultCORSOriginLocalhost3000,
+		defaultCORSOriginLocalhost3001,
+		defaultCORSOriginLoopback3000,
+		defaultCORSOriginLoopback3001,
+	})
+	assertStringSlicesEqual(t, cfg.CORS.AllowedMethods, []string{corsMethodGET, corsMethodOptions})
+	assertStringSlicesEqual(t, cfg.CORS.AllowedHeaders, []string{corsHeaderAccept, corsHeaderContentType, corsHeaderAuthorization})
+	assertStringSlicesEqual(t, cfg.CORS.ExposedHeaders, []string{corsHeaderContentLength, corsHeaderETag})
+	if cfg.CORS.AllowCredentials {
+		t.Fatal("expected credentials to be disabled by default")
+	}
+	if cfg.CORS.MaxAgeSeconds != 86400 {
+		t.Fatalf("expected max age 86400, got %d", cfg.CORS.MaxAgeSeconds)
+	}
+}
+
+func TestLoad_CORSEnvOverrides(t *testing.T) {
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "config.yaml")
+	configContent := `
+database:
+  url: "postgres://localhost:5432/db"
+networks:
+  - name: testnet
+    chain_id: 1
+    rpc_url: "http://localhost:8545"
+    start_block: "0"
+    enabled: true
+`
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CONFIG_PATH", configFile)
+	t.Setenv("CORS_ENABLED", "true")
+	t.Setenv("CORS_ALLOWED_ORIGINS", "https://app.example.com, http://localhost:3000")
+	t.Setenv("CORS_ALLOWED_ORIGIN_PATTERNS", "https://*.vercel.app")
+	t.Setenv("CORS_ALLOW_ALL_ORIGINS", "false")
+	t.Setenv("CORS_ALLOWED_METHODS", "GET, OPTIONS")
+	t.Setenv("CORS_ALLOWED_HEADERS", "Accept, Content-Type, Authorization")
+	t.Setenv("CORS_EXPOSED_HEADERS", "Content-Length, ETag")
+	t.Setenv("CORS_ALLOW_CREDENTIALS", "true")
+	t.Setenv("CORS_MAX_AGE_SECONDS", "600")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !cfg.CORS.Enabled {
+		t.Fatal("expected CORS to be enabled")
+	}
+	assertStringSlicesEqual(t, cfg.CORS.AllowedOrigins, []string{"https://app.example.com", defaultCORSOriginLocalhost3000})
+	assertStringSlicesEqual(t, cfg.CORS.AllowedOriginPatterns, []string{"https://*.vercel.app"})
+	assertStringSlicesEqual(t, cfg.CORS.AllowedMethods, []string{corsMethodGET, corsMethodOptions})
+	assertStringSlicesEqual(t, cfg.CORS.AllowedHeaders, []string{corsHeaderAccept, corsHeaderContentType, corsHeaderAuthorization})
+	assertStringSlicesEqual(t, cfg.CORS.ExposedHeaders, []string{corsHeaderContentLength, corsHeaderETag})
+	if !cfg.CORS.AllowCredentials {
+		t.Fatal("expected credentials to be enabled")
+	}
+	if cfg.CORS.AllowAllOrigins {
+		t.Fatal("expected allow all origins to be disabled")
+	}
+	if cfg.CORS.MaxAgeSeconds != 600 {
+		t.Fatalf("expected max age 600, got %d", cfg.CORS.MaxAgeSeconds)
+	}
+}
+
 func TestLoad_DBURLOverride(t *testing.T) {
 	dir := t.TempDir()
 	configFile := filepath.Join(dir, "config.yaml")
@@ -528,6 +624,18 @@ networks:
 	_, err := Load()
 	if err == nil {
 		t.Error("expected error for invalid mempool TTL")
+	}
+}
+
+func assertStringSlicesEqual(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected %v, got %v", want, got)
+		}
 	}
 }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.5.1...blob-indexer-api-v0.6.0) (2026-05-25)
+
+
+### Features
+
+* add configurable API CORS ([#196](https://github.com/a-thomas-22/blob-indexer-api/issues/196)) ([570d5c6](https://github.com/a-thomas-22/blob-indexer-api/commit/570d5c660ac80a6e0d0401c79a8e9606a275c73d))
+
 ## [0.5.1](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.5.0...blob-indexer-api-v0.5.1) (2026-05-25)
 
 

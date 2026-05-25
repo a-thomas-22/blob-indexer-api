@@ -7,6 +7,28 @@ server:
   dev_port: 8081
   dev_mode: true
 
+cors:
+  enabled: true
+  allowed_origins:
+    - "http://localhost:3000"
+    - "http://localhost:3001"
+    - "http://127.0.0.1:3000"
+    - "http://127.0.0.1:3001"
+  allowed_origin_patterns: []
+  allow_all_origins: false
+  allowed_methods:
+    - "GET"
+    - "OPTIONS"
+  allowed_headers:
+    - "Accept"
+    - "Content-Type"
+    - "Authorization"
+  exposed_headers:
+    - "Content-Length"
+    - "ETag"
+  allow_credentials: false
+  max_age_seconds: 86400
+
 logging:
   level: "info"
   format: "json"
