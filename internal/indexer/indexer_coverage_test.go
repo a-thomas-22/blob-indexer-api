@@ -270,8 +270,8 @@ func TestNew_InitializesIndexer(t *testing.T) {
 	if idx.indexerVersion != "v1" {
 		t.Fatalf("expected version v1, got %q", idx.indexerVersion)
 	}
-	if idx.workerCount < 1 {
-		t.Fatalf("expected workerCount >= 1, got %d", idx.workerCount)
+	if idx.workerCount != DefaultWorkerCount {
+		t.Fatalf("expected workerCount %d, got %d", DefaultWorkerCount, idx.workerCount)
 	}
 }
 
@@ -337,6 +337,248 @@ func TestDetermineStartBlock_LatestVariants(t *testing.T) {
 	_, err = idx.determineStartBlock()
 	if err == nil {
 		t.Fatal("expected error when latest block lookup fails")
+	}
+}
+
+func TestDetermineStartBlock_ResumesActiveBackfillCursor(t *testing.T) {
+	idx := newTestIndexer()
+	idx.network.StartBlock = "100"
+	atomic.StoreUint64(&idx.lastIndexedBlock, 1_000)
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	rows := sqlmock.NewRows([]string{"key", "value"}).
+		AddRow(models.MetadataBackfillActive, "true").
+		AddRow(models.MetadataBackfillCurrentBlock, "250").
+		AddRow(models.MetadataBackfillTargetBlock, "1000")
+	mock.ExpectQuery("SELECT key, value").
+		WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
+		WillReturnRows(rows)
+
+	start, err := idx.determineStartBlock()
+	if err != nil {
+		t.Fatalf("determineStartBlock() error = %v", err)
+	}
+	if start != 251 {
+		t.Fatalf("expected backfill resume block 251, got %d", start)
+	}
+}
+
+func TestDetermineStartBlock_InfersLegacyBackfillCursor(t *testing.T) {
+	idx := newTestIndexer()
+	idx.network.StartBlock = "100"
+	atomic.StoreUint64(&idx.lastIndexedBlock, 1_000)
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	rows := sqlmock.NewRows([]string{"key", "value"}).
+		AddRow(models.MetadataBackfillActive, "true").
+		AddRow(models.MetadataBackfillTargetBlock, "1000")
+	mock.ExpectQuery("SELECT key, value").
+		WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
+		WillReturnRows(rows)
+	mock.ExpectQuery("WITH indexed AS").
+		WithArgs(idx.network.ChainID, uint64(100), uint64(1000)).
+		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(275)))
+
+	start, err := idx.determineStartBlock()
+	if err != nil {
+		t.Fatalf("determineStartBlock() error = %v", err)
+	}
+	if start != 275 {
+		t.Fatalf("expected inferred resume block 275, got %d", start)
+	}
+}
+
+func TestDetermineStartBlock_CompletedBackfillUsesLiveProgress(t *testing.T) {
+	idx := newTestIndexer()
+	idx.network.StartBlock = "100"
+	atomic.StoreUint64(&idx.lastIndexedBlock, 1_000)
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	rows := sqlmock.NewRows([]string{"key", "value"}).
+		AddRow(models.MetadataBackfillActive, "false").
+		AddRow(models.MetadataBackfillCurrentBlock, "1000").
+		AddRow(models.MetadataBackfillTargetBlock, "1000")
+	mock.ExpectQuery("SELECT key, value").
+		WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
+		WillReturnRows(rows)
+
+	start, err := idx.determineStartBlock()
+	if err != nil {
+		t.Fatalf("determineStartBlock() error = %v", err)
+	}
+	if start != 1001 {
+		t.Fatalf("expected live resume block 1001, got %d", start)
+	}
+}
+
+func TestBackfillResumeBlock_Branches(t *testing.T) {
+	t.Run("no database", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.db = nil
+
+		resumeBlock, ok, err := idx.backfillResumeBlock(100, 200, true)
+		if err != nil {
+			t.Fatalf("backfillResumeBlock() error = %v", err)
+		}
+		if ok || resumeBlock != 0 {
+			t.Fatalf("expected no backfill resume without database, got block=%d ok=%t", resumeBlock, ok)
+		}
+	})
+
+	t.Run("active cursor before configured start", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		rows := sqlmock.NewRows([]string{"key", "value"}).
+			AddRow(models.MetadataBackfillActive, "true").
+			AddRow(models.MetadataBackfillCurrentBlock, "50")
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
+			WillReturnRows(rows)
+
+		resumeBlock, ok, err := idx.backfillResumeBlock(100, 200, true)
+		if err != nil {
+			t.Fatalf("backfillResumeBlock() error = %v", err)
+		}
+		if !ok || resumeBlock != 100 {
+			t.Fatalf("expected configured-start resume, got block=%d ok=%t", resumeBlock, ok)
+		}
+	})
+
+	t.Run("inactive metadata", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		rows := sqlmock.NewRows([]string{"key", "value"}).
+			AddRow(models.MetadataBackfillActive, "false")
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
+			WillReturnRows(rows)
+
+		resumeBlock, ok, err := idx.backfillResumeBlock(100, 200, true)
+		if err != nil {
+			t.Fatalf("backfillResumeBlock() error = %v", err)
+		}
+		if ok || resumeBlock != 0 {
+			t.Fatalf("expected inactive metadata to skip resume, got block=%d ok=%t", resumeBlock, ok)
+		}
+	})
+
+	t.Run("target unknown uses latest block", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.ethClient, _ = newMockEthClient(t, 120)
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		rows := sqlmock.NewRows([]string{"key", "value"}).
+			AddRow(models.MetadataBackfillActive, "true")
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
+			WillReturnRows(rows)
+		mock.ExpectExec("INSERT INTO indexer_metadata").
+			WithArgs(idx.network.ChainID, models.MetadataCurrentChainHead, "120").
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec("INSERT INTO indexer_metadata").
+			WithArgs(idx.network.ChainID, models.MetadataChainHeadUpdatedAt, sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectQuery("WITH indexed AS").
+			WithArgs(idx.network.ChainID, uint64(100), uint64(120)).
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(117)))
+
+		resumeBlock, ok, err := idx.backfillResumeBlock(100, 0, false)
+		if err != nil {
+			t.Fatalf("backfillResumeBlock() error = %v", err)
+		}
+		if !ok || resumeBlock != 117 {
+			t.Fatalf("expected inferred resume block 117, got block=%d ok=%t", resumeBlock, ok)
+		}
+	})
+
+	t.Run("configured start after target", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		rows := sqlmock.NewRows([]string{"key", "value"}).
+			AddRow(models.MetadataBackfillActive, "true").
+			AddRow(models.MetadataBackfillTargetBlock, "90")
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
+			WillReturnRows(rows)
+
+		resumeBlock, ok, err := idx.backfillResumeBlock(100, 0, false)
+		if err != nil {
+			t.Fatalf("backfillResumeBlock() error = %v", err)
+		}
+		if !ok || resumeBlock != 91 {
+			t.Fatalf("expected target+1 resume, got block=%d ok=%t", resumeBlock, ok)
+		}
+	})
+
+	t.Run("metadata lookup error", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
+			WillReturnError(errors.New("metadata failed"))
+
+		_, _, err := idx.backfillResumeBlock(100, 200, true)
+		if err == nil || !strings.Contains(err.Error(), "failed to get backfill cursor metadata") {
+			t.Fatalf("expected metadata error, got %v", err)
+		}
+	})
+}
+
+func TestGetBackfillCursorState_ParseErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		key       string
+		value     string
+		wantError string
+	}{
+		{
+			name:      "active",
+			key:       models.MetadataBackfillActive,
+			value:     "not-bool",
+			wantError: "failed to parse backfill active metadata",
+		},
+		{
+			name:      "current block",
+			key:       models.MetadataBackfillCurrentBlock,
+			value:     "not-uint",
+			wantError: "failed to parse backfill current block metadata",
+		},
+		{
+			name:      "target block",
+			key:       models.MetadataBackfillTargetBlock,
+			value:     "not-uint",
+			wantError: "failed to parse backfill target block metadata",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx := newTestIndexer()
+			idxDB, mock := newMockIndexerDB(t)
+			idx.db = idxDB
+
+			rows := sqlmock.NewRows([]string{"key", "value"}).AddRow(tt.key, tt.value)
+			mock.ExpectQuery("SELECT key, value").
+				WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
+				WillReturnRows(rows)
+
+			_, err := idx.getBackfillCursorState()
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("expected %q error, got %v", tt.wantError, err)
+			}
+		})
 	}
 }
 
@@ -629,13 +871,16 @@ func TestUpdateBackfillStatus(t *testing.T) {
 		WithArgs(idx.network.ChainID, models.MetadataBackfillStartBlock, "10").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataBackfillCurrentBlock, "15").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
 		WithArgs(idx.network.ChainID, models.MetadataBackfillTargetBlock, "20").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO indexer_metadata").
 		WithArgs(idx.network.ChainID, models.MetadataBackfillUpdatedAt, models.FormatMetadataTimestamp(observedAt)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	idx.updateBackfillStatus(true, 10, 20, observedAt)
+	idx.updateBackfillStatus(true, 10, 15, 20, observedAt)
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sqlmock expectations: %v", err)
 	}

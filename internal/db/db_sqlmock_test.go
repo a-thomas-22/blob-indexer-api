@@ -270,6 +270,53 @@ func TestGetIndexedBlockHash(t *testing.T) {
 	})
 }
 
+func TestGetFirstUnindexedBlock(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		rows := sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(105))
+		mock.ExpectQuery("WITH indexed AS").
+			WithArgs(1, uint64(100), uint64(200)).
+			WillReturnRows(rows)
+
+		block, err := db.GetFirstUnindexedBlock(context.Background(), 1, 100, 200)
+		if err != nil {
+			t.Fatalf("GetFirstUnindexedBlock() error = %v", err)
+		}
+		if block != 105 {
+			t.Fatalf("expected 105, got %d", block)
+		}
+	})
+
+	t.Run("empty range", func(t *testing.T) {
+		db, _ := newMockDB(t)
+		block, err := db.GetFirstUnindexedBlock(context.Background(), 1, 200, 100)
+		if err != nil {
+			t.Fatalf("GetFirstUnindexedBlock() error = %v", err)
+		}
+		if block != 101 {
+			t.Fatalf("expected target+1 for empty range, got %d", block)
+		}
+	})
+
+	t.Run("query error", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectQuery("WITH indexed AS").
+			WithArgs(1, uint64(100), uint64(200)).
+			WillReturnError(errors.New("query failed"))
+
+		errBlock, err := db.GetFirstUnindexedBlock(context.Background(), 1, 100, 200)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if errBlock != 0 {
+			t.Fatalf("expected zero block on error, got %d", errBlock)
+		}
+		if !strings.Contains(err.Error(), "failed to get first unindexed block") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
 func TestDeleteFromBlockMethods(t *testing.T) {
 	db, mock := newMockDB(t)
 

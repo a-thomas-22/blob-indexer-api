@@ -461,6 +461,7 @@ const (
 					'` + models.MetadataWebSocketFreshnessAt + `',
 					'` + models.MetadataBackfillActive + `',
 					'` + models.MetadataBackfillStartBlock + `',
+					'` + models.MetadataBackfillCurrentBlock + `',
 					'` + models.MetadataBackfillTargetBlock + `',
 					'` + models.MetadataBackfillUpdatedAt + `',
 					'` + models.MetadataBackfillCompletedAt + `'

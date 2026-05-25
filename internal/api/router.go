@@ -57,12 +57,13 @@ type networkFreshness struct {
 }
 
 type backfillMetadata struct {
-	Active      bool
-	activeSet   bool
-	StartBlock  *uint64
-	TargetBlock *uint64
-	UpdatedAt   *time.Time
-	CompletedAt *time.Time
+	Active       bool
+	activeSet    bool
+	StartBlock   *uint64
+	CurrentBlock *uint64
+	TargetBlock  *uint64
+	UpdatedAt    *time.Time
+	CompletedAt  *time.Time
 }
 
 type routerOptions struct {
@@ -482,6 +483,11 @@ func (a *API) getNetworkFreshnessFromDB(ctx context.Context, networkID int) netw
 			if ok {
 				freshness.backfill.StartBlock = &block
 			}
+		case models.MetadataBackfillCurrentBlock:
+			block, ok := parseMetadataUint(row.Value)
+			if ok {
+				freshness.backfill.CurrentBlock = &block
+			}
 		case models.MetadataBackfillTargetBlock:
 			block, ok := parseMetadataUint(row.Value)
 			if ok {
@@ -528,16 +534,20 @@ func parseMetadataTimestamp(value string) (time.Time, bool) {
 
 func (f networkFreshness) backfillResponse() BackfillResponse {
 	targetBlock := maxUint64Ptr(f.backfill.TargetBlock, f.CurrentChainHead)
+	currentBlock := f.LastIndexedBlock
+	if f.backfill.CurrentBlock != nil {
+		currentBlock = *f.backfill.CurrentBlock
+	}
 	response := BackfillResponse{
 		Active:       f.backfill.Active,
 		StartBlock:   f.backfill.StartBlock,
-		CurrentBlock: f.LastIndexedBlock,
+		CurrentBlock: currentBlock,
 		TargetBlock:  targetBlock,
 		UpdatedAt:    f.backfill.UpdatedAt,
 		CompletedAt:  f.backfill.CompletedAt,
 	}
 
-	if targetBlock != nil && *targetBlock <= f.LastIndexedBlock {
+	if targetBlock != nil && *targetBlock <= currentBlock {
 		response.Active = false
 	} else if !f.backfill.activeSet && targetBlock != nil {
 		response.Active = true
@@ -545,14 +555,14 @@ func (f networkFreshness) backfillResponse() BackfillResponse {
 
 	if targetBlock != nil {
 		remaining := uint64(0)
-		if *targetBlock > f.LastIndexedBlock {
-			remaining = *targetBlock - f.LastIndexedBlock
+		if *targetBlock > currentBlock {
+			remaining = *targetBlock - currentBlock
 		}
 		response.RemainingBlocks = &remaining
 	}
 
 	if f.backfill.StartBlock != nil && targetBlock != nil {
-		progress := backfillProgressPercent(*f.backfill.StartBlock, f.LastIndexedBlock, *targetBlock)
+		progress := backfillProgressPercent(*f.backfill.StartBlock, currentBlock, *targetBlock)
 		response.ProgressPercent = &progress
 	}
 

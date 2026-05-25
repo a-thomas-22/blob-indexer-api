@@ -135,6 +135,9 @@ func TestMetadataConstants(t *testing.T) {
 	if MetadataBackfillStartBlock != "backfill_start_block" {
 		t.Errorf("expected MetadataBackfillStartBlock to be 'backfill_start_block', got %q", MetadataBackfillStartBlock)
 	}
+	if MetadataBackfillCurrentBlock != "backfill_current_block" {
+		t.Errorf("expected MetadataBackfillCurrentBlock to be 'backfill_current_block', got %q", MetadataBackfillCurrentBlock)
+	}
 	if MetadataBackfillTargetBlock != "backfill_target_block" {
 		t.Errorf("expected MetadataBackfillTargetBlock to be 'backfill_target_block', got %q", MetadataBackfillTargetBlock)
 	}
