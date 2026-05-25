@@ -42,7 +42,16 @@ jobs:
         run: echo "${REGISTRY_PASSWORD}" | helm registry login "${REGISTRY}" -u "${REGISTRY_USERNAME}" --password-stdin
 
       - name: Package chart
-        run: helm package charts/blob-indexer --version "${{ steps.version.outputs.version }}"
+        run: |
+          set -euo pipefail
+          app_version="$(jq -r '."."' .release-please-manifest.json)"
+          if [ -z "$app_version" ] || [ "$app_version" = "null" ]; then
+            echo "::error::.release-please-manifest.json is missing the root app version"
+            exit 1
+          fi
+          helm package charts/blob-indexer \
+            --version "${{ steps.version.outputs.version }}" \
+            --app-version "${app_version}"
 
       - name: Push chart to Harbor
         run: helm push blob-indexer-${{ steps.version.outputs.version }}.tgz oci://${REGISTRY}/${REGISTRY_PROJECT}/charts
