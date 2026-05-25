@@ -38,6 +38,74 @@ func TestLatestMigrationVersionFromDir(t *testing.T) {
 	}
 }
 
+func TestLatestMigrationVersionFromDirErrors(t *testing.T) {
+	tests := []struct {
+		name        string
+		setupDir    func(t *testing.T) string
+		wantSnippet string
+	}{
+		{
+			name: "missing directory",
+			setupDir: func(t *testing.T) string {
+				t.Helper()
+				return filepath.Join(t.TempDir(), "missing")
+			},
+			wantSnippet: "failed to read migrations directory",
+		},
+		{
+			name: "no up migrations",
+			setupDir: func(t *testing.T) string {
+				t.Helper()
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("ignored"), 0o600); err != nil {
+					t.Fatalf("failed to write test file: %v", err)
+				}
+				if err := os.Mkdir(filepath.Join(dir, "000001_dir.up.sql"), 0o700); err != nil {
+					t.Fatalf("failed to write test directory: %v", err)
+				}
+				return dir
+			},
+			wantSnippet: "no up migrations found",
+		},
+		{
+			name: "missing version separator",
+			setupDir: func(t *testing.T) string {
+				t.Helper()
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "000001.up.sql"), []byte("-- bad"), 0o600); err != nil {
+					t.Fatalf("failed to write test migration: %v", err)
+				}
+				return dir
+			},
+			wantSnippet: "does not start with a version prefix",
+		},
+		{
+			name: "invalid version prefix",
+			setupDir: func(t *testing.T) string {
+				t.Helper()
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "not-a-number_bad.up.sql"), []byte("-- bad"), 0o600); err != nil {
+					t.Fatalf("failed to write test migration: %v", err)
+				}
+				return dir
+			},
+			wantSnippet: "failed to parse migration version",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := latestMigrationVersionFromDir(tc.setupDir(t))
+			if err == nil {
+				t.Fatal("expected latestMigrationVersionFromDir() error")
+			}
+			if !strings.Contains(err.Error(), tc.wantSnippet) {
+				t.Fatalf("error = %q, want substring %q", err.Error(), tc.wantSnippet)
+			}
+		})
+	}
+}
+
 func TestCheckSchemaVersion(t *testing.T) {
 	expected := latestMigrationVersionForTest(t)
 
@@ -152,6 +220,55 @@ func TestWaitForSchemaRejectsNewerVersion(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestNormalizeSchemaWait(t *testing.T) {
+	tests := []struct {
+		name             string
+		timeout          time.Duration
+		pollInterval     time.Duration
+		wantTimeout      time.Duration
+		wantPollInterval time.Duration
+	}{
+		{
+			name:             "preserves positive values",
+			timeout:          time.Second,
+			pollInterval:     10 * time.Millisecond,
+			wantTimeout:      time.Second,
+			wantPollInterval: 10 * time.Millisecond,
+		},
+		{
+			name:             "defaults timeout",
+			pollInterval:     10 * time.Millisecond,
+			wantTimeout:      DefaultSchemaWaitTimeout,
+			wantPollInterval: 10 * time.Millisecond,
+		},
+		{
+			name:             "defaults poll interval",
+			timeout:          time.Second,
+			wantTimeout:      time.Second,
+			wantPollInterval: DefaultSchemaPollInterval,
+		},
+		{
+			name:             "defaults non-positive values",
+			timeout:          -time.Second,
+			pollInterval:     -time.Millisecond,
+			wantTimeout:      DefaultSchemaWaitTimeout,
+			wantPollInterval: DefaultSchemaPollInterval,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotTimeout, gotPollInterval := normalizeSchemaWait(tc.timeout, tc.pollInterval)
+			if gotTimeout != tc.wantTimeout {
+				t.Fatalf("timeout = %s, want %s", gotTimeout, tc.wantTimeout)
+			}
+			if gotPollInterval != tc.wantPollInterval {
+				t.Fatalf("pollInterval = %s, want %s", gotPollInterval, tc.wantPollInterval)
+			}
+		})
 	}
 }
 
