@@ -34,13 +34,16 @@ const (
 
 // UserResponse is a response containing user data
 type UserResponse struct {
-	NetworkID         int       `json:"network_id"`
-	NetworkName       string    `json:"network_name,omitempty"`
-	Address           string    `json:"address"`
-	Name              string    `json:"name,omitempty"`
-	Category          string    `json:"category,omitempty"`
-	BlobCount         int       `json:"blob_count"`
-	TotalCostETH      string    `json:"total_cost_eth"`
+	NetworkID   int    `json:"network_id"`
+	NetworkName string `json:"network_name,omitempty"`
+	Address     string `json:"address"`
+	Name        string `json:"name,omitempty"`
+	Category    string `json:"category,omitempty"`
+	BlobCount   int    `json:"blob_count"`
+	// Total realized blob base-fee cost in wei, serialized as a decimal string.
+	TotalCostWei string `json:"total_cost_wei" example:"4718548746240"`
+	// Deprecated alias: use total_cost_wei. This legacy field contains wei, not ETH.
+	TotalCostETH      string    `json:"total_cost_eth" extensions:"x-deprecated,x-replacement=total_cost_wei" example:"4718548746240"`
 	LastTimestamp     time.Time `json:"last_timestamp"`
 	BlobSharePercent  float64   `json:"blob_share_percent,omitempty"`
 	SpendSharePercent float64   `json:"spend_share_percent,omitempty"`
@@ -48,9 +51,12 @@ type UserResponse struct {
 
 // CategoryShareResponse is a category-level market share bucket.
 type CategoryShareResponse struct {
-	Category          string  `json:"category"`
-	BlobCount         int     `json:"blob_count"`
-	TotalCostETH      string  `json:"total_cost_eth"`
+	Category  string `json:"category"`
+	BlobCount int    `json:"blob_count"`
+	// Total realized blob base-fee cost in wei, serialized as a decimal string.
+	TotalCostWei string `json:"total_cost_wei" example:"4718548746240"`
+	// Deprecated alias: use total_cost_wei. This legacy field contains wei, not ETH.
+	TotalCostETH      string  `json:"total_cost_eth" extensions:"x-deprecated,x-replacement=total_cost_wei" example:"4718548746240"`
 	BlobSharePercent  float64 `json:"blob_share_percent"`
 	SpendSharePercent float64 `json:"spend_share_percent"`
 }
@@ -71,6 +77,7 @@ func toUserResponse(user models.BlobUserStats, networkID int, networkName string
 		Name:              user.Name,
 		Category:          user.Category,
 		BlobCount:         user.BlobCount,
+		TotalCostWei:      user.TotalCostETH,
 		TotalCostETH:      user.TotalCostETH,
 		LastTimestamp:     user.LastTimestamp,
 		BlobSharePercent:  user.BlobSharePercent,
@@ -277,6 +284,7 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 		categoryShares = append(categoryShares, CategoryShareResponse{
 			Category:          category.Category,
 			BlobCount:         category.BlobCount,
+			TotalCostWei:      category.TotalCostETH,
 			TotalCostETH:      category.TotalCostETH,
 			BlobSharePercent:  category.BlobSharePercent,
 			SpendSharePercent: category.SpendSharePercent,

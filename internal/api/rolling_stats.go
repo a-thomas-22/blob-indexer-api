@@ -42,18 +42,30 @@ type RollingStatsResponse struct {
 
 // RollingWindowStats contains blob market statistics for one rolling time window.
 type RollingWindowStats struct {
-	Window             string    `json:"window"`
-	DurationSeconds    int64     `json:"duration_seconds"`
-	StartTime          time.Time `json:"start_time"`
-	EndTime            time.Time `json:"end_time"`
-	AverageBlobBaseFee string    `json:"average_blob_base_fee"`
-	MedianBlobBaseFee  string    `json:"median_blob_base_fee"`
-	P95BlobBaseFee     string    `json:"p95_blob_base_fee"`
-	TotalBlobs         int       `json:"total_blobs"`
-	TotalBlobGasUsed   int64     `json:"total_blob_gas_used"`
-	AverageUtilization string    `json:"average_utilization"`
-	TotalCostETH       string    `json:"total_cost_eth"`
-	UniqueSenders      int       `json:"unique_senders"`
+	Window          string    `json:"window"`
+	DurationSeconds int64     `json:"duration_seconds"`
+	StartTime       time.Time `json:"start_time"`
+	EndTime         time.Time `json:"end_time"`
+	// Average blob base fee in wei. Aggregate averages may include fractional decimal precision.
+	AverageBlobBaseFeeWei string `json:"average_blob_base_fee_wei" example:"4841467206.84506683"`
+	// Median blob base fee in wei.
+	MedianBlobBaseFeeWei string `json:"median_blob_base_fee_wei" example:"4841467206"`
+	// P95 blob base fee in wei.
+	P95BlobBaseFeeWei string `json:"p95_blob_base_fee_wei" example:"9123456789"`
+	// Deprecated alias: use average_blob_base_fee_wei.
+	AverageBlobBaseFee string `json:"average_blob_base_fee" extensions:"x-deprecated,x-replacement=average_blob_base_fee_wei" example:"4841467206.84506683"`
+	// Deprecated alias: use median_blob_base_fee_wei.
+	MedianBlobBaseFee string `json:"median_blob_base_fee" extensions:"x-deprecated,x-replacement=median_blob_base_fee_wei" example:"4841467206"`
+	// Deprecated alias: use p95_blob_base_fee_wei.
+	P95BlobBaseFee     string `json:"p95_blob_base_fee" extensions:"x-deprecated,x-replacement=p95_blob_base_fee_wei" example:"9123456789"`
+	TotalBlobs         int    `json:"total_blobs"`
+	TotalBlobGasUsed   int64  `json:"total_blob_gas_used"`
+	AverageUtilization string `json:"average_utilization"`
+	// Total realized blob base-fee cost in wei, serialized as a decimal string.
+	TotalCostWei string `json:"total_cost_wei" example:"2207855919292172.4863"`
+	// Deprecated alias: use total_cost_wei. This legacy field contains wei, not ETH.
+	TotalCostETH  string `json:"total_cost_eth" extensions:"x-deprecated,x-replacement=total_cost_wei" example:"2207855919292172.4863"`
+	UniqueSenders int    `json:"unique_senders"`
 }
 
 type rollingStatsWindowRow struct {
@@ -135,10 +147,31 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 		Windows:     make([]RollingWindowStats, 0, len(rows)),
 	}
 	for _, row := range rows {
-		response.Windows = append(response.Windows, RollingWindowStats(row))
+		response.Windows = append(response.Windows, toRollingWindowStats(row))
 	}
 
 	a.respondSuccess(w, response)
+}
+
+func toRollingWindowStats(row rollingStatsWindowRow) RollingWindowStats {
+	return RollingWindowStats{
+		Window:                row.Window,
+		DurationSeconds:       row.DurationSeconds,
+		StartTime:             row.StartTime,
+		EndTime:               row.EndTime,
+		AverageBlobBaseFeeWei: row.AverageBlobBaseFee,
+		MedianBlobBaseFeeWei:  row.MedianBlobBaseFee,
+		P95BlobBaseFeeWei:     row.P95BlobBaseFee,
+		AverageBlobBaseFee:    row.AverageBlobBaseFee,
+		MedianBlobBaseFee:     row.MedianBlobBaseFee,
+		P95BlobBaseFee:        row.P95BlobBaseFee,
+		TotalBlobs:            row.TotalBlobs,
+		TotalBlobGasUsed:      row.TotalBlobGasUsed,
+		AverageUtilization:    row.AverageUtilization,
+		TotalCostWei:          row.TotalCostETH,
+		TotalCostETH:          row.TotalCostETH,
+		UniqueSenders:         row.UniqueSenders,
+	}
 }
 
 func parseRollingStatsWindows(raw string) ([]statsWindowSpec, error) {
