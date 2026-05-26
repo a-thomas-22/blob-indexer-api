@@ -61,10 +61,10 @@ type RollingWindowStats struct {
 	TotalBlobs         int    `json:"total_blobs"`
 	TotalBlobGasUsed   int64  `json:"total_blob_gas_used"`
 	AverageUtilization string `json:"average_utilization"`
-	// Total realized blob base-fee cost in wei, serialized as a decimal string.
-	TotalCostWei string `json:"total_cost_wei" example:"2207855919292172.4863"`
+	// Total realized blob base-fee cost in wei for the window (sum of per-blob integer wei costs).
+	TotalCostWei string `json:"total_cost_wei" example:"26494271031506069"`
 	// Deprecated alias: use total_cost_wei. This legacy field contains wei, not ETH.
-	TotalCostETH  string `json:"total_cost_eth" extensions:"x-deprecated,x-replacement=total_cost_wei" example:"2207855919292172.4863"`
+	TotalCostETH  string `json:"total_cost_eth" extensions:"x-deprecated,x-replacement=total_cost_wei" example:"26494271031506069"`
 	UniqueSenders int    `json:"unique_senders"`
 }
 

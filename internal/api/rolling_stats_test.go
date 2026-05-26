@@ -109,7 +109,7 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 					TotalBlobs:         12,
 					TotalBlobGasUsed:   1572864,
 					AverageUtilization: "0.750000",
-					TotalCostETH:       "0.0123",
+					TotalCostETH:       "26494271031506069",
 					UniqueSenders:      3,
 				},
 			})
@@ -153,7 +153,7 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 	if window.AverageBlobBaseFeeWei != "100" || window.MedianBlobBaseFeeWei != "90" || window.P95BlobBaseFeeWei != "150" {
 		t.Fatalf("unexpected explicit base fee stats: %+v", window)
 	}
-	if window.AverageUtilization != "0.750000" || window.TotalCostETH != "0.0123" || window.TotalCostWei != "0.0123" || window.UniqueSenders != 3 {
+	if window.AverageUtilization != "0.750000" || window.TotalCostETH != "26494271031506069" || window.TotalCostWei != "26494271031506069" || window.UniqueSenders != 3 {
 		t.Fatalf("unexpected market stats: %+v", window)
 	}
 }

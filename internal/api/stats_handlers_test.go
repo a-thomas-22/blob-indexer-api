@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -26,6 +27,75 @@ func TestGetBlobStats_Success(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetBlobStats_PopulatesExplicitWeiFields(t *testing.T) {
+	db := &mockDB{
+		getFn: func(_ context.Context, dest interface{}, _ string, _ ...interface{}) error {
+			setStatsFields(dest, map[string]interface{}{
+				"TotalBlobs":          7,
+				"TotalConfirmedBlobs": 5,
+				"TotalPendingBlobs":   2,
+				"AverageBaseFee":      "4841467206.84506683",
+				"AverageTip":          "15678762992.04263056",
+				"AverageTotalCost":    "2207855919292172.4863",
+				"LastIndexedTime":     time.Unix(1700000000, 0).UTC(),
+			})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobStats(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Success bool          `json:"success"`
+		Data    StatsResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success response")
+	}
+	if resp.Data.TotalBlobs != 7 || resp.Data.TotalConfirmedBlobs != 5 || resp.Data.TotalPendingBlobs != 2 {
+		t.Fatalf("unexpected blob counts: %+v", resp.Data)
+	}
+	if resp.Data.AverageBaseFeePerBlobGasWei != "4841467206.84506683" ||
+		resp.Data.AverageTipPerBlobGasWei != "15678762992.04263056" ||
+		resp.Data.AverageTotalCostWei != "2207855919292172.4863" {
+		t.Fatalf("missing explicit wei fields: %+v", resp.Data)
+	}
+	if resp.Data.AverageBaseFee != resp.Data.AverageBaseFeePerBlobGasWei ||
+		resp.Data.AverageTip != resp.Data.AverageTipPerBlobGasWei ||
+		resp.Data.AverageTotalCost != resp.Data.AverageTotalCostWei {
+		t.Fatalf("deprecated aliases must mirror explicit wei fields: %+v", resp.Data)
+	}
+}
+
+// setStatsFields assigns named fields into the anonymous struct passed to db.GetContext
+// from GetBlobStats by reflection. No-op when dest isn't a struct (e.g. the secondary
+// queryLastIndexedBlock call that scans into *string).
+func setStatsFields(dest interface{}, values map[string]interface{}) {
+	dv := reflect.ValueOf(dest)
+	if dv.Kind() == reflect.Pointer {
+		dv = dv.Elem()
+	}
+	if dv.Kind() != reflect.Struct {
+		return
+	}
+	for name, value := range values {
+		f := dv.FieldByName(name)
+		if !f.IsValid() || !f.CanSet() {
+			continue
+		}
+		f.Set(reflect.ValueOf(value))
 	}
 }
 
