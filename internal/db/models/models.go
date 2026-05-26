@@ -110,6 +110,7 @@ type BlobStatsAggregate struct {
 	AverageBaseFee      string    `db:"average_base_fee"`
 	AverageTip          string    `db:"average_tip"`
 	AverageTotalCost    string    `db:"average_total_cost"`
+	LastIndexedBlock    uint64    `db:"last_indexed_block"`
 	LastIndexedTime     time.Time `db:"last_indexed_time"`
 }
 

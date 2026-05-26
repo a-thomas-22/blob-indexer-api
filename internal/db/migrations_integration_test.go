@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	migratepg "github.com/golang-migrate/migrate/v4/database/postgres"
@@ -337,6 +338,208 @@ func TestBackfillPerBlobRows(t *testing.T) {
 	if v != latest {
 		t.Fatalf("schema_migrations version = %d, want %d", v, latest)
 	}
+}
+
+type networkBlobStatsCheck struct {
+	networkID       int
+	confirmed       int64
+	sumBaseFee      string
+	sumTip          string
+	sumTotalCost    string
+	lastBlock       int64
+	lastIndexedTime time.Time
+}
+
+func assertNetworkBlobStats(t *testing.T, db *sqlx.DB, want networkBlobStatsCheck) {
+	t.Helper()
+
+	var got networkBlobStatsCheck
+	if err := db.QueryRow(`
+		SELECT
+			network_id,
+			total_confirmed_blobs,
+			sum_base_fee_per_blob_gas::text,
+			sum_tip_per_blob_gas::text,
+			sum_total_cost::text,
+			last_indexed_block,
+			last_indexed_time
+		FROM network_blob_stats
+		WHERE network_id = $1
+	`, want.networkID).Scan(
+		&got.networkID,
+		&got.confirmed,
+		&got.sumBaseFee,
+		&got.sumTip,
+		&got.sumTotalCost,
+		&got.lastBlock,
+		&got.lastIndexedTime,
+	); err != nil {
+		t.Fatalf("query network_blob_stats: %v", err)
+	}
+
+	if got.networkID != want.networkID ||
+		got.confirmed != want.confirmed ||
+		got.sumBaseFee != want.sumBaseFee ||
+		got.sumTip != want.sumTip ||
+		got.sumTotalCost != want.sumTotalCost ||
+		got.lastBlock != want.lastBlock ||
+		!got.lastIndexedTime.Equal(want.lastIndexedTime) {
+		t.Fatalf("network_blob_stats = %+v, want %+v", got, want)
+	}
+}
+
+// TestNetworkBlobStatsMigrationMaintainsSummary verifies migration 11's
+// backfill and statement-level triggers against the source tables they
+// summarize. The API's /stats path depends on this table staying consistent
+// without rescanning full blob history.
+func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
+	db, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+
+	resetSchema(t, db)
+
+	m := migrator(t, db)
+	if err := m.Migrate(10); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to 10: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO networks (chain_id, name, start_block, is_enabled)
+		VALUES (1, 'mainnet-test', '0', true)
+		ON CONFLICT (chain_id) DO NOTHING
+	`); err != nil {
+		t.Fatalf("seed network: %v", err)
+	}
+
+	t100 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	t101 := time.Date(2024, 1, 1, 0, 1, 0, 0, time.UTC)
+	t102 := time.Date(2024, 1, 1, 0, 2, 0, 0, time.UTC)
+
+	if _, err := db.Exec(`
+		INSERT INTO blobs (
+			network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
+			timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
+		) VALUES
+			(1, 100, 0, '0xa', '0xfrom', '', 131072, 10, 2, 100, $1, true, 'test', 12, 131072),
+			(1, 101, 0, '0xb', '0xfrom', '', 131072, 30, 6, 300, $2, true, 'test', 36, 131072),
+			(1, -1, 0, '0xpending', '0xfrom', '', 131072, 50, 10, 500, $3, false, 'test', 60, 131072)
+	`, t100, t101, t102); err != nil {
+		t.Fatalf("seed blobs: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO block_metrics (
+			network_id, block_number, block_timestamp, blob_count,
+			blob_gas_used, blob_gas_target, blob_gas_limit,
+			excess_blob_gas, blob_base_fee, utilization_ratio,
+			blob_params_target, blob_params_max, update_fraction
+		) VALUES
+			(1, 100, $1, 1, 131072, 393216, 786432, 0, 10, 0.333333, 3, 6, 3338477),
+			(1, 101, $2, 1, 131072, 393216, 786432, 0, 30, 0.333333, 3, 6, 3338477)
+	`, t100, t101); err != nil {
+		t.Fatalf("seed block metrics: %v", err)
+	}
+
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to latest: %v", err)
+	}
+
+	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
+		networkID:       1,
+		confirmed:       2,
+		sumBaseFee:      "40",
+		sumTip:          "8",
+		sumTotalCost:    "400",
+		lastBlock:       101,
+		lastIndexedTime: t101,
+	})
+
+	if _, err := db.Exec(`
+		INSERT INTO blobs (
+			network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
+			timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
+		) VALUES
+			(1, 102, 0, '0xc', '0xfrom', '', 131072, 5, 1, 50, $1, true, 'test', 6, 131072)
+	`, t102); err != nil {
+		t.Fatalf("insert confirmed blob: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO block_metrics (
+			network_id, block_number, block_timestamp, blob_count,
+			blob_gas_used, blob_gas_target, blob_gas_limit,
+			excess_blob_gas, blob_base_fee, utilization_ratio,
+			blob_params_target, blob_params_max, update_fraction
+		) VALUES
+			(1, 102, $1, 1, 131072, 393216, 786432, 0, 5, 0.333333, 3, 6, 3338477)
+	`, t102); err != nil {
+		t.Fatalf("insert block metrics: %v", err)
+	}
+	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
+		networkID:       1,
+		confirmed:       3,
+		sumBaseFee:      "45",
+		sumTip:          "9",
+		sumTotalCost:    "450",
+		lastBlock:       102,
+		lastIndexedTime: t102,
+	})
+
+	if _, err := db.Exec(`UPDATE blobs SET confirmed = true WHERE network_id = 1 AND tx_hash = '0xpending'`); err != nil {
+		t.Fatalf("promote pending blob: %v", err)
+	}
+	if _, err := db.Exec(`
+		UPDATE blobs
+		SET base_fee_per_blob_gas = 20, tip_per_blob_gas = 4, total_cost_eth = 200
+		WHERE network_id = 1 AND tx_hash = '0xa'
+	`); err != nil {
+		t.Fatalf("update confirmed blob costs: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE blobs SET user_attribution = 'alice' WHERE network_id = 1 AND tx_hash = '0xa'`); err != nil {
+		t.Fatalf("update non-summary blob field: %v", err)
+	}
+	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
+		networkID:       1,
+		confirmed:       4,
+		sumBaseFee:      "105",
+		sumTip:          "21",
+		sumTotalCost:    "1050",
+		lastBlock:       102,
+		lastIndexedTime: t102,
+	})
+
+	if _, err := db.Exec(`DELETE FROM blobs WHERE network_id = 1 AND tx_hash = '0xb'`); err != nil {
+		t.Fatalf("delete confirmed blob: %v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM block_metrics WHERE network_id = 1 AND block_number = 102`); err != nil {
+		t.Fatalf("delete latest block metrics: %v", err)
+	}
+	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
+		networkID:       1,
+		confirmed:       3,
+		sumBaseFee:      "75",
+		sumTip:          "15",
+		sumTotalCost:    "750",
+		lastBlock:       101,
+		lastIndexedTime: t101,
+	})
+
+	if _, err := db.Exec(`UPDATE blobs SET confirmed = false WHERE network_id = 1 AND tx_hash = '0xpending'`); err != nil {
+		t.Fatalf("demote confirmed blob: %v", err)
+	}
+	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
+		networkID:       1,
+		confirmed:       2,
+		sumBaseFee:      "25",
+		sumTip:          "5",
+		sumTotalCost:    "250",
+		lastBlock:       101,
+		lastIndexedTime: t101,
+	})
 }
 
 // TestMigrationsDownThenUp validates that reversible migrations round-trip.

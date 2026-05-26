@@ -79,9 +79,8 @@ func TestGetBlobStats_PopulatesExplicitWeiFields(t *testing.T) {
 	}
 }
 
-// setStatsFields assigns named fields into the anonymous struct passed to db.GetContext
-// from GetBlobStats by reflection. No-op when dest isn't a struct (e.g. the secondary
-// queryLastIndexedBlock call that scans into *string).
+// setStatsFields assigns named fields into the stats aggregate passed to db.GetContext
+// from GetBlobStats by reflection. No-op when dest isn't a struct.
 func setStatsFields(dest interface{}, values map[string]interface{}) {
 	dv := reflect.ValueOf(dest)
 	if dv.Kind() == reflect.Pointer {

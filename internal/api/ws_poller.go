@@ -225,23 +225,9 @@ func (p *Poller) broadcastStatsUpdate(ctx context.Context, network config.Networ
 		return
 	}
 
-	lastBlock := p.queryLastIndexedBlock(ctx, network.ChainID)
-
 	p.hub.BroadcastEvent(network.Name, WSEvent{
 		Type: EventStatsUpdate,
-		Data: StatsResponse{
-			TotalBlobs:                  stats.TotalBlobs,
-			TotalConfirmedBlobs:         stats.TotalConfirmedBlobs,
-			TotalPendingBlobs:           stats.TotalPendingBlobs,
-			AverageBaseFeePerBlobGasWei: stats.AverageBaseFee,
-			AverageTipPerBlobGasWei:     stats.AverageTip,
-			AverageTotalCostWei:         stats.AverageTotalCost,
-			AverageBaseFee:              stats.AverageBaseFee,
-			AverageTip:                  stats.AverageTip,
-			AverageTotalCost:            stats.AverageTotalCost,
-			LastIndexedBlock:            lastBlock,
-			LastIndexedTime:             stats.LastIndexedTime,
-		},
+		Data: toStatsResponse(stats, network.ChainID, network.Name),
 	})
 }
 
