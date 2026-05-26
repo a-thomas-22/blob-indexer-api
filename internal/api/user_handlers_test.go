@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/go-chi/chi/v5"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
@@ -540,6 +541,34 @@ func TestGetUserByAddress_BadNetwork(t *testing.T) {
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	w := httptest.NewRecorder()
 	a.GetUserByAddress(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetUserBreakdown_DBError(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(_ context.Context, _ interface{}, _ string, _ ...interface{}) error {
+			return fmt.Errorf("breakdown query failed")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetUserBreakdown(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
+func TestGetUserBreakdown_BadNetwork(t *testing.T) {
+	a := newTestAPI()
+	a.networks = map[int]config.NetworkConfig{}
+	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetUserBreakdown(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)

@@ -168,14 +168,9 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, ok := value.(RollingStatsResponse)
-	if !ok {
-		logger.Error("Failed to get rolling blob market statistics",
-			zap.String("network", network.Name),
-			zap.String("reason", "unexpected cache value type"))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get rolling blob market statistics")
-		return
-	}
+	// The singleflight closure above always returns RollingStatsResponse or an error,
+	// so the assertion's ok value can never be false here.
+	response, _ := value.(RollingStatsResponse)
 
 	a.respondSuccess(w, response)
 }

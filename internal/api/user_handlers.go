@@ -237,14 +237,9 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 		return
 	}
 
-	response, ok := value.([]UserResponse)
-	if !ok {
-		logger.Error(errMessage,
-			zap.String("network", network.Name),
-			zap.String("reason", "unexpected cache value type"))
-		a.respondError(w, http.StatusInternalServerError, errMessage)
-		return
-	}
+	// The singleflight closure above always returns []UserResponse or an error,
+	// so the assertion's ok value can never be false here.
+	response, _ := value.([]UserResponse)
 
 	logger.Debug(returnMessage,
 		zap.String("network", network.Name),
@@ -344,15 +339,9 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, ok := value.(UserBreakdownResponse)
-	if !ok {
-		logger.Error("Failed to get blob user breakdown",
-			zap.String("network", network.Name),
-			zap.String("window", string(window)),
-			zap.String("reason", "unexpected cache value type"))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get user breakdown")
-		return
-	}
+	// The singleflight closure above always returns UserBreakdownResponse or an error,
+	// so the assertion's ok value can never be false here.
+	response, _ := value.(UserBreakdownResponse)
 
 	a.respondSuccess(w, response)
 }

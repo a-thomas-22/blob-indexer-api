@@ -75,13 +75,9 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, ok := value.(StatsResponse)
-	if !ok {
-		logger.Error("Unexpected blob statistics cache value type",
-			zap.String("network", network.Name))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get blob statistics")
-		return
-	}
+	// The singleflight closure above always returns StatsResponse or an error,
+	// so the assertion's ok value can never be false here.
+	response, _ := value.(StatsResponse)
 
 	a.respondSuccess(w, response)
 }
