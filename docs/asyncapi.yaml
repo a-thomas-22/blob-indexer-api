@@ -169,6 +169,62 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/BlobResponse'
+        pricing:
+          allOf:
+            - $ref: '#/components/schemas/BlockPricingResponse'
+          description: Recent-block pricing and capacity fields matching `/api/v1/blob/pricing` recent block entries when block metrics are available.
+    BlockPricingResponse:
+      type: object
+      properties:
+        block_number:
+          type: integer
+          format: int64
+        block_timestamp:
+          $ref: '#/components/schemas/ISODateTime'
+        blob_count:
+          type: integer
+        blob_gas_used:
+          type: integer
+          format: int64
+        blob_gas_target:
+          type: integer
+          format: int64
+        blob_gas_limit:
+          type: integer
+          format: int64
+        excess_blob_gas:
+          type: integer
+          format: int64
+        blob_base_fee:
+          $ref: '#/components/schemas/WeiString'
+        blob_base_fee_gwei:
+          $ref: '#/components/schemas/DecimalString'
+        utilization_ratio:
+          $ref: '#/components/schemas/DecimalString'
+        blob_params_target:
+          type: integer
+          deprecated: true
+          description: Deprecated compatibility field; use `target_blobs`.
+        blob_params_max:
+          type: integer
+          deprecated: true
+          description: Deprecated compatibility field; use `max_blobs`.
+        target_blobs:
+          type: integer
+        max_blobs:
+          type: integer
+        available_blobs:
+          type: integer
+        utilization_percent:
+          type: number
+          format: double
+        is_full:
+          type: boolean
+        is_above_target:
+          type: boolean
+        update_fraction:
+          type: integer
+          format: int64
     MempoolUpdateEvent:
       type: object
       required:
