@@ -187,6 +187,22 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 	a.respondSuccess(w, response)
 }
 
+// GetRollingStatsChart godoc
+// @Summary Get chart rolling blob market statistics
+// @Description Retrieve rolling time-window statistics from the charts namespace
+// @Tags charts
+// @Accept json
+// @Produce json
+// @Param network query string false "Network name or chain ID (default: first enabled network)"
+// @Param windows query string false "Comma-separated rolling windows using m/h/d units (default: 5m,1h,24h,7d; max 8 windows, max 30d each)"
+// @Success 200 {object} Response{data=RollingStatsResponse} "Success"
+// @Failure 400 {object} Response "Bad request"
+// @Failure 500 {object} Response "Internal server error"
+// @Router /charts/rolling-stats [get]
+func (a *API) GetRollingStatsChart(w http.ResponseWriter, r *http.Request) {
+	a.GetRollingStatsWindows(w, r)
+}
+
 func toRollingWindowStats(row rollingStatsWindowRow) RollingWindowStats {
 	return RollingWindowStats{
 		Window:                row.Window,
