@@ -365,6 +365,12 @@ const (
 		LIMIT $2
 	`
 
+	// queryBlockMetricsByNumber retrieves block metrics for specific block numbers.
+	queryBlockMetricsByNumber = `
+		SELECT ` + blockMetricsSelectColumns + ` FROM block_metrics
+		WHERE network_id = $1 AND block_number = ANY($2::bigint[])
+	`
+
 	// queryLatestBlobsByAddress retrieves confirmed blobs for a specific sender address.
 	queryLatestBlobsByAddress = `
 		SELECT ` + blobSelectColumns + ` FROM blobs

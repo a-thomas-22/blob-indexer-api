@@ -39,10 +39,11 @@ type WSEvent struct {
 
 // NewBlockData is the payload for EventNewBlock.
 type NewBlockData struct {
-	BlockNumber int64          `json:"block_number"`
-	BlobCount   int            `json:"blob_count"`
-	Timestamp   time.Time      `json:"timestamp"`
-	Blobs       []BlobResponse `json:"blobs"`
+	BlockNumber int64                 `json:"block_number"`
+	BlobCount   int                   `json:"blob_count"`
+	Timestamp   time.Time             `json:"timestamp"`
+	Blobs       []BlobResponse        `json:"blobs"`
+	Pricing     *BlockPricingResponse `json:"pricing,omitempty"`
 }
 
 // MempoolUpdateData is the payload for EventMempoolUpdate.

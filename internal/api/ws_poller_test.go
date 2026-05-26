@@ -575,6 +575,118 @@ func TestPoller_BroadcastNewBlocks_EmptyResult(t *testing.T) {
 	}
 }
 
+func TestPoller_BroadcastNewBlocks_IncludesPricing(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	blockTime := time.Date(2026, 3, 9, 14, 0, 0, 0, time.UTC)
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			switch {
+			case strings.Contains(query, "FROM blobs"):
+				blobs := dest.(*[]models.Blob)
+				blobGasUsed := int64(131072)
+				*blobs = []models.Blob{
+					{
+						NetworkID:         11155111,
+						BlockNumber:       100,
+						BlobIndex:         0,
+						TxHash:            "0xabc",
+						BaseFeePerBlobGas: "4200000",
+						TipPerBlobGas:     "100",
+						TotalCostETH:      "550502400000",
+						Timestamp:         blockTime,
+						Confirmed:         true,
+						BlobGasUsed:       &blobGasUsed,
+					},
+					{
+						NetworkID:         11155111,
+						BlockNumber:       100,
+						BlobIndex:         1,
+						TxHash:            "0xdef",
+						BaseFeePerBlobGas: "4200000",
+						TipPerBlobGas:     "100",
+						TotalCostETH:      "550502400000",
+						Timestamp:         blockTime,
+						Confirmed:         true,
+						BlobGasUsed:       &blobGasUsed,
+					},
+				}
+			case strings.Contains(query, "FROM block_metrics"):
+				metrics := dest.(*[]models.BlockMetrics)
+				*metrics = []models.BlockMetrics{
+					{
+						NetworkID:        11155111,
+						BlockNumber:      100,
+						BlockTimestamp:   blockTime,
+						BlobCount:        2,
+						BlobGasUsed:      262144,
+						BlobGasTarget:    393216,
+						BlobGasLimit:     786432,
+						ExcessBlobGas:    1234,
+						BlobBaseFee:      "4200000",
+						UtilizationRatio: "0.666667",
+						BlobParamsTarget: 3,
+						BlobParamsMax:    6,
+						UpdateFraction:   3338477,
+					},
+				}
+			}
+			return nil
+		},
+	}
+
+	client := &Client{hub: hub, send: make(chan []byte, 256), networkName: "sepolia"}
+	hub.register <- client
+	time.Sleep(20 * time.Millisecond)
+
+	network := config.NetworkConfig{Name: "sepolia", ChainID: 11155111}
+	poller := NewPoller(db, hub, testNetworks(), time.Second, time.Second)
+	if !poller.broadcastNewBlocks(context.Background(), network, 99) {
+		t.Fatal("expected broadcastNewBlocks to succeed")
+	}
+
+	select {
+	case msg := <-client.send:
+		var event struct {
+			Type WSEventType  `json:"type"`
+			Data NewBlockData `json:"data"`
+		}
+		if err := json.Unmarshal(msg, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type != EventNewBlock {
+			t.Fatalf("got type %q, want %q", event.Type, EventNewBlock)
+		}
+		if event.Data.Pricing == nil {
+			t.Fatal("expected pricing payload")
+		}
+		pricing := event.Data.Pricing
+		if pricing.BlobGasUsed != 262144 {
+			t.Errorf("pricing.blob_gas_used = %d, want 262144", pricing.BlobGasUsed)
+		}
+		if pricing.TargetBlobs != 3 || pricing.MaxBlobs != 6 || pricing.AvailableBlobs != 4 {
+			t.Errorf("unexpected capacity fields: target=%d max=%d available=%d",
+				pricing.TargetBlobs, pricing.MaxBlobs, pricing.AvailableBlobs)
+		}
+		if pricing.UtilizationPercent != 33.33 {
+			t.Errorf("pricing.utilization_percent = %v, want 33.33", pricing.UtilizationPercent)
+		}
+		if pricing.IsFull {
+			t.Error("pricing.is_full = true, want false")
+		}
+		if pricing.IsAboveTarget {
+			t.Error("pricing.is_above_target = true, want false")
+		}
+		if pricing.BlobBaseFeeGwei != "0.0042" {
+			t.Errorf("pricing.blob_base_fee_gwei = %q, want 0.0042", pricing.BlobBaseFeeGwei)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for new_block")
+	}
+}
+
 func TestPoller_PollMempool_Error(t *testing.T) {
 	hub := NewHub()
 	go hub.Run()

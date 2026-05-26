@@ -73,6 +73,15 @@ func TestWSEvent_WithData_MarshalJSON(t *testing.T) {
 			Blobs: []BlobResponse{
 				{TxHash: "0xabc", BlockNumber: 12345, NetworkName: "sepolia"},
 			},
+			Pricing: &BlockPricingResponse{
+				BlockNumber:        12345,
+				BlobGasUsed:        393216,
+				TargetBlobs:        3,
+				MaxBlobs:           6,
+				AvailableBlobs:     3,
+				UtilizationPercent: 50,
+				IsAboveTarget:      false,
+			},
 		},
 	}
 	data, err := json.Marshal(event)
@@ -95,6 +104,16 @@ func TestWSEvent_WithData_MarshalJSON(t *testing.T) {
 	}
 	if d["blob_count"].(float64) != 3 {
 		t.Errorf("got blob_count %v, want 3", d["blob_count"])
+	}
+	pricing, ok := d["pricing"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected pricing to be a map")
+	}
+	if pricing["max_blobs"].(float64) != 6 {
+		t.Errorf("got pricing.max_blobs %v, want 6", pricing["max_blobs"])
+	}
+	if pricing["blob_gas_used"].(float64) != 393216 {
+		t.Errorf("got pricing.blob_gas_used %v, want 393216", pricing["blob_gas_used"])
 	}
 }
 

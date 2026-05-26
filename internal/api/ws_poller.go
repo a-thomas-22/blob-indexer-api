@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/lib/pq"
 	"go.uber.org/zap"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
@@ -158,12 +159,15 @@ func (p *Poller) broadcastNewBlocks(ctx context.Context, network config.NetworkC
 		blockGroups[blob.BlockNumber] = append(blockGroups[blob.BlockNumber], br)
 	}
 
+	pricingByBlock := p.queryBlockPricing(queryCtx, network, blockOrder)
+
 	for _, blockNum := range blockOrder {
 		brs := blockGroups[blockNum]
 		var ts time.Time
 		if len(brs) > 0 {
 			ts = brs[0].Timestamp
 		}
+		pricing := pricingByBlock[blockNum]
 		p.hub.BroadcastEvent(network.Name, WSEvent{
 			Type: EventNewBlock,
 			Data: NewBlockData{
@@ -171,6 +175,7 @@ func (p *Poller) broadcastNewBlocks(ctx context.Context, network config.NetworkC
 				BlobCount:   len(brs),
 				Timestamp:   ts,
 				Blobs:       brs,
+				Pricing:     pricing,
 			},
 		})
 	}
@@ -181,6 +186,27 @@ func (p *Poller) broadcastNewBlocks(ctx context.Context, network config.NetworkC
 		zap.Int("blobs", len(blobs)))
 
 	return true
+}
+
+func (p *Poller) queryBlockPricing(ctx context.Context, network config.NetworkConfig, blockNumbers []int64) map[int64]*BlockPricingResponse {
+	if len(blockNumbers) == 0 {
+		return nil
+	}
+
+	var metrics []models.BlockMetrics
+	if err := p.db.SelectContext(ctx, &metrics, queryBlockMetricsByNumber, network.ChainID, pq.Array(blockNumbers)); err != nil {
+		logger.Error("Poller: failed to query block pricing",
+			zap.String("network", network.Name),
+			zap.Error(err))
+		return nil
+	}
+
+	pricingByBlock := make(map[int64]*BlockPricingResponse, len(metrics))
+	for _, metric := range metrics {
+		pricing := toBlockPricingResponse(metric)
+		pricingByBlock[metric.BlockNumber] = &pricing
+	}
+	return pricingByBlock
 }
 
 // broadcastStatsUpdate queries aggregate stats and broadcasts a stats_update event.
