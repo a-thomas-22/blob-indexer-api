@@ -165,6 +165,9 @@ func TestToBlobResponse_DerivesBlobCostFields(t *testing.T) {
 	if response.TotalCostETH != "legacy-value" {
 		t.Fatalf("expected legacy total_cost_eth to be preserved, got %q", response.TotalCostETH)
 	}
+	if response.TotalCostWei != "legacy-value" {
+		t.Fatalf("expected total_cost_wei=legacy-value, got %q", response.TotalCostWei)
+	}
 	if response.RealizedCostWei == nil || *response.RealizedCostWei != "20" {
 		t.Fatalf("expected realized_cost_wei=20, got %v", response.RealizedCostWei)
 	}

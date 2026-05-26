@@ -53,7 +53,7 @@ func TestGetTopBlobUsers_SortSpendWindow(t *testing.T) {
 					Name:              "Alice",
 					Category:          "rollup",
 					BlobCount:         10,
-					TotalCostETH:      "2.5",
+					TotalCostETH:      "47185487462400",
 					LastTimestamp:     time.Now(),
 					BlobSharePercent:  62.5,
 					SpendSharePercent: 75,
@@ -90,6 +90,9 @@ func TestGetTopBlobUsers_SortSpendWindow(t *testing.T) {
 	}
 	if resp.Data[0].Category != "rollup" || resp.Data[0].BlobSharePercent != 62.5 || resp.Data[0].SpendSharePercent != 75 {
 		t.Fatalf("unexpected user share fields: %+v", resp.Data[0])
+	}
+	if resp.Data[0].TotalCostWei != "47185487462400" || resp.Data[0].TotalCostETH != "47185487462400" {
+		t.Fatalf("unexpected user cost fields: %+v", resp.Data[0])
 	}
 }
 
