@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.0...blob-indexer-chart-v0.6.1) (2026-05-26)
+
+
+### Bug Fixes
+
+* reduce dashboard database load ([#202](https://github.com/a-thomas-22/blob-indexer-api/issues/202)) ([93ddc67](https://github.com/a-thomas-22/blob-indexer-api/commit/93ddc67e207c520270db4854cf3cc0c06399d197))
+
 ## [0.6.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.5.1...blob-indexer-chart-v0.6.0) (2026-05-25)
 
 
