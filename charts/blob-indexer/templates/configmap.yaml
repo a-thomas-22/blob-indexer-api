@@ -16,6 +16,12 @@ data:
       port: {{ .Values.appConfig.server.port }}
       dev_port: {{ .Values.appConfig.server.dev_port | default 0 }}
       dev_mode: {{ .Values.appConfig.server.dev_mode }}
+      trusted_ip_headers:
+        {{- toYaml .Values.appConfig.server.trusted_ip_headers | nindent 8 }}
+      rate_limit_rps: {{ .Values.appConfig.server.rate_limit_rps | default 100 }}
+      rate_limit_burst: {{ .Values.appConfig.server.rate_limit_burst | default 200 }}
+      aggregate_rate_limit_rps: {{ .Values.appConfig.server.aggregate_rate_limit_rps | default 5 }}
+      aggregate_rate_limit_burst: {{ .Values.appConfig.server.aggregate_rate_limit_burst | default 20 }}
     cors:
       enabled: {{ .Values.appConfig.cors.enabled }}
       allowed_origins:

@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/go-chi/chi/v5"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
@@ -303,6 +304,44 @@ func TestGetUserBreakdown_InvalidWindow(t *testing.T) {
 	}
 }
 
+func TestGetUserBreakdown_CacheHit(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			t.Fatal("DB should not be called on cache hit")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	cacheKey := fmt.Sprintf("breakdown:%d:%s", 42, userWindowAll)
+	a.breakdownCache[cacheKey] = userBreakdownCacheEntry{
+		response: UserBreakdownResponse{
+			NetworkID: 42,
+			Window:    string(userWindowAll),
+			CategoryShares: []CategoryShareResponse{
+				{Category: "rollup", BlobCount: 3},
+			},
+		},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetUserBreakdown(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Success bool                  `json:"success"`
+		Data    UserBreakdownResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success || len(resp.Data.CategoryShares) != 1 || resp.Data.CategoryShares[0].Category != "rollup" {
+		t.Fatalf("unexpected cached response: %+v", resp)
+	}
+}
+
 func TestGetTopBlobUsers_DBError(t *testing.T) {
 	db := &mockDB{
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
@@ -505,6 +544,34 @@ func TestGetUserByAddress_BadNetwork(t *testing.T) {
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	w := httptest.NewRecorder()
 	a.GetUserByAddress(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetUserBreakdown_DBError(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(_ context.Context, _ interface{}, _ string, _ ...interface{}) error {
+			return fmt.Errorf("breakdown query failed")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetUserBreakdown(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
+func TestGetUserBreakdown_BadNetwork(t *testing.T) {
+	a := newTestAPI()
+	a.networks = map[int]config.NetworkConfig{}
+	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetUserBreakdown(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)

@@ -192,6 +192,43 @@ func TestGetRollingStatsWindows_InvalidWindows(t *testing.T) {
 	}
 }
 
+func TestGetRollingStatsWindows_CacheHit(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			t.Fatal("DB should not be called on cache hit")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	cacheKey := "rolling:42:5m,1h,24h,7d"
+	a.rollingCache[cacheKey] = rollingStatsCacheEntry{
+		response: RollingStatsResponse{
+			NetworkID: 42,
+			Windows: []RollingWindowStats{
+				{Window: "5m", TotalBlobs: 7},
+			},
+		},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetRollingStatsWindows(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Success bool                 `json:"success"`
+		Data    RollingStatsResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success || len(resp.Data.Windows) != 1 || resp.Data.Windows[0].TotalBlobs != 7 {
+		t.Fatalf("unexpected cached response: %+v", resp)
+	}
+}
+
 func TestGetRollingStatsWindows_BadNetwork(t *testing.T) {
 	a := newTestAPI()
 	a.networks = map[int]config.NetworkConfig{}

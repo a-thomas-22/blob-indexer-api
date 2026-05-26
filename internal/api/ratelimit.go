@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -22,14 +23,17 @@ type RateLimiter struct {
 	mu       sync.Mutex
 	rate     float64 // tokens per second
 	burst    float64 // max tokens
+	disabled bool
 }
 
 // NewRateLimiter creates a rate limiter. rate is requests per second, burst is the max burst size.
+// A non-positive rate or burst disables limiting.
 func NewRateLimiter(rate float64, burst int) *RateLimiter {
 	rl := &RateLimiter{
 		visitors: make(map[string]*visitor),
 		rate:     rate,
 		burst:    float64(burst),
+		disabled: rate <= 0 || burst <= 0,
 	}
 	go rl.cleanup()
 	return rl
@@ -50,6 +54,10 @@ func (rl *RateLimiter) cleanup() {
 }
 
 func (rl *RateLimiter) allow(ip string) bool {
+	if rl == nil || rl.disabled {
+		return true
+	}
+
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
@@ -78,9 +86,15 @@ func (rl *RateLimiter) allow(ip string) bool {
 
 // RateLimitMiddleware returns an HTTP middleware that enforces per-IP rate limits.
 func RateLimitMiddleware(rl *RateLimiter) func(http.Handler) http.Handler {
+	return RateLimitMiddlewareWithResolver(rl, newClientIPResolver(nil))
+}
+
+// RateLimitMiddlewareWithResolver returns an HTTP middleware that enforces
+// per-client rate limits using the provided client IP resolver.
+func RateLimitMiddlewareWithResolver(rl *RateLimiter, resolver clientIPResolver) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := clientIP(r)
+			ip := resolver.IP(r)
 
 			if !rl.allow(ip) {
 				w.Header().Set("Content-Type", "application/json")
@@ -98,16 +112,83 @@ func RateLimitMiddleware(rl *RateLimiter) func(http.Handler) http.Handler {
 	}
 }
 
-func clientIP(r *http.Request) string {
-	ip := strings.TrimSpace(middleware.GetClientIP(r.Context()))
-	if ip != "" {
+type clientIPResolver struct {
+	trustedHeaders []string
+}
+
+func newClientIPResolver(trustedHeaders []string) clientIPResolver {
+	headers := make([]string, 0, len(trustedHeaders))
+	seen := make(map[string]struct{}, len(trustedHeaders))
+	for _, header := range trustedHeaders {
+		header = http.CanonicalHeaderKey(strings.TrimSpace(header))
+		if header == "" {
+			continue
+		}
+		if _, ok := seen[header]; ok {
+			continue
+		}
+		seen[header] = struct{}{}
+		headers = append(headers, header)
+	}
+	return clientIPResolver{trustedHeaders: headers}
+}
+
+// IP returns the best client IP for logging and rate limiting. Trusted headers
+// are opt-in because they are spoofable when the origin is directly reachable.
+func (r clientIPResolver) IP(req *http.Request) string {
+	if ip, ok := firstTrustedHeaderIP(req.Header, r.trustedHeaders); ok {
 		return ip
 	}
 
-	ip = strings.TrimSpace(r.RemoteAddr)
-	if host, _, err := net.SplitHostPort(ip); err == nil {
-		ip = host
+	ip := strings.TrimSpace(middleware.GetClientIP(req.Context()))
+	if normalized, ok := normalizeIPAddress(ip); ok {
+		return normalized
 	}
 
-	return ip
+	return normalizeRemoteAddress(req.RemoteAddr)
+}
+
+func firstTrustedHeaderIP(headers http.Header, trustedHeaders []string) (string, bool) {
+	for _, header := range trustedHeaders {
+		for _, value := range headers.Values(header) {
+			for _, candidate := range strings.Split(value, ",") {
+				if ip, ok := normalizeIPAddress(candidate); ok {
+					return ip, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+func normalizeRemoteAddress(remoteAddr string) string {
+	remoteAddr = strings.TrimSpace(remoteAddr)
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		if ip, ok := normalizeIPAddress(host); ok {
+			return ip
+		}
+		return host
+	}
+	if ip, ok := normalizeIPAddress(remoteAddr); ok {
+		return ip
+	}
+	return remoteAddr
+}
+
+func normalizeIPAddress(value string) (string, bool) {
+	value = strings.Trim(strings.TrimSpace(value), `"`)
+	if value == "" || strings.EqualFold(value, "unknown") {
+		return "", false
+	}
+
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+	value = strings.Trim(value, "[]")
+
+	addr, err := netip.ParseAddr(value)
+	if err != nil {
+		return "", false
+	}
+	return addr.String(), true
 }

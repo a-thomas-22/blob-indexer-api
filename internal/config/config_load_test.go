@@ -223,6 +223,72 @@ networks:
 	}
 }
 
+func TestLoad_ServerLoadProtectionConfig(t *testing.T) {
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "config.yaml")
+	configContent := `
+database:
+  url: "postgres://localhost:5432/db"
+server:
+  trusted_ip_headers:
+    - CF-Connecting-IP
+  rate_limit_rps: 50
+  rate_limit_burst: 75
+  aggregate_rate_limit_rps: 2.5
+  aggregate_rate_limit_burst: 8
+networks:
+  - name: testnet
+    chain_id: 1
+    rpc_url: "http://localhost:8545"
+    start_block: "0"
+    enabled: true
+`
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CONFIG_PATH", configFile)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertStringSlicesEqual(t, cfg.Server.TrustedIPHeaders, []string{"CF-Connecting-IP"})
+	if cfg.Server.RateLimitRPS != 50 || cfg.Server.RateLimitBurst != 75 {
+		t.Fatalf("unexpected general rate limit config: %+v", cfg.Server)
+	}
+	if cfg.Server.AggregateRateLimitRPS != 2.5 || cfg.Server.AggregateRateLimitBurst != 8 {
+		t.Fatalf("unexpected aggregate rate limit config: %+v", cfg.Server)
+	}
+}
+
+func TestLoad_TrustedIPHeadersEnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "config.yaml")
+	configContent := `
+database:
+  url: "postgres://localhost:5432/db"
+networks:
+  - name: testnet
+    chain_id: 1
+    rpc_url: "http://localhost:8545"
+    start_block: "0"
+    enabled: true
+`
+	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CONFIG_PATH", configFile)
+	t.Setenv("TRUSTED_IP_HEADERS", "CF-Connecting-IP, X-Forwarded-For")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertStringSlicesEqual(t, cfg.Server.TrustedIPHeaders, []string{"CF-Connecting-IP", "X-Forwarded-For"})
+}
+
 func TestLoad_DevPortOverride(t *testing.T) {
 	dir := t.TempDir()
 	configFile := filepath.Join(dir, "config.yaml")

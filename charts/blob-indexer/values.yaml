@@ -105,6 +105,15 @@ appConfig:
     port: 8080
     dev_port: 0
     dev_mode: false
+    # Enable when the API is only reachable through trusted proxies.
+    # For Cloudflare, use:
+    # trusted_ip_headers:
+    #   - CF-Connecting-IP
+    trusted_ip_headers: []
+    rate_limit_rps: 100
+    rate_limit_burst: 200
+    aggregate_rate_limit_rps: 5
+    aggregate_rate_limit_burst: 20
   cors:
     enabled: true
     allowed_origins:
