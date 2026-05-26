@@ -234,6 +234,14 @@ func (a *API) mountPublicRoutes(r chi.Router) {
 			r.Get("/windows", a.GetRollingStatsWindows)
 		})
 
+		// Chart endpoints
+		r.Route("/charts", func(r chi.Router) {
+			r.Get("/blob-market", a.GetBlobMarketChart)
+			r.Get("/attribution-usage", a.GetAttributionUsageChart)
+			r.Get("/cost-comparison", a.GetCostComparisonChart)
+			r.Get("/rolling-stats", a.GetRollingStatsWindows)
+		})
+
 		// Status endpoint
 		r.Get("/status", a.GetIndexerStatus)
 	})
