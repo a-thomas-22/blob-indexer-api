@@ -88,7 +88,7 @@ func TestGetBlobMarketChart_Success(t *testing.T) {
 	rangeEnd := rangeStart.Add(time.Hour)
 	db := &mockDB{
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			if !strings.Contains(query, "generate_series") || !strings.Contains(query, "summary_current_base_fee_wei") {
+			if !strings.Contains(query, "generate_series") || !strings.Contains(query, "selected_metrics AS MATERIALIZED") || !strings.Contains(query, "summary_current_base_fee_wei") {
 				t.Fatalf("unexpected blob market query: %s", query)
 			}
 			if len(args) != 6 {
@@ -152,6 +152,24 @@ func TestGetBlobMarketChart_Success(t *testing.T) {
 	}
 	if resp.Data.Points[0].StartBlock == nil || *resp.Data.Points[0].StartBlock != 100 {
 		t.Fatalf("expected start block 100, got %+v", resp.Data.Points[0].StartBlock)
+	}
+}
+
+func TestGetBlobMarketChart_RejectsAllRange(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(context.Context, interface{}, string, ...interface{}) error {
+			t.Fatal("database should not be queried for range=all")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?range=all", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetBlobMarketChart(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
 

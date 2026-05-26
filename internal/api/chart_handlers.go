@@ -295,6 +295,10 @@ func (a *API) GetBlobMarketChart(w http.ResponseWriter, r *http.Request) {
 		a.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if chart.Range == chartRangeAll {
+		a.respondError(w, http.StatusBadRequest, "range=all is not supported for blob-market; use range=30d or narrower")
+		return
+	}
 
 	logger.Debug("Getting blob market chart",
 		zap.String("network", network.Name),
@@ -1002,13 +1006,8 @@ func formatRatDecimal(value *big.Rat, precision int) string {
 const queryBlobMarketTimeChart = `
 	WITH bounds AS (
 		SELECT
-			CASE
-				WHEN $2::text = 'all' THEN date_trunc($6::text, COALESCE(MIN(block_timestamp), $4::timestamp))
-				ELSE $3::timestamp
-			END AS range_start,
+			$3::timestamp AS range_start,
 			$4::timestamp AS range_end
-		FROM block_metrics
-		WHERE network_id = $1
 	),
 	buckets AS (
 		SELECT
@@ -1023,62 +1022,72 @@ const queryBlobMarketTimeChart = `
 		) AS g(bucket_start)
 		WHERE b.range_end > b.range_start
 	),
-	bucket_metrics AS (
+	selected_metrics AS MATERIALIZED (
 		SELECT
-			b.bucket_start,
-			MIN(bm.block_number) AS start_block,
-			MAX(bm.block_number) AS end_block,
-			COALESCE(AVG(bm.blob_base_fee::numeric), 0)::text AS average_blob_base_fee_wei,
-			COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY bm.blob_base_fee::numeric), 0)::text AS median_blob_base_fee_wei,
-			COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY bm.blob_base_fee::numeric), 0)::text AS p95_blob_base_fee_wei,
-			COALESCE(SUM(bm.blob_count), 0)::int AS blob_count,
-			COALESCE(SUM(bm.blob_gas_used), 0)::bigint AS blob_gas_used,
-			COALESCE(SUM(bm.blob_gas_target), 0)::bigint AS blob_gas_target,
-			COALESCE(AVG(bm.utilization_ratio::numeric), 0)::text AS average_utilization
-		FROM buckets b
-		LEFT JOIN block_metrics bm
-			ON bm.network_id = $1
-			AND bm.block_timestamp >= b.bucket_start
-			AND bm.block_timestamp < b.bucket_start + ($5::bigint * INTERVAL '1 second')
-		GROUP BY b.bucket_start
-	),
-	bucket_blobs AS (
-		SELECT
-			b.bucket_start,
-			COALESCE(SUM(bl.total_cost_eth::numeric), 0)::text AS total_cost_wei,
-			COUNT(DISTINCT bl.from_address)::int AS unique_senders
-		FROM buckets b
-		LEFT JOIN blobs bl
-			ON bl.network_id = $1
-			AND bl.confirmed = true
-			AND bl.timestamp >= b.bucket_start
-			AND bl.timestamp < b.bucket_start + ($5::bigint * INTERVAL '1 second')
-		GROUP BY b.bucket_start
-	),
-	summary_metrics AS (
-		SELECT
-			COALESCE(AVG(bm.blob_base_fee::numeric), 0)::text AS average_blob_base_fee_wei,
-			COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY bm.blob_base_fee::numeric), 0)::text AS median_blob_base_fee_wei,
-			COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY bm.blob_base_fee::numeric), 0)::text AS p95_blob_base_fee_wei,
-			COALESCE(SUM(bm.blob_count), 0)::int AS total_blobs,
-			COALESCE(SUM(bm.blob_gas_used), 0)::bigint AS total_blob_gas_used,
-			COALESCE(AVG(bm.utilization_ratio::numeric), 0)::text AS average_utilization
-		FROM bounds b
-		LEFT JOIN block_metrics bm
-			ON bm.network_id = $1
+			bm.*,
+			TIMESTAMP 'epoch' + (
+				FLOOR(EXTRACT(EPOCH FROM bm.block_timestamp) / $5::numeric)::bigint
+				* ($5::bigint * INTERVAL '1 second')
+			) AS bucket_start
+		FROM block_metrics bm
+		CROSS JOIN bounds b
+		WHERE bm.network_id = $1
 			AND bm.block_timestamp >= b.range_start
 			AND bm.block_timestamp < b.range_end
 	),
-	summary_blobs AS (
+	bucket_metrics AS (
 		SELECT
-			COALESCE(SUM(bl.total_cost_eth::numeric), 0)::text AS total_cost_wei,
-			COUNT(DISTINCT bl.from_address)::int AS unique_senders
-		FROM bounds b
-		LEFT JOIN blobs bl
-			ON bl.network_id = $1
+			bucket_start,
+			MIN(block_number) AS start_block,
+			MAX(block_number) AS end_block,
+			COALESCE(AVG(blob_base_fee::numeric), 0)::text AS average_blob_base_fee_wei,
+			COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY blob_base_fee::numeric), 0)::text AS median_blob_base_fee_wei,
+			COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY blob_base_fee::numeric), 0)::text AS p95_blob_base_fee_wei,
+			COALESCE(SUM(blob_count), 0)::int AS blob_count,
+			COALESCE(SUM(blob_gas_used), 0)::bigint AS blob_gas_used,
+			COALESCE(SUM(blob_gas_target), 0)::bigint AS blob_gas_target,
+			COALESCE(AVG(utilization_ratio::numeric), 0)::text AS average_utilization
+		FROM selected_metrics
+		GROUP BY bucket_start
+	),
+	selected_blobs AS MATERIALIZED (
+		SELECT
+			bl.from_address,
+			bl.total_cost_eth::numeric AS total_cost_eth,
+			TIMESTAMP 'epoch' + (
+				FLOOR(EXTRACT(EPOCH FROM bl.timestamp) / $5::numeric)::bigint
+				* ($5::bigint * INTERVAL '1 second')
+			) AS bucket_start
+		FROM blobs bl
+		CROSS JOIN bounds b
+		WHERE bl.network_id = $1
 			AND bl.confirmed = true
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
+	),
+	bucket_blobs AS (
+		SELECT
+			bucket_start,
+			COALESCE(SUM(total_cost_eth), 0)::text AS total_cost_wei,
+			COUNT(DISTINCT from_address)::int AS unique_senders
+		FROM selected_blobs
+		GROUP BY bucket_start
+	),
+	summary_metrics AS (
+		SELECT
+			COALESCE(AVG(blob_base_fee::numeric), 0)::text AS average_blob_base_fee_wei,
+			COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY blob_base_fee::numeric), 0)::text AS median_blob_base_fee_wei,
+			COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY blob_base_fee::numeric), 0)::text AS p95_blob_base_fee_wei,
+			COALESCE(SUM(blob_count), 0)::int AS total_blobs,
+			COALESCE(SUM(blob_gas_used), 0)::bigint AS total_blob_gas_used,
+			COALESCE(AVG(utilization_ratio::numeric), 0)::text AS average_utilization
+		FROM selected_metrics
+	),
+	summary_blobs AS (
+		SELECT
+			COALESCE(SUM(total_cost_eth), 0)::text AS total_cost_wei,
+			COUNT(DISTINCT from_address)::int AS unique_senders
+		FROM selected_blobs
 	),
 	latest_metric AS (
 		SELECT COALESCE((
@@ -1095,15 +1104,15 @@ const queryBlobMarketTimeChart = `
 		b.range_end,
 		bm.start_block,
 		bm.end_block,
-		bm.average_blob_base_fee_wei,
-		bm.median_blob_base_fee_wei,
-		bm.p95_blob_base_fee_wei,
-		bm.blob_count,
-		bm.blob_gas_used,
-		bm.blob_gas_target,
-		bm.average_utilization,
-		bb.total_cost_wei,
-		bb.unique_senders,
+		COALESCE(bm.average_blob_base_fee_wei, '0') AS average_blob_base_fee_wei,
+		COALESCE(bm.median_blob_base_fee_wei, '0') AS median_blob_base_fee_wei,
+		COALESCE(bm.p95_blob_base_fee_wei, '0') AS p95_blob_base_fee_wei,
+		COALESCE(bm.blob_count, 0) AS blob_count,
+		COALESCE(bm.blob_gas_used, 0)::bigint AS blob_gas_used,
+		COALESCE(bm.blob_gas_target, 0)::bigint AS blob_gas_target,
+		COALESCE(bm.average_utilization, '0') AS average_utilization,
+		COALESCE(bb.total_cost_wei, '0') AS total_cost_wei,
+		COALESCE(bb.unique_senders, 0) AS unique_senders,
 		lm.current_base_fee_wei AS summary_current_base_fee_wei,
 		sm.average_blob_base_fee_wei AS summary_average_blob_base_fee_wei,
 		sm.median_blob_base_fee_wei AS summary_median_blob_base_fee_wei,
@@ -1114,8 +1123,8 @@ const queryBlobMarketTimeChart = `
 		sb.total_cost_wei AS summary_total_cost_wei,
 		sb.unique_senders AS summary_unique_senders
 	FROM buckets b
-	JOIN bucket_metrics bm ON bm.bucket_start = b.bucket_start
-	JOIN bucket_blobs bb ON bb.bucket_start = b.bucket_start
+	LEFT JOIN bucket_metrics bm ON bm.bucket_start = b.bucket_start
+	LEFT JOIN bucket_blobs bb ON bb.bucket_start = b.bucket_start
 	CROSS JOIN summary_metrics sm
 	CROSS JOIN summary_blobs sb
 	CROSS JOIN latest_metric lm
