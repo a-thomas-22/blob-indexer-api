@@ -261,10 +261,10 @@ func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) 
 
 		// Chart endpoints
 		r.Route("/charts", func(r chi.Router) {
-			r.Get("/blob-market", a.GetBlobMarketChart)
-			r.Get("/attribution-usage", a.GetAttributionUsageChart)
-			r.Get("/cost-comparison", a.GetCostComparisonChart)
-			r.Get("/rolling-stats", a.GetRollingStatsWindows)
+			r.With(aggregateLimit).Get("/blob-market", a.GetBlobMarketChart)
+			r.With(aggregateLimit).Get("/attribution-usage", a.GetAttributionUsageChart)
+			r.With(aggregateLimit).Get("/cost-comparison", a.GetCostComparisonChart)
+			r.With(aggregateLimit).Get("/rolling-stats", a.GetRollingStatsChart)
 		})
 
 		// Status endpoint

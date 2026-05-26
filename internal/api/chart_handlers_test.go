@@ -47,6 +47,7 @@ func TestParseChartRequest_InvalidInputs(t *testing.T) {
 		"/?range=2h",
 		"/?granularity=second",
 		"/?range=all&granularity=block",
+		"/?range=all&granularity=hour",
 		"/?range=24h&granularity=minute",
 		"/?range=1h&granularity=day",
 		"/?limit=0",
@@ -291,6 +292,9 @@ func TestGetCostComparisonChart_Success(t *testing.T) {
 	if resp.Data.Model.CalldataGasPerByte != calldataGasPerByte || !strings.Contains(resp.Data.Model.Description, "Approximation") {
 		t.Fatalf("unexpected model: %+v", resp.Data.Model)
 	}
+	if resp.Data.Model.BlobSizeBytes != blobSizeBytes {
+		t.Fatalf("blob_size_bytes = %d, want %d", resp.Data.Model.BlobSizeBytes, blobSizeBytes)
+	}
 	if resp.Data.Points[0].AverageExecutionBaseFeeWei != nil {
 		t.Fatalf("expected omitted execution base fee, got %v", *resp.Data.Points[0].AverageExecutionBaseFeeWei)
 	}
@@ -440,7 +444,26 @@ func TestChartHandlers_BlockGranularity(t *testing.T) {
 				if len(args) != 4 || args[3] != defaultAttributionSeriesLimit {
 					t.Fatalf("unexpected args: %#v", args)
 				}
-				setSliceResult(dest, []attributionUsageChartRow{{Timestamp: blockTime, RangeStart: blockTime.Add(-time.Hour), RangeEnd: blockTime}})
+				setSliceResult(dest, []attributionUsageChartRow{
+					{
+						Timestamp:   blockTime,
+						RangeStart:  blockTime.Add(-time.Hour),
+						RangeEnd:    blockTime,
+						BlockNumber: sql.NullInt64{Int64: 100, Valid: true},
+						Key:         sql.NullString{String: "base", Valid: true},
+						Name:        sql.NullString{String: "Base", Valid: true},
+						Category:    sql.NullString{String: "rollup", Valid: true},
+					},
+					{
+						Timestamp:   blockTime,
+						RangeStart:  blockTime.Add(-time.Hour),
+						RangeEnd:    blockTime,
+						BlockNumber: sql.NullInt64{Int64: 101, Valid: true},
+						Key:         sql.NullString{String: "base", Valid: true},
+						Name:        sql.NullString{String: "Base", Valid: true},
+						Category:    sql.NullString{String: "rollup", Valid: true},
+					},
+				})
 				return nil
 			},
 		}
@@ -452,6 +475,20 @@ func TestChartHandlers_BlockGranularity(t *testing.T) {
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		var resp struct {
+			Success bool                          `json:"success"`
+			Data    AttributionUsageChartResponse `json:"data"`
+		}
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if len(resp.Data.Points) != 2 {
+			t.Fatalf("expected same-timestamp blocks to remain separate points, got %d", len(resp.Data.Points))
+		}
+		if resp.Data.Points[0].StartBlock == nil || resp.Data.Points[1].StartBlock == nil ||
+			*resp.Data.Points[0].StartBlock != 100 || *resp.Data.Points[1].StartBlock != 101 {
+			t.Fatalf("unexpected block anchors: %+v", resp.Data.Points)
 		}
 	})
 
@@ -575,7 +612,9 @@ func TestChartRoutesMounted(t *testing.T) {
 	})
 	r := chi.NewRouter()
 	r.Route("/api/v1", func(r chi.Router) {
-		a.mountPublicRoutes(r)
+		a.mountPublicRoutes(r, func(next http.Handler) http.Handler {
+			return next
+		})
 	})
 
 	for _, path := range []string{

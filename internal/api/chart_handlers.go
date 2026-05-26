@@ -19,6 +19,8 @@ import (
 )
 
 const (
+	blobSizeBytes = params.BlobTxFieldElementsPerBlob * params.BlobTxBytesPerFieldElement
+
 	chartRange1h  = "1h"
 	chartRange24h = "24h"
 	chartRange7d  = "7d"
@@ -120,8 +122,10 @@ type AttributionUsageSeries struct {
 
 // AttributionUsagePoint is one attribution chart bucket.
 type AttributionUsagePoint struct {
-	Timestamp time.Time                        `json:"timestamp"`
-	Values    map[string]AttributionUsageValue `json:"values"`
+	Timestamp  time.Time                        `json:"timestamp"`
+	StartBlock *int64                           `json:"start_block,omitempty"`
+	EndBlock   *int64                           `json:"end_block,omitempty"`
+	Values     map[string]AttributionUsageValue `json:"values"`
 }
 
 // AttributionUsageValue contains per-series usage for one bucket.
@@ -232,6 +236,7 @@ type attributionUsageChartRow struct {
 	Timestamp    time.Time      `db:"timestamp"`
 	RangeStart   time.Time      `db:"range_start"`
 	RangeEnd     time.Time      `db:"range_end"`
+	BlockNumber  sql.NullInt64  `db:"block_number"`
 	Key          sql.NullString `db:"series_key"`
 	Name         sql.NullString `db:"series_name"`
 	Category     sql.NullString `db:"series_category"`
@@ -256,6 +261,12 @@ type costComparisonChartRow struct {
 	SummaryCalldataEquivalentCostWei string         `db:"summary_calldata_equivalent_cost_wei"`
 	SummarySavingsWei                string         `db:"summary_savings_wei"`
 	SummarySavingsPercent            float64        `db:"summary_savings_percent"`
+}
+
+type attributionPointKey struct {
+	timestamp time.Time
+	block     int64
+	hasBlock  bool
 }
 
 // GetBlobMarketChart godoc
@@ -448,6 +459,9 @@ func parseChartRequest(r *http.Request, generatedAt time.Time, useLimitForPointC
 	}
 
 	rawGranularity := strings.ToLower(strings.TrimSpace(q.Get("granularity")))
+	if rangeLabel == chartRangeAll && rawGranularity != "" && rawGranularity != chartGranularityAuto && rawGranularity != chartGranularityDay {
+		return chartRequest{}, fmt.Errorf("range=all only supports granularity=auto or granularity=day")
+	}
 	if rawGranularity == "" {
 		rawGranularity = chartGranularityAuto
 	}
@@ -697,19 +711,26 @@ func buildAttributionUsageChartResponse(networkID int, networkName string, chart
 		response.EndTime = rows[0].RangeEnd
 	}
 
-	pointByTimestamp := make(map[time.Time]*AttributionUsagePoint)
+	pointIndexByKey := make(map[attributionPointKey]int)
 	seriesByKey := make(map[string]AttributionUsageSeries)
 	totalsByKey := make(map[string]AttributionUsageValue)
 
 	for _, row := range rows {
-		point, ok := pointByTimestamp[row.Timestamp]
+		pointKey := attributionUsagePointKey(row)
+		pointIndex, ok := pointIndexByKey[pointKey]
 		if !ok {
-			response.Points = append(response.Points, AttributionUsagePoint{
+			point := AttributionUsagePoint{
 				Timestamp: row.Timestamp,
 				Values:    make(map[string]AttributionUsageValue),
-			})
-			point = &response.Points[len(response.Points)-1]
-			pointByTimestamp[row.Timestamp] = point
+			}
+			if row.BlockNumber.Valid {
+				block := row.BlockNumber.Int64
+				point.StartBlock = &block
+				point.EndBlock = &block
+			}
+			response.Points = append(response.Points, point)
+			pointIndex = len(response.Points) - 1
+			pointIndexByKey[pointKey] = pointIndex
 		}
 
 		if !row.Key.Valid || strings.TrimSpace(row.Key.String) == "" {
@@ -721,7 +742,7 @@ func buildAttributionUsageChartResponse(networkID int, networkName string, chart
 			TotalCostWei: nonEmptyDecimal(row.TotalCostWei),
 			BlobGasUsed:  row.BlobGasUsed,
 		}
-		point.Values[key] = value
+		response.Points[pointIndex].Values[key] = value
 
 		if _, ok := seriesByKey[key]; !ok {
 			seriesByKey[key] = AttributionUsageSeries{
@@ -750,6 +771,15 @@ func buildAttributionUsageChartResponse(networkID int, networkName string, chart
 	}
 
 	return response
+}
+
+func attributionUsagePointKey(row attributionUsageChartRow) attributionPointKey {
+	key := attributionPointKey{timestamp: row.Timestamp}
+	if row.BlockNumber.Valid {
+		key.block = row.BlockNumber.Int64
+		key.hasBlock = true
+	}
+	return key
 }
 
 func orderedAttributionSeries(seriesByKey map[string]AttributionUsageSeries, totalsByKey map[string]AttributionUsageValue) []AttributionUsageSeries {
@@ -808,7 +838,7 @@ func buildCostComparisonChartResponse(networkID int, networkName string, chart c
 		GeneratedAt:   chart.GeneratedAt,
 		Model: CostComparisonModel{
 			CalldataGasPerByte: calldataGasPerByte,
-			BlobSizeBytes:      int(params.BlobTxBlobGasPerBlob),
+			BlobSizeBytes:      blobSizeBytes,
 			Description:        calldataCostModelDescription,
 		},
 		Points:  make([]CostComparisonChartPoint, 0, len(rows)),
@@ -1465,6 +1495,7 @@ var queryAttributionUsageTimeChart = `
 		b.bucket_start AS timestamp,
 		b.range_start,
 		b.range_end,
+		NULL::bigint AS block_number,
 		u.series_key,
 		u.series_name,
 		u.series_category,
@@ -1516,6 +1547,7 @@ var queryAttributionUsageBlockChart = `
 		b.bucket_start AS timestamp,
 		b.range_start,
 		b.range_end,
+		b.block_number,
 		u.series_key,
 		u.series_name,
 		u.series_category,
