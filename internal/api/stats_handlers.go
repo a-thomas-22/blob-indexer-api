@@ -13,16 +13,25 @@ import (
 
 // StatsResponse is a response containing blob statistics
 type StatsResponse struct {
-	NetworkID           int       `json:"network_id,omitempty"`
-	NetworkName         string    `json:"network_name,omitempty"`
-	TotalBlobs          int       `json:"total_blobs"`
-	TotalConfirmedBlobs int       `json:"total_confirmed_blobs"`
-	TotalPendingBlobs   int       `json:"total_pending_blobs"`
-	AverageBaseFee      string    `json:"average_base_fee"`
-	AverageTip          string    `json:"average_tip"`
-	AverageTotalCost    string    `json:"average_total_cost"`
-	LastIndexedBlock    uint64    `json:"last_indexed_block"`
-	LastIndexedTime     time.Time `json:"last_indexed_time"`
+	NetworkID           int    `json:"network_id,omitempty"`
+	NetworkName         string `json:"network_name,omitempty"`
+	TotalBlobs          int    `json:"total_blobs"`
+	TotalConfirmedBlobs int    `json:"total_confirmed_blobs"`
+	TotalPendingBlobs   int    `json:"total_pending_blobs"`
+	// Average base fee per blob gas in wei. Aggregate averages may include fractional decimal precision.
+	AverageBaseFeePerBlobGasWei string `json:"average_base_fee_per_blob_gas_wei" example:"4841467206.84506683"`
+	// Average priority tip per blob gas in wei. Aggregate averages may include fractional decimal precision.
+	AverageTipPerBlobGasWei string `json:"average_tip_per_blob_gas_wei" example:"15678762992.04263056"`
+	// Average realized blob base-fee cost in wei. Aggregate averages may include fractional decimal precision.
+	AverageTotalCostWei string `json:"average_total_cost_wei" example:"2207855919292172.4863"`
+	// Deprecated alias: use average_base_fee_per_blob_gas_wei.
+	AverageBaseFee string `json:"average_base_fee" extensions:"x-deprecated,x-replacement=average_base_fee_per_blob_gas_wei" example:"4841467206.84506683"`
+	// Deprecated alias: use average_tip_per_blob_gas_wei.
+	AverageTip string `json:"average_tip" extensions:"x-deprecated,x-replacement=average_tip_per_blob_gas_wei" example:"15678762992.04263056"`
+	// Deprecated alias: use average_total_cost_wei.
+	AverageTotalCost string    `json:"average_total_cost" extensions:"x-deprecated,x-replacement=average_total_cost_wei" example:"2207855919292172.4863"`
+	LastIndexedBlock uint64    `json:"last_indexed_block"`
+	LastIndexedTime  time.Time `json:"last_indexed_time"`
 }
 
 // GetBlobStats godoc
@@ -100,16 +109,19 @@ func (a *API) queryBlobStats(ctx context.Context, networkID int, networkName str
 	}
 
 	response := StatsResponse{
-		NetworkID:           networkID,
-		NetworkName:         networkName,
-		TotalBlobs:          stats.TotalBlobs,
-		TotalConfirmedBlobs: stats.TotalConfirmedBlobs,
-		TotalPendingBlobs:   stats.TotalPendingBlobs,
-		AverageBaseFee:      stats.AverageBaseFee,
-		AverageTip:          stats.AverageTip,
-		AverageTotalCost:    stats.AverageTotalCost,
-		LastIndexedBlock:    a.getLastIndexedBlockFromDB(ctx, networkID),
-		LastIndexedTime:     stats.LastIndexedTime,
+		NetworkID:                   networkID,
+		NetworkName:                 networkName,
+		TotalBlobs:                  stats.TotalBlobs,
+		TotalConfirmedBlobs:         stats.TotalConfirmedBlobs,
+		TotalPendingBlobs:           stats.TotalPendingBlobs,
+		AverageBaseFeePerBlobGasWei: stats.AverageBaseFee,
+		AverageTipPerBlobGasWei:     stats.AverageTip,
+		AverageTotalCostWei:         stats.AverageTotalCost,
+		AverageBaseFee:              stats.AverageBaseFee,
+		AverageTip:                  stats.AverageTip,
+		AverageTotalCost:            stats.AverageTotalCost,
+		LastIndexedBlock:            a.getLastIndexedBlockFromDB(ctx, networkID),
+		LastIndexedTime:             stats.LastIndexedTime,
 	}
 
 	a.cacheMu.Lock()

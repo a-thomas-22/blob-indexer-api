@@ -25,31 +25,34 @@ const mempoolPressureSampleLimit = 10000
 
 // BlobResponse is a response containing blob data
 type BlobResponse struct {
-	NetworkID             int       `json:"network_id"`
-	NetworkName           string    `json:"network_name,omitempty"`
-	BlockNumber           int64     `json:"block_number"`
-	BlobIndex             int       `json:"blob_index"`
-	TxHash                string    `json:"tx_hash"`
-	TransactionURL        string    `json:"transaction_url,omitempty"`
-	FromAddress           string    `json:"from_address"`
-	FromAddressURL        string    `json:"from_address_url,omitempty"`
-	BlockURL              string    `json:"block_url,omitempty"`
-	UserAttribution       string    `json:"user_attribution,omitempty"`
-	BlobSizeBytes         int64     `json:"blob_size_bytes"`
-	BaseFeePerBlobGas     string    `json:"base_fee_per_blob_gas"`
-	BaseFeePerBlobGasGwei string    `json:"base_fee_per_blob_gas_gwei,omitempty"`
-	TipPerBlobGas         string    `json:"tip_per_blob_gas"`
-	TipPerBlobGasGwei     string    `json:"tip_per_blob_gas_gwei,omitempty"`
-	TotalCostETH          string    `json:"total_cost_eth"`
-	Timestamp             time.Time `json:"timestamp"`
-	Confirmed             bool      `json:"confirmed"`
-	MaxFeePerBlobGas      *string   `json:"max_fee_per_blob_gas,omitempty"`
-	MaxFeePerBlobGasGwei  string    `json:"max_fee_per_blob_gas_gwei,omitempty"`
-	BlobGasUsed           *int64    `json:"blob_gas_used,omitempty"`
-	RealizedCostWei       *string   `json:"realized_cost_wei,omitempty"`
-	MaxCostWei            *string   `json:"max_cost_wei,omitempty"`
-	HeadroomWei           *string   `json:"fee_cap_headroom_wei,omitempty"`
-	HeadroomPercent       *string   `json:"fee_cap_headroom_percent,omitempty"`
+	NetworkID             int    `json:"network_id"`
+	NetworkName           string `json:"network_name,omitempty"`
+	BlockNumber           int64  `json:"block_number"`
+	BlobIndex             int    `json:"blob_index"`
+	TxHash                string `json:"tx_hash"`
+	TransactionURL        string `json:"transaction_url,omitempty"`
+	FromAddress           string `json:"from_address"`
+	FromAddressURL        string `json:"from_address_url,omitempty"`
+	BlockURL              string `json:"block_url,omitempty"`
+	UserAttribution       string `json:"user_attribution,omitempty"`
+	BlobSizeBytes         int64  `json:"blob_size_bytes"`
+	BaseFeePerBlobGas     string `json:"base_fee_per_blob_gas"`
+	BaseFeePerBlobGasGwei string `json:"base_fee_per_blob_gas_gwei,omitempty"`
+	TipPerBlobGas         string `json:"tip_per_blob_gas"`
+	TipPerBlobGasGwei     string `json:"tip_per_blob_gas_gwei,omitempty"`
+	// Realized blob base-fee cost in wei, serialized as a decimal string.
+	TotalCostWei string `json:"total_cost_wei" example:"4718548746240"`
+	// Deprecated alias: use total_cost_wei. This legacy field contains wei, not ETH.
+	TotalCostETH         string    `json:"total_cost_eth" extensions:"x-deprecated,x-replacement=total_cost_wei" example:"4718548746240"`
+	Timestamp            time.Time `json:"timestamp"`
+	Confirmed            bool      `json:"confirmed"`
+	MaxFeePerBlobGas     *string   `json:"max_fee_per_blob_gas,omitempty"`
+	MaxFeePerBlobGasGwei string    `json:"max_fee_per_blob_gas_gwei,omitempty"`
+	BlobGasUsed          *int64    `json:"blob_gas_used,omitempty"`
+	RealizedCostWei      *string   `json:"realized_cost_wei,omitempty"`
+	MaxCostWei           *string   `json:"max_cost_wei,omitempty"`
+	HeadroomWei          *string   `json:"fee_cap_headroom_wei,omitempty"`
+	HeadroomPercent      *string   `json:"fee_cap_headroom_percent,omitempty"`
 }
 
 // BlockPricingResponse represents block-level blob pricing data
@@ -197,6 +200,7 @@ func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
 		BaseFeePerBlobGasGwei: formatWeiAsGwei(blob.BaseFeePerBlobGas),
 		TipPerBlobGas:         blob.TipPerBlobGas,
 		TipPerBlobGasGwei:     formatWeiAsGwei(blob.TipPerBlobGas),
+		TotalCostWei:          blob.TotalCostETH,
 		TotalCostETH:          blob.TotalCostETH,
 		Timestamp:             blob.Timestamp,
 		Confirmed:             blob.Confirmed,

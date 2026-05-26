@@ -128,11 +128,11 @@ components:
         - users_update
     DecimalString:
       type: string
-      description: Decimal-encoded numeric value. Large integer and ETH values are serialized as strings.
+      description: Decimal-encoded numeric value serialized as a string. Aggregate values may include fractional decimal precision.
       example: '0.001'
     WeiString:
       type: string
-      description: Decimal-encoded wei value serialized as a string.
+      description: Decimal-encoded wei value serialized as a string. Per-transaction values are integers; aggregate averages may include fractional decimal precision.
       example: '1000000000'
     ISODateTime:
       type: string
@@ -290,8 +290,15 @@ components:
           $ref: '#/components/schemas/WeiString'
         tip_per_blob_gas_gwei:
           $ref: '#/components/schemas/DecimalString'
+        total_cost_wei:
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          description: Realized blob base-fee cost in wei.
         total_cost_eth:
-          $ref: '#/components/schemas/DecimalString'
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          deprecated: true
+          description: Deprecated alias for `total_cost_wei`; this legacy field contains wei, not ETH.
         timestamp:
           $ref: '#/components/schemas/ISODateTime'
         confirmed:
@@ -318,6 +325,9 @@ components:
         - total_blobs
         - total_confirmed_blobs
         - total_pending_blobs
+        - average_base_fee_per_blob_gas_wei
+        - average_tip_per_blob_gas_wei
+        - average_total_cost_wei
         - average_base_fee
         - average_tip
         - average_total_cost
@@ -334,12 +344,33 @@ components:
           type: integer
         total_pending_blobs:
           type: integer
+        average_base_fee_per_blob_gas_wei:
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          description: Average base fee per blob gas in wei. May include fractional decimal precision because it is an aggregate average.
+        average_tip_per_blob_gas_wei:
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          description: Average priority tip per blob gas in wei. May include fractional decimal precision because it is an aggregate average.
+        average_total_cost_wei:
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          description: Average realized blob base-fee cost in wei. May include fractional decimal precision because it is an aggregate average.
         average_base_fee:
-          $ref: '#/components/schemas/WeiString'
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          deprecated: true
+          description: Deprecated alias for `average_base_fee_per_blob_gas_wei`.
         average_tip:
-          $ref: '#/components/schemas/WeiString'
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          deprecated: true
+          description: Deprecated alias for `average_tip_per_blob_gas_wei`.
         average_total_cost:
-          $ref: '#/components/schemas/DecimalString'
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          deprecated: true
+          description: Deprecated alias for `average_total_cost_wei`.
         last_indexed_block:
           type: integer
           format: int64
@@ -351,6 +382,7 @@ components:
         - network_id
         - address
         - blob_count
+        - total_cost_wei
         - total_cost_eth
         - last_timestamp
       properties:
@@ -366,8 +398,15 @@ components:
           type: string
         blob_count:
           type: integer
+        total_cost_wei:
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          description: Total realized blob base-fee cost in wei.
         total_cost_eth:
-          $ref: '#/components/schemas/DecimalString'
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          deprecated: true
+          description: Deprecated alias for `total_cost_wei`; this legacy field contains wei, not ETH.
         last_timestamp:
           $ref: '#/components/schemas/ISODateTime'
         blob_share_percent:
