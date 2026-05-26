@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -623,5 +624,41 @@ func TestNewPoller_DefaultIntervals(t *testing.T) {
 	}
 	if p.usersThrottle != defaultUsersThrottle {
 		t.Errorf("got usersThrottle %v, want %v", p.usersThrottle, defaultUsersThrottle)
+	}
+}
+
+func TestPoller_SkipsWhenNoClientsConnected(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	var queries int64
+	db := &mockDB{
+		getFn: func(_ context.Context, _ interface{}, _ string, _ ...interface{}) error {
+			atomic.AddInt64(&queries, 1)
+			return nil
+		},
+		selectFn: func(_ context.Context, _ interface{}, _ string, _ ...interface{}) error {
+			atomic.AddInt64(&queries, 1)
+			return nil
+		},
+	}
+
+	// Short interval so ticks fire promptly; hub has no clients registered.
+	poller := NewPoller(db, hub, testNetworks(), 10*time.Millisecond, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		poller.Run(ctx)
+		close(done)
+	}()
+
+	// Let several ticks fire while ClientCount == 0.
+	time.Sleep(80 * time.Millisecond)
+	cancel()
+	<-done
+
+	if got := atomic.LoadInt64(&queries); got != 0 {
+		t.Fatalf("expected zero DB queries while no clients connected, got %d", got)
 	}
 }

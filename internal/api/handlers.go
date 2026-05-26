@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,6 +22,12 @@ const MaxQueryOffset = 10000
 const aggregateCacheTTL = 30 * time.Second
 const aggregateQueryTimeout = 5 * time.Second
 const apiWindow24h = "24h"
+
+// aggregateWorkContext keeps request-scoped values but decouples shared
+// singleflight work from one caller's cancellation.
+func aggregateWorkContext(r *http.Request) context.Context {
+	return context.WithoutCancel(r.Context())
+}
 
 // Response is the standard API response wrapper
 type Response struct {

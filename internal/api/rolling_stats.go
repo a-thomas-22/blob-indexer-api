@@ -119,20 +119,60 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 		durationSeconds = append(durationSeconds, int64(window.Duration/time.Second))
 	}
 
-	generatedAt := time.Now().UTC()
-	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
-	defer cancel()
+	cacheKey := fmt.Sprintf("rolling:%d:%s", network.ChainID, strings.Join(labels, ","))
+	a.cacheMu.RLock()
+	if cached, ok := a.rollingCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+		a.cacheMu.RUnlock()
+		a.respondSuccess(w, cached.response)
+		return
+	}
+	a.cacheMu.RUnlock()
 
-	var rows []rollingStatsWindowRow
-	if err := a.db.SelectContext(
-		queryCtx,
-		&rows,
-		queryRollingStatsWindows,
-		network.ChainID,
-		pq.Array(labels),
-		pq.Array(durationSeconds),
-		generatedAt,
-	); err != nil {
+	value, err, _ := a.aggregateGroup.Do(cacheKey, func() (interface{}, error) {
+		a.cacheMu.RLock()
+		if cached, ok := a.rollingCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+			a.cacheMu.RUnlock()
+			return cached.response, nil
+		}
+		a.cacheMu.RUnlock()
+
+		generatedAt := time.Now().UTC()
+		queryCtx, cancel := context.WithTimeout(aggregateWorkContext(r), aggregateQueryTimeout)
+		defer cancel()
+
+		var rows []rollingStatsWindowRow
+		if err := a.db.SelectContext(
+			queryCtx,
+			&rows,
+			queryRollingStatsWindows,
+			network.ChainID,
+			pq.Array(labels),
+			pq.Array(durationSeconds),
+			generatedAt,
+		); err != nil {
+			return RollingStatsResponse{}, err
+		}
+
+		response := RollingStatsResponse{
+			NetworkID:   network.ChainID,
+			NetworkName: network.Name,
+			GeneratedAt: generatedAt,
+			Windows:     make([]RollingWindowStats, 0, len(rows)),
+		}
+		for _, row := range rows {
+			response.Windows = append(response.Windows, toRollingWindowStats(row))
+		}
+
+		a.cacheMu.Lock()
+		a.rollingCache[cacheKey] = rollingStatsCacheEntry{
+			response:  response,
+			expiresAt: time.Now().Add(aggregateCacheTTL),
+		}
+		a.cacheMu.Unlock()
+
+		return response, nil
+	})
+	if err != nil {
 		logger.Error("Failed to get rolling blob market statistics",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -140,15 +180,9 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := RollingStatsResponse{
-		NetworkID:   network.ChainID,
-		NetworkName: network.Name,
-		GeneratedAt: generatedAt,
-		Windows:     make([]RollingWindowStats, 0, len(rows)),
-	}
-	for _, row := range rows {
-		response.Windows = append(response.Windows, toRollingWindowStats(row))
-	}
+	// The singleflight closure above always returns RollingStatsResponse or an error,
+	// so the assertion's ok value can never be false here.
+	response, _ := value.(RollingStatsResponse)
 
 	a.respondSuccess(w, response)
 }
