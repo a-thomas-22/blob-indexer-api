@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.1](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.7.0...blob-indexer-api-v0.7.1) (2026-05-26)
+
+
+### Bug Fixes
+
+* **stats:** remove full-history blob aggregate ([#209](https://github.com/a-thomas-22/blob-indexer-api/issues/209)) ([983a8a0](https://github.com/a-thomas-22/blob-indexer-api/commit/983a8a0b29776d7d8e61e400dc9b4ae28e0efb45))
+
+
+### Performance Improvements
+
+* add public API rollups ([#211](https://github.com/a-thomas-22/blob-indexer-api/issues/211)) ([4dfab44](https://github.com/a-thomas-22/blob-indexer-api/commit/4dfab446400e4f406e421e364b16b49922e31480))
+
 ## [0.7.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.6.0...blob-indexer-api-v0.7.0) (2026-05-26)
 
 
