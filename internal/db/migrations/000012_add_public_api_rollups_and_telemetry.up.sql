@@ -1,7 +1,7 @@
 -- Follow-up to the network_blob_stats summary from migration 11:
 --   * Add sender-level rollups for all-history /users paths.
 --   * Add covering indexes for bounded window/chart scans.
---   * Best-effort enable database query telemetry where privileges allow it.
+--   * Best-effort install pg_stat_statements where privileges allow it.
 
 CREATE TABLE IF NOT EXISTS blob_user_stats (
     network_id INTEGER NOT NULL,
@@ -225,6 +225,8 @@ EXECUTE FUNCTION blob_user_stats_blobs_update_statement_trigger();
 CREATE INDEX IF NOT EXISTS idx_blobs_network_from_timestamp
     ON blobs(network_id, from_address, timestamp DESC);
 
+DROP INDEX IF EXISTS idx_blobs_network_from_address;
+
 CREATE INDEX IF NOT EXISTS idx_blobs_network_confirmed_timestamp_cover
     ON blobs(network_id, confirmed, timestamp DESC)
     INCLUDE (from_address, total_cost_eth, base_fee_per_blob_gas, blob_gas_used);
@@ -233,19 +235,13 @@ CREATE INDEX IF NOT EXISTS idx_block_metrics_network_timestamp_cover
     ON block_metrics(network_id, block_timestamp DESC)
     INCLUDE (block_number, blob_count, blob_gas_used, blob_gas_target, blob_base_fee, utilization_ratio);
 
+DROP INDEX IF EXISTS idx_block_metrics_network_timestamp;
+
 DO $$
 BEGIN
     BEGIN
         CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
     EXCEPTION WHEN OTHERS THEN
         RAISE NOTICE 'pg_stat_statements could not be created by this role: %', SQLERRM;
-    END;
-
-    BEGIN
-        EXECUTE format('ALTER DATABASE %I SET log_min_duration_statement = %L', current_database(), '500ms');
-        EXECUTE format('ALTER DATABASE %I SET track_io_timing = %L', current_database(), 'on');
-        EXECUTE format('ALTER DATABASE %I SET pg_stat_statements.track = %L', current_database(), 'all');
-    EXCEPTION WHEN OTHERS THEN
-        RAISE NOTICE 'database telemetry settings could not be applied by this role: %', SQLERRM;
     END;
 END $$;
