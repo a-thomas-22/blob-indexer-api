@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.6.0...blob-indexer-api-v0.7.0) (2026-05-26)
+
+
+### Features
+
+* add chart API endpoints ([#207](https://github.com/a-thomas-22/blob-indexer-api/issues/207)) ([46a60c6](https://github.com/a-thomas-22/blob-indexer-api/commit/46a60c63ca951ea8ef69f127dc9ec2d33a9875ac))
+
+
+### Bug Fixes
+
+* clarify API cost units ([#201](https://github.com/a-thomas-22/blob-indexer-api/issues/201)) ([37f23f4](https://github.com/a-thomas-22/blob-indexer-api/commit/37f23f4788d174ba7b5d1085f664a522d69d78c3))
+* include pricing in websocket new block events ([#206](https://github.com/a-thomas-22/blob-indexer-api/issues/206)) ([7459b9a](https://github.com/a-thomas-22/blob-indexer-api/commit/7459b9a6fa73739688a7753a3a5f69317904799e))
+* **indexer:** store one row per blob instead of one row per blob tx ([#203](https://github.com/a-thomas-22/blob-indexer-api/issues/203)) ([2123d22](https://github.com/a-thomas-22/blob-indexer-api/commit/2123d22651214b685373b7c8be9d1ece5cb68a94))
+* reduce dashboard database load ([#202](https://github.com/a-thomas-22/blob-indexer-api/issues/202)) ([93ddc67](https://github.com/a-thomas-22/blob-indexer-api/commit/93ddc67e207c520270db4854cf3cc0c06399d197))
+
 ## [0.6.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.5.1...blob-indexer-api-v0.6.0) (2026-05-25)
 
 
