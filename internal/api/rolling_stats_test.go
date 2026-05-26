@@ -86,6 +86,9 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 					t.Fatalf("expected query to contain %q: %s", want, query)
 				}
 			}
+			if strings.Contains(query, "LATERAL") {
+				t.Fatalf("rolling stats query should not use repeated lateral scans: %s", query)
+			}
 			if len(args) != 4 {
 				t.Fatalf("expected 4 args, got %d", len(args))
 			}

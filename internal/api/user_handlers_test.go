@@ -97,6 +97,35 @@ func TestGetTopBlobUsers_SortSpendWindow(t *testing.T) {
 	}
 }
 
+func TestGetTopBlobUsers_DefaultAllUsesRollup(t *testing.T) {
+	var gotQuery string
+	var gotArgs []interface{}
+	db := &mockDB{
+		selectFn: func(_ context.Context, dest interface{}, query string, args ...interface{}) error {
+			gotQuery = query
+			gotArgs = append([]interface{}{}, args...)
+			users := dest.(*[]models.BlobUserStats)
+			*users = []models.BlobUserStats{}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if gotQuery != queryTopBlobUsersAll {
+		t.Fatal("expected all-window rollup query to be used")
+	}
+	wantArgs := []interface{}{42, 10, 0, "all", "count"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+}
+
 func TestGetTopUnattributedBlobUsers_SortSpendWindow(t *testing.T) {
 	var gotQuery string
 	var gotArgs []interface{}
@@ -150,6 +179,29 @@ func TestGetTopUnattributedBlobUsers_SortSpendWindow(t *testing.T) {
 	}
 }
 
+func TestGetTopUnattributedBlobUsers_DefaultAllUsesRollup(t *testing.T) {
+	var gotQuery string
+	db := &mockDB{
+		selectFn: func(_ context.Context, dest interface{}, query string, _ ...interface{}) error {
+			gotQuery = query
+			users := dest.(*[]models.BlobUserStats)
+			*users = []models.BlobUserStats{}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopUnattributedBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if gotQuery != queryTopUnattributedBlobUsersAll {
+		t.Fatal("expected unattributed all-window rollup query to be used")
+	}
+}
+
 func TestTopUnattributedBlobUsersQueryUsesKnownUserRowExistence(t *testing.T) {
 	if !strings.Contains(queryTopUnattributedBlobUsersWithOptions, "bu.id AS known_user_id") {
 		t.Fatal("expected unattributed query to select a known user row marker")
@@ -159,6 +211,12 @@ func TestTopUnattributedBlobUsersQueryUsesKnownUserRowExistence(t *testing.T) {
 	}
 	if strings.Contains(queryTopUnattributedBlobUsersWithOptions, "known_name") {
 		t.Fatal("unattributed query should not use known user name content as the row-existence check")
+	}
+}
+
+func TestTopUnattributedBlobUsersAllQueryUsesKnownUserRowExistence(t *testing.T) {
+	if !strings.Contains(queryTopUnattributedBlobUsersAll, "bu.id IS NULL") {
+		t.Fatal("expected all-window unattributed query to filter by known user row existence")
 	}
 }
 
@@ -290,6 +348,35 @@ func TestGetUserBreakdown_Success(t *testing.T) {
 	}
 	if resp.Data.CategoryShares[1].Category != "unknown" {
 		t.Fatalf("expected unknown category fallback, got %+v", resp.Data.CategoryShares[1])
+	}
+}
+
+func TestGetUserBreakdown_DefaultAllUsesRollup(t *testing.T) {
+	var gotQuery string
+	var gotArgs []interface{}
+	db := &mockDB{
+		selectFn: func(_ context.Context, dest interface{}, query string, args ...interface{}) error {
+			gotQuery = query
+			gotArgs = append([]interface{}{}, args...)
+			shares := dest.(*[]models.BlobUserCategoryShare)
+			*shares = []models.BlobUserCategoryShare{}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetUserBreakdown(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if gotQuery != queryBlobUserCategoryBreakdownAll {
+		t.Fatal("expected all-window breakdown rollup query to be used")
+	}
+	wantArgs := []interface{}{42, "all"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
 	}
 }
 

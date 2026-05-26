@@ -70,28 +70,26 @@ func TestPoller_DetectsNewBlock(t *testing.T) {
 			return nil
 		},
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			if strings.Contains(query, "block_number >") {
-				blobs := dest.(*[]models.Blob)
-				*blobs = []models.Blob{
-					{
-						NetworkID:         11155111,
-						BlockNumber:       int64(blockNumber),
-						TxHash:            "0xabc",
-						BaseFeePerBlobGas: "1000",
-						TipPerBlobGas:     "100",
-						TotalCostETH:      "0.001",
-						Timestamp:         time.Now(),
-						Confirmed:         true,
-					},
+			switch out := dest.(type) {
+			case *[]models.Blob:
+				if strings.Contains(query, "block_number >") {
+					*out = []models.Blob{
+						{
+							NetworkID:         11155111,
+							BlockNumber:       int64(blockNumber),
+							TxHash:            "0xabc",
+							BaseFeePerBlobGas: "1000",
+							TipPerBlobGas:     "100",
+							TotalCostETH:      "0.001",
+							Timestamp:         time.Now(),
+							Confirmed:         true,
+						},
+					}
+				} else if strings.Contains(query, "confirmed = false") {
+					*out = []models.Blob{}
 				}
-			}
-			if strings.Contains(query, "confirmed = false") {
-				blobs := dest.(*[]models.Blob)
-				*blobs = []models.Blob{}
-			}
-			if strings.Contains(query, "GROUP BY") {
-				users := dest.(*[]models.BlobUserStats)
-				*users = []models.BlobUserStats{}
+			case *[]models.BlobUserStats:
+				*out = []models.BlobUserStats{}
 			}
 			return nil
 		},
@@ -192,26 +190,24 @@ func TestPoller_UsersThrottle(t *testing.T) {
 			return nil
 		},
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			if strings.Contains(query, "block_number >") {
-				blobs := dest.(*[]models.Blob)
-				*blobs = []models.Blob{{
-					NetworkID:         11155111,
-					BlockNumber:       101,
-					TxHash:            "0xdef",
-					BaseFeePerBlobGas: "1000",
-					TipPerBlobGas:     "100",
-					TotalCostETH:      "0.001",
-					Timestamp:         time.Now(),
-					Confirmed:         true,
-				}}
-			}
-			if strings.Contains(query, "confirmed = false") {
-				blobs := dest.(*[]models.Blob)
-				*blobs = []models.Blob{}
-			}
-			if strings.Contains(query, "GROUP BY") {
-				users := dest.(*[]models.BlobUserStats)
-				*users = []models.BlobUserStats{}
+			switch out := dest.(type) {
+			case *[]models.Blob:
+				if strings.Contains(query, "block_number >") {
+					*out = []models.Blob{{
+						NetworkID:         11155111,
+						BlockNumber:       101,
+						TxHash:            "0xdef",
+						BaseFeePerBlobGas: "1000",
+						TipPerBlobGas:     "100",
+						TotalCostETH:      "0.001",
+						Timestamp:         time.Now(),
+						Confirmed:         true,
+					}}
+				} else if strings.Contains(query, "confirmed = false") {
+					*out = []models.Blob{}
+				}
+			case *[]models.BlobUserStats:
+				*out = []models.BlobUserStats{}
 			}
 			return nil
 		},
@@ -425,8 +421,7 @@ func TestPoller_BroadcastUsersUpdate_Success(t *testing.T) {
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
 			gotQuery = query
 			gotArgs = append([]interface{}{}, args...)
-			if strings.Contains(query, "GROUP BY") {
-				users := dest.(*[]models.BlobUserStats)
+			if users, ok := dest.(*[]models.BlobUserStats); ok {
 				*users = []models.BlobUserStats{
 					{
 						Address:           "0xabc",
@@ -452,8 +447,8 @@ func TestPoller_BroadcastUsersUpdate_Success(t *testing.T) {
 	poller := NewPoller(db, hub, testNetworks(), time.Second, time.Second)
 	poller.broadcastUsersUpdate(context.Background(), network)
 
-	if gotQuery != queryTopBlobUsersWithOptions {
-		t.Fatal("expected poller to use enriched users query")
+	if gotQuery != queryTopBlobUsersAll {
+		t.Fatal("expected poller to use all-window users rollup query")
 	}
 	wantArgs := []interface{}{11155111, 10, 0, "all", "count"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {

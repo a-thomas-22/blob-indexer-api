@@ -178,12 +178,18 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 	errMessage := "Failed to get top blob users"
 	returnMessage := "Returning top blob users"
 	query := queryTopBlobUsersWithOptions
+	if window == userWindowAll {
+		query = queryTopBlobUsersAll
+	}
 	cacheKey := fmt.Sprintf("%d:%d:%d:%s:%s", network.ChainID, limit, offset, sort, window)
 	if unattributedOnly {
 		logMessage = "Getting top unattributed blob users"
 		errMessage = "Failed to get top unattributed blob users"
 		returnMessage = "Returning top unattributed blob users"
 		query = queryTopUnattributedBlobUsersWithOptions
+		if window == userWindowAll {
+			query = queryTopUnattributedBlobUsersAll
+		}
 		cacheKey = fmt.Sprintf("unattributed:%d:%d:%d:%s:%s", network.ChainID, limit, offset, sort, window)
 	}
 
@@ -306,7 +312,11 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 
 		var categories []models.BlobUserCategoryShare
-		if err := a.db.SelectContext(queryCtx, &categories, queryBlobUserCategoryBreakdown, network.ChainID, string(window)); err != nil {
+		query := queryBlobUserCategoryBreakdown
+		if window == userWindowAll {
+			query = queryBlobUserCategoryBreakdownAll
+		}
+		if err := a.db.SelectContext(queryCtx, &categories, query, network.ChainID, string(window)); err != nil {
 			return UserBreakdownResponse{}, err
 		}
 

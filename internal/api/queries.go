@@ -180,6 +180,63 @@ const (
 		LIMIT $2 OFFSET $3
 	`
 
+	// queryTopBlobUsersAll reads all-history sender usage from maintained rollups.
+	queryTopBlobUsersAll = `
+		WITH user_totals AS (
+			SELECT
+				s.from_address,
+				COALESCE(NULLIF(BTRIM(s.user_attribution), ''), NULLIF(BTRIM(bu.name), ''), '') AS user_attribution,
+				COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown') AS category,
+				s.blob_count,
+				s.total_cost_eth,
+				s.last_timestamp
+			FROM blob_user_stats s
+			LEFT JOIN blob_users bu
+				ON bu.network_id = s.network_id
+				AND LOWER(bu.address) = LOWER(s.from_address)
+			WHERE s.network_id = $1
+				AND $4::text = 'all'
+		),
+		pending AS (
+			SELECT
+				COUNT(*)::bigint AS total_pending_blobs,
+				COALESCE(SUM(total_cost_eth::numeric), 0) AS pending_total_cost
+			FROM blobs
+			WHERE network_id = $1 AND confirmed = false
+		),
+		totals AS (
+			SELECT
+				(COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs) AS total_blobs,
+				(COALESCE(s.sum_total_cost, 0) + p.pending_total_cost) AS total_spend
+			FROM pending p
+			LEFT JOIN network_blob_stats s ON s.network_id = $1
+		)
+		SELECT
+			user_totals.from_address,
+			user_totals.user_attribution,
+			user_totals.category,
+			user_totals.blob_count,
+			user_totals.total_cost_eth::text AS total_cost_eth,
+			user_totals.last_timestamp,
+			CASE
+				WHEN totals.total_blobs > 0 THEN ROUND((user_totals.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
+				ELSE 0
+			END AS blob_share_percent,
+			CASE
+				WHEN totals.total_spend > 0 THEN ROUND((user_totals.total_cost_eth / totals.total_spend) * 100, 6)::float8
+				ELSE 0
+			END AS spend_share_percent
+		FROM user_totals
+		CROSS JOIN totals
+		ORDER BY
+			CASE WHEN $5 = 'count' THEN user_totals.blob_count END DESC,
+			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_eth END DESC,
+			user_totals.blob_count DESC,
+			user_totals.total_cost_eth DESC,
+			user_totals.last_timestamp DESC
+		LIMIT $2 OFFSET $3
+	`
+
 	// queryTopUnattributedBlobUsersWithOptions aggregates sender usage for addresses
 	// without either indexed attribution or a known blob_users entry.
 	queryTopUnattributedBlobUsersWithOptions = `
@@ -213,6 +270,58 @@ const (
 			GROUP BY from_address
 			HAVING NULLIF(MAX(BTRIM(user_attribution)), '') IS NULL
 				AND MAX(known_user_id) IS NULL
+		),
+		totals AS (
+			SELECT
+				COALESCE(SUM(blob_count), 0) AS total_blobs,
+				COALESCE(SUM(total_cost_eth), 0) AS total_spend
+			FROM user_totals
+		)
+		SELECT
+			user_totals.from_address,
+			user_totals.user_attribution,
+			user_totals.category,
+			user_totals.blob_count,
+			user_totals.total_cost_eth::text AS total_cost_eth,
+			user_totals.last_timestamp,
+			CASE
+				WHEN totals.total_blobs > 0 THEN ROUND((user_totals.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
+				ELSE 0
+			END AS blob_share_percent,
+			CASE
+				WHEN totals.total_spend > 0 THEN ROUND((user_totals.total_cost_eth / totals.total_spend) * 100, 6)::float8
+				ELSE 0
+			END AS spend_share_percent
+		FROM user_totals
+		CROSS JOIN totals
+		ORDER BY
+			CASE WHEN $5 = 'count' THEN user_totals.blob_count END DESC,
+			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_eth END DESC,
+			user_totals.blob_count DESC,
+			user_totals.total_cost_eth DESC,
+			user_totals.last_timestamp DESC
+		LIMIT $2 OFFSET $3
+	`
+
+	// queryTopUnattributedBlobUsersAll reads all-history unattributed sender
+	// usage from maintained sender rollups.
+	queryTopUnattributedBlobUsersAll = `
+		WITH user_totals AS (
+			SELECT
+				s.from_address,
+				'' AS user_attribution,
+				'unknown' AS category,
+				s.blob_count,
+				s.total_cost_eth,
+				s.last_timestamp
+			FROM blob_user_stats s
+			LEFT JOIN blob_users bu
+				ON bu.network_id = s.network_id
+				AND LOWER(bu.address) = LOWER(s.from_address)
+			WHERE s.network_id = $1
+				AND $4::text = 'all'
+				AND NULLIF(BTRIM(s.user_attribution), '') IS NULL
+				AND bu.id IS NULL
 		),
 		totals AS (
 			SELECT
@@ -288,6 +397,53 @@ const (
 		ORDER BY category_totals.blob_count DESC, category_totals.total_cost_eth DESC, category_totals.category ASC
 	`
 
+	// queryBlobUserCategoryBreakdownAll reads all-history category share from
+	// maintained sender rollups.
+	queryBlobUserCategoryBreakdownAll = `
+		WITH category_totals AS (
+			SELECT
+				COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown') AS category,
+				COALESCE(SUM(s.blob_count), 0) AS blob_count,
+				COALESCE(SUM(s.total_cost_eth), 0) AS total_cost_eth
+			FROM blob_user_stats s
+			LEFT JOIN blob_users bu
+				ON bu.network_id = s.network_id
+				AND LOWER(bu.address) = LOWER(s.from_address)
+			WHERE s.network_id = $1
+				AND $2::text = 'all'
+			GROUP BY COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown')
+		),
+		pending AS (
+			SELECT
+				COUNT(*)::bigint AS total_pending_blobs,
+				COALESCE(SUM(total_cost_eth::numeric), 0) AS pending_total_cost
+			FROM blobs
+			WHERE network_id = $1 AND confirmed = false
+		),
+		totals AS (
+			SELECT
+				(COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs) AS total_blobs,
+				(COALESCE(s.sum_total_cost, 0) + p.pending_total_cost) AS total_spend
+			FROM pending p
+			LEFT JOIN network_blob_stats s ON s.network_id = $1
+		)
+		SELECT
+			category_totals.category,
+			category_totals.blob_count,
+			category_totals.total_cost_eth::text AS total_cost_eth,
+			CASE
+				WHEN totals.total_blobs > 0 THEN ROUND((category_totals.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
+				ELSE 0
+			END AS blob_share_percent,
+			CASE
+				WHEN totals.total_spend > 0 THEN ROUND((category_totals.total_cost_eth / totals.total_spend) * 100, 6)::float8
+				ELSE 0
+			END AS spend_share_percent
+		FROM category_totals
+		CROSS JOIN totals
+		ORDER BY category_totals.blob_count DESC, category_totals.total_cost_eth DESC, category_totals.category ASC
+	`
+
 	// queryBlobStats reads whole-history statistics from the maintained network summary.
 	// Pending rows stay tiny and indexed, so they are folded in at read time.
 	queryBlobStats = `
@@ -334,7 +490,8 @@ const (
 		LEFT JOIN network_blob_stats s ON s.network_id = $1
 	`
 
-	// queryRollingStatsWindows computes time-windowed blob market statistics.
+	// queryRollingStatsWindows computes time-windowed blob market statistics
+	// with one bounded materialized scan per source table.
 	queryRollingStatsWindows = `
 		WITH requested_windows AS (
 			SELECT window_label, duration_seconds, ord
@@ -348,6 +505,54 @@ const (
 				$4::timestamp - (duration_seconds * INTERVAL '1 second') AS start_time,
 				$4::timestamp AS end_time
 			FROM requested_windows
+		),
+		blob_source AS MATERIALIZED (
+			SELECT
+				b.timestamp,
+				b.from_address,
+				b.base_fee_per_blob_gas::numeric AS base_fee_per_blob_gas,
+				b.total_cost_eth::numeric AS total_cost_eth,
+				COALESCE(b.blob_gas_used, 0)::bigint AS blob_gas_used
+			FROM blobs b
+			WHERE b.network_id = $1
+				AND b.confirmed = true
+				AND b.timestamp >= (SELECT MIN(start_time) FROM window_bounds)
+				AND b.timestamp < $4::timestamp
+		),
+		blob_windows AS (
+			SELECT
+				wb.ord,
+				COUNT(bs.timestamp) AS total_blobs,
+				COALESCE(SUM(bs.blob_gas_used), 0) AS total_blob_gas_used,
+				COALESCE(SUM(bs.total_cost_eth), 0) AS total_cost_eth,
+				COUNT(DISTINCT bs.from_address) AS unique_senders,
+				COALESCE(AVG(bs.base_fee_per_blob_gas), 0) AS average_blob_base_fee,
+				COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY bs.base_fee_per_blob_gas), 0) AS median_blob_base_fee,
+				COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY bs.base_fee_per_blob_gas), 0) AS p95_blob_base_fee
+			FROM window_bounds wb
+			LEFT JOIN blob_source bs
+				ON bs.timestamp >= wb.start_time
+				AND bs.timestamp < wb.end_time
+			GROUP BY wb.ord
+		),
+		metric_source AS MATERIALIZED (
+			SELECT
+				bm.block_timestamp,
+				bm.utilization_ratio::numeric AS utilization_ratio
+			FROM block_metrics bm
+			WHERE bm.network_id = $1
+				AND bm.block_timestamp >= (SELECT MIN(start_time) FROM window_bounds)
+				AND bm.block_timestamp < $4::timestamp
+		),
+		metric_windows AS (
+			SELECT
+				wb.ord,
+				COALESCE(AVG(ms.utilization_ratio), 0) AS average_utilization
+			FROM window_bounds wb
+			LEFT JOIN metric_source ms
+				ON ms.block_timestamp >= wb.start_time
+				AND ms.block_timestamp < wb.end_time
+			GROUP BY wb.ord
 		)
 		SELECT
 			wb.window_label AS stats_window,
@@ -363,29 +568,8 @@ const (
 			bs.unique_senders,
 			bms.average_utilization
 		FROM window_bounds wb
-		LEFT JOIN LATERAL (
-			SELECT
-				COUNT(*) AS total_blobs,
-				COALESCE(SUM(COALESCE(b.blob_gas_used, 0)), 0) AS total_blob_gas_used,
-				COALESCE(SUM(b.total_cost_eth::numeric), 0) AS total_cost_eth,
-				COUNT(DISTINCT b.from_address) AS unique_senders,
-				COALESCE(AVG(b.base_fee_per_blob_gas::numeric), 0) AS average_blob_base_fee,
-				COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY b.base_fee_per_blob_gas::numeric), 0) AS median_blob_base_fee,
-				COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY b.base_fee_per_blob_gas::numeric), 0) AS p95_blob_base_fee
-			FROM blobs b
-			WHERE b.network_id = $1
-				AND b.confirmed = true
-				AND b.timestamp >= wb.start_time
-				AND b.timestamp < wb.end_time
-		) bs ON true
-		LEFT JOIN LATERAL (
-			SELECT
-				COALESCE(AVG(bm.utilization_ratio::numeric), 0) AS average_utilization
-			FROM block_metrics bm
-			WHERE bm.network_id = $1
-				AND bm.block_timestamp >= wb.start_time
-				AND bm.block_timestamp < wb.end_time
-		) bms ON true
+		LEFT JOIN blob_windows bs ON bs.ord = wb.ord
+		LEFT JOIN metric_windows bms ON bms.ord = wb.ord
 		ORDER BY wb.ord
 	`
 
@@ -423,25 +607,31 @@ const (
 	queryUserByAddress = `
 		WITH selected_user AS (
 			SELECT
-				b.from_address,
-				COALESCE(NULLIF(MAX(BTRIM(b.user_attribution)), ''), NULLIF(MAX(BTRIM(bu.name)), ''), '') AS user_attribution,
-				COALESCE(NULLIF(MAX(BTRIM(bu.category)), ''), 'unknown') AS category,
-				COUNT(*) AS blob_count,
-				COALESCE(SUM(b.total_cost_eth::numeric), 0) AS total_cost_eth,
-				MAX(b.timestamp) AS last_timestamp
-			FROM blobs b
+				s.from_address,
+				COALESCE(NULLIF(BTRIM(s.user_attribution), ''), NULLIF(BTRIM(bu.name), ''), '') AS user_attribution,
+				COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown') AS category,
+				s.blob_count,
+				s.total_cost_eth,
+				s.last_timestamp
+			FROM blob_user_stats s
 			LEFT JOIN blob_users bu
-				ON bu.network_id = b.network_id
-				AND LOWER(bu.address) = LOWER(b.from_address)
-			WHERE b.network_id = $1 AND b.from_address = $2
-			GROUP BY b.from_address
+				ON bu.network_id = s.network_id
+				AND LOWER(bu.address) = LOWER(s.from_address)
+			WHERE s.network_id = $1 AND s.from_address = $2
+		),
+		pending AS (
+			SELECT
+				COUNT(*)::bigint AS total_pending_blobs,
+				COALESCE(SUM(total_cost_eth::numeric), 0) AS pending_total_cost
+			FROM blobs
+			WHERE network_id = $1 AND confirmed = false
 		),
 		totals AS (
 			SELECT
-				COUNT(*) AS total_blobs,
-				COALESCE(SUM(total_cost_eth::numeric), 0) AS total_spend
-			FROM blobs
-			WHERE network_id = $1
+				(COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs) AS total_blobs,
+				(COALESCE(s.sum_total_cost, 0) + p.pending_total_cost) AS total_spend
+			FROM pending p
+			LEFT JOIN network_blob_stats s ON s.network_id = $1
 		)
 		SELECT
 			selected_user.from_address,

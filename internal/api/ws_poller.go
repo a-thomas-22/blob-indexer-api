@@ -237,7 +237,7 @@ func (p *Poller) broadcastUsersUpdate(ctx context.Context, network config.Networ
 	defer cancel()
 
 	var users []models.BlobUserStats
-	if err := p.db.SelectContext(queryCtx, &users, queryTopBlobUsersWithOptions, network.ChainID, 10, 0, string(userWindowAll), string(userSortCount)); err != nil {
+	if err := p.db.SelectContext(queryCtx, &users, queryTopBlobUsersAll, network.ChainID, 10, 0, string(userWindowAll), string(userSortCount)); err != nil {
 		logger.Error("Poller: failed to query top users",
 			zap.String("network", network.Name),
 			zap.Error(err))
