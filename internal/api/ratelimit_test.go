@@ -267,3 +267,111 @@ func TestRateLimitMiddleware_UsesClientIPContext(t *testing.T) {
 		t.Error("visitor should not include the remote address port")
 	}
 }
+
+func TestNormalizeIPAddress(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+		ok    bool
+	}{
+		{"empty", "", "", false},
+		{"whitespace", "   ", "", false},
+		{"unknown literal", "unknown", "", false},
+		{"unknown mixed case", "Unknown", "", false},
+		{"quoted ipv4", `"198.51.100.1"`, "198.51.100.1", true},
+		{"plain ipv4", "198.51.100.1", "198.51.100.1", true},
+		{"ipv4 with port", "198.51.100.1:1234", "198.51.100.1", true},
+		{"bracketed ipv6", "[2001:db8::1]", "2001:db8::1", true},
+		{"bracketed ipv6 with port", "[2001:db8::1]:443", "2001:db8::1", true},
+		{"bare ipv6", "2001:db8::1", "2001:db8::1", true},
+		{"garbage", "not-an-ip", "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := normalizeIPAddress(tc.input)
+			if ok != tc.ok || got != tc.want {
+				t.Fatalf("normalizeIPAddress(%q) = (%q, %v), want (%q, %v)", tc.input, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+func TestNormalizeRemoteAddress(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"hostport with ipv4", "198.51.100.1:1234", "198.51.100.1"},
+		{"hostport with ipv6", "[2001:db8::1]:443", "2001:db8::1"},
+		{"hostport with non-ip host", "example.com:8080", "example.com"},
+		{"bare ipv4", "198.51.100.1", "198.51.100.1"},
+		{"bare ipv6", "2001:db8::1", "2001:db8::1"},
+		{"garbage", "not-an-ip", "not-an-ip"},
+		{"empty", "", ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeRemoteAddress(tc.input); got != tc.want {
+				t.Fatalf("normalizeRemoteAddress(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewClientIPResolver_DeduplicatesAndTrims(t *testing.T) {
+	resolver := newClientIPResolver([]string{
+		"  CF-Connecting-IP  ",
+		"cf-connecting-ip",
+		"",
+		"   ",
+		"X-Forwarded-For",
+	})
+
+	if len(resolver.trustedHeaders) != 2 {
+		t.Fatalf("expected 2 unique headers, got %d (%v)", len(resolver.trustedHeaders), resolver.trustedHeaders)
+	}
+	if resolver.trustedHeaders[0] != "Cf-Connecting-Ip" {
+		t.Errorf("expected canonical first header, got %q", resolver.trustedHeaders[0])
+	}
+	if resolver.trustedHeaders[1] != "X-Forwarded-For" {
+		t.Errorf("expected canonical second header, got %q", resolver.trustedHeaders[1])
+	}
+}
+
+func TestClientIPResolver_TrustedHeaderEmptyFallsBackToRemoteAddr(t *testing.T) {
+	resolver := newClientIPResolver([]string{"CF-Connecting-IP"})
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.RemoteAddr = "198.51.100.1:1234"
+	// No CF-Connecting-IP header set.
+
+	if got := resolver.IP(req); got != "198.51.100.1" {
+		t.Fatalf("expected fallback to remote addr, got %q", got)
+	}
+}
+
+func TestRateLimiter_Disabled(t *testing.T) {
+	rl := NewRateLimiter(0, 100)
+	for i := 0; i < 1000; i++ {
+		if !rl.allow("1.2.3.4") {
+			t.Fatalf("disabled rate limiter should always allow, denied at iteration %d", i)
+		}
+	}
+
+	rl2 := NewRateLimiter(10, 0)
+	for i := 0; i < 1000; i++ {
+		if !rl2.allow("1.2.3.4") {
+			t.Fatalf("disabled rate limiter (zero burst) should always allow, denied at iteration %d", i)
+		}
+	}
+}
+
+func TestRateLimiter_NilReceiverAllows(t *testing.T) {
+	var rl *RateLimiter
+	if !rl.allow("1.2.3.4") {
+		t.Fatal("nil rate limiter should always allow")
+	}
+}
