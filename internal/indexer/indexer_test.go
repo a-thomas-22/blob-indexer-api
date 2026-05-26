@@ -159,21 +159,26 @@ func TestCalculateBlobMetrics_UsesRealizedBlobBaseFeeCost(t *testing.T) {
 		},
 	})
 	blobBaseFee := big.NewInt(2)
-	blobGasUsed := tx.BlobGas()
+	const gasPerBlob int64 = 131072
 
 	metrics := calculateBlobMetrics(tx, blobBaseFee)
 
-	if metrics.totalCostETH != new(big.Int).Mul(blobBaseFee, new(big.Int).SetUint64(blobGasUsed)).String() {
-		t.Fatalf("expected totalCostETH to use realized blob base fee cost, got %q", metrics.totalCostETH)
+	wantCost := new(big.Int).Mul(blobBaseFee, big.NewInt(gasPerBlob)).String()
+	if metrics.totalCostETH != wantCost {
+		t.Fatalf("expected per-blob totalCostETH = baseFee * %d = %s, got %q", gasPerBlob, wantCost, metrics.totalCostETH)
 	}
-	if metrics.totalCostETH == new(big.Int).Mul(big.NewInt(5), new(big.Int).SetUint64(blobGasUsed)).String() {
+	capCost := new(big.Int).Mul(big.NewInt(5), big.NewInt(gasPerBlob)).String()
+	if metrics.totalCostETH == capCost {
 		t.Fatal("expected totalCostETH not to use max fee cap cost")
 	}
 	if metrics.maxFeePerBlobGas == nil || *metrics.maxFeePerBlobGas != "5" {
 		t.Fatalf("expected max fee cap to be preserved, got %v", metrics.maxFeePerBlobGas)
 	}
-	if metrics.blobGasUsed == nil || *metrics.blobGasUsed != int64(blobGasUsed) {
-		t.Fatalf("expected blob gas used %d, got %v", blobGasUsed, metrics.blobGasUsed)
+	if metrics.blobGasUsed == nil || *metrics.blobGasUsed != gasPerBlob {
+		t.Fatalf("expected per-blob blob gas %d, got %v", gasPerBlob, metrics.blobGasUsed)
+	}
+	if metrics.blobSizeBytes != gasPerBlob {
+		t.Fatalf("expected per-blob size %d bytes, got %d", gasPerBlob, metrics.blobSizeBytes)
 	}
 }
 

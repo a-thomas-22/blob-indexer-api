@@ -48,8 +48,9 @@ const (
 	// failedBlockSafetyRetryInterval keeps failed blocks recoverable without retrying them every scan forever.
 	failedBlockSafetyRetryInterval = time.Hour
 
-	// bytesPerBlobGasUnit converts blob gas units to approximate blob bytes.
-	bytesPerBlobGasUnit = 128
+	// bytesPerBlob is the EIP-4844 blob size (4096 field elements * 32 bytes).
+	// Each blob also consumes exactly params.BlobTxBlobGasPerBlob (131072) of blob gas.
+	bytesPerBlob = params.BlobTxBlobGasPerBlob
 )
 
 // errReorgDetected is returned when a chain reorganization is detected and handled
@@ -81,6 +82,10 @@ type blobMetrics struct {
 	blobGasUsed       *int64
 }
 
+// calculateBlobMetrics returns per-blob metric values for any blob carried by
+// tx, evaluated against blobBaseFee. Every blob in an EIP-4844 transaction
+// consumes the same blob gas and is charged the same blob base fee, so callers
+// emit one Blob row per BlobHashes() entry using these identical values.
 func calculateBlobMetrics(tx *types.Transaction, blobBaseFee *big.Int) blobMetrics {
 	maxFeePerBlobGas := tx.BlobGasFeeCap()
 	tipPerBlobGas := new(big.Int).Sub(maxFeePerBlobGas, blobBaseFee)
@@ -88,14 +93,13 @@ func calculateBlobMetrics(tx *types.Transaction, blobBaseFee *big.Int) blobMetri
 		tipPerBlobGas = big.NewInt(0)
 	}
 
-	blobGasUsed := tx.BlobGas()
-	totalCost := new(big.Int).Mul(blobBaseFee, new(big.Int).SetUint64(blobGasUsed))
+	totalCost := new(big.Int).Mul(blobBaseFee, new(big.Int).SetUint64(params.BlobTxBlobGasPerBlob))
 
 	maxFeeStr := maxFeePerBlobGas.String()
-	blobGasUsedInt := int64(blobGasUsed)
+	blobGasUsedInt := int64(params.BlobTxBlobGasPerBlob)
 
 	return blobMetrics{
-		blobSizeBytes:     int64(blobGasUsed * bytesPerBlobGasUnit), // Approximate size
+		blobSizeBytes:     int64(bytesPerBlob),
 		baseFeePerBlobGas: blobBaseFee.String(),
 		tipPerBlobGas:     tipPerBlobGas.String(),
 		totalCostETH:      totalCost.String(),
@@ -917,34 +921,49 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 	// Get the user attribution at the latest known head for the pending transaction.
 	userAttribution := i.attribution.GetUserAttributionForBlock(from, int64(latestBlockNum))
 
-	metrics := calculateBlobMetrics(tx, blobBaseFee)
-
-	// Create the blob record
-	blob := models.Blob{
-		NetworkID:         i.network.ChainID,
-		BlockNumber:       -1, // Pending transaction
-		BlobIndex:         0,  // Placeholder
-		TxHash:            hash.Hex(),
-		FromAddress:       from,
-		UserAttribution:   userAttribution,
-		BlobSizeBytes:     metrics.blobSizeBytes,
-		BaseFeePerBlobGas: metrics.baseFeePerBlobGas,
-		TipPerBlobGas:     metrics.tipPerBlobGas,
-		TotalCostETH:      metrics.totalCostETH,
-		Timestamp:         time.Now(),
-		Confirmed:         false,
-		IndexerVersion:    i.indexerVersion,
-		MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
-		BlobGasUsed:       metrics.blobGasUsed,
+	pendingBlobs := buildPendingBlobs(tx, blobBaseFee, i.network.ChainID, from, userAttribution, i.indexerVersion)
+	if len(pendingBlobs) == 0 {
+		return
 	}
 
-	// Insert the blob record
-	if err := i.insertPendingBlob(blob); err != nil {
-		logger.Error("Failed to insert pending blob record",
+	if err := i.insertPendingBlobs(pendingBlobs); err != nil {
+		logger.Error("Failed to insert pending blob records",
 			zap.String("network", i.network.Name),
 			zap.String("tx_hash", hash.Hex()),
 			zap.Error(err))
 	}
+}
+
+// buildPendingBlobs constructs one Blob row per blob hash carried by tx. The
+// BlobIndex field is left at zero; insertPendingBlobs assigns final values
+// when it allocates indices from the pending pool.
+func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID int, from, userAttribution, indexerVersion string) []models.Blob {
+	blobHashes := tx.BlobHashes()
+	if len(blobHashes) == 0 {
+		return nil
+	}
+	metrics := calculateBlobMetrics(tx, blobBaseFee)
+	now := time.Now()
+	rows := make([]models.Blob, 0, len(blobHashes))
+	for range blobHashes {
+		rows = append(rows, models.Blob{
+			NetworkID:         networkID,
+			BlockNumber:       -1,
+			TxHash:            tx.Hash().Hex(),
+			FromAddress:       from,
+			UserAttribution:   userAttribution,
+			BlobSizeBytes:     metrics.blobSizeBytes,
+			BaseFeePerBlobGas: metrics.baseFeePerBlobGas,
+			TipPerBlobGas:     metrics.tipPerBlobGas,
+			TotalCostETH:      metrics.totalCostETH,
+			Timestamp:         now,
+			Confirmed:         false,
+			IndexerVersion:    indexerVersion,
+			MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
+			BlobGasUsed:       metrics.blobGasUsed,
+		})
+	}
+	return rows
 }
 
 // processBlock processes a single block with reorg detection and batch inserts
@@ -985,17 +1004,22 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		utilizationRatio = float64(blockBlobGasUsed) / float64(bp.TargetGas)
 	}
 
-	// Collect all blob records for this block
+	// Collect all blob records for this block. Each EIP-4844 blob — not each
+	// blob transaction — is one row. blobIndex is the block-wide blob ordinal,
+	// shared by no other row in the same (network_id, block_number).
 	blobs := make([]models.Blob, 0, len(block.Transactions()))
 	var attributedUsers []string
-	blobTxCount := 0
+	blobIndex := 0
 
-	for txIndex, tx := range block.Transactions() {
-		// Check if it's a blob transaction
+	for _, tx := range block.Transactions() {
 		if !i.ethClient.IsBlobTransaction(tx) {
 			continue
 		}
-		blobTxCount++
+
+		blobHashes := tx.BlobHashes()
+		if len(blobHashes) == 0 {
+			continue
+		}
 
 		// Get the sender address
 		from, err := i.getSender(tx)
@@ -1012,35 +1036,39 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 
 		metrics := calculateBlobMetrics(tx, blobBaseFee)
 
-		blobs = append(blobs, models.Blob{
-			NetworkID:         i.network.ChainID,
-			BlockNumber:       int64(blockNumber),
-			BlobIndex:         txIndex,
-			TxHash:            tx.Hash().Hex(),
-			FromAddress:       from,
-			UserAttribution:   userAttribution,
-			BlobSizeBytes:     metrics.blobSizeBytes,
-			BaseFeePerBlobGas: metrics.baseFeePerBlobGas,
-			TipPerBlobGas:     metrics.tipPerBlobGas,
-			TotalCostETH:      metrics.totalCostETH,
-			Timestamp:         timestamp,
-			Confirmed:         true,
-			IndexerVersion:    i.indexerVersion,
-			MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
-			BlobGasUsed:       metrics.blobGasUsed,
-		})
+		for range blobHashes {
+			blobs = append(blobs, models.Blob{
+				NetworkID:         i.network.ChainID,
+				BlockNumber:       int64(blockNumber),
+				BlobIndex:         blobIndex,
+				TxHash:            tx.Hash().Hex(),
+				FromAddress:       from,
+				UserAttribution:   userAttribution,
+				BlobSizeBytes:     metrics.blobSizeBytes,
+				BaseFeePerBlobGas: metrics.baseFeePerBlobGas,
+				TipPerBlobGas:     metrics.tipPerBlobGas,
+				TotalCostETH:      metrics.totalCostETH,
+				Timestamp:         timestamp,
+				Confirmed:         true,
+				IndexerVersion:    i.indexerVersion,
+				MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
+				BlobGasUsed:       metrics.blobGasUsed,
+			})
+			blobIndex++
+		}
 
 		if userAttribution != "" {
 			attributedUsers = append(attributedUsers, from)
 		}
 	}
 
-	// Build block-level metrics
+	// Build block-level metrics. BlobCount is the actual blob count, not the
+	// blob-tx count — a single tx may carry up to params.BlobTxBlobGasPerBlob worth of blobs.
 	blockMetrics := &models.BlockMetrics{
 		NetworkID:        i.network.ChainID,
 		BlockNumber:      int64(blockNumber),
 		BlockTimestamp:   timestamp,
-		BlobCount:        blobTxCount,
+		BlobCount:        blobIndex,
 		BlobGasUsed:      int64(blockBlobGasUsed),
 		BlobGasTarget:    int64(bp.TargetGas),
 		BlobGasLimit:     int64(bp.MaxGas),
@@ -1414,12 +1442,10 @@ func (i *Indexer) processPendingTransactions() error {
 
 	// Process each pending transaction
 	for _, tx := range pendingTxs {
-		// Check if it's a blob transaction
 		if !i.ethClient.IsBlobTransaction(tx) {
 			continue
 		}
 
-		// Get the sender address
 		from, err := i.getSender(tx)
 		if err != nil {
 			logger.Error("Failed to get sender for pending transaction",
@@ -1432,30 +1458,13 @@ func (i *Indexer) processPendingTransactions() error {
 		// Get the user attribution at the latest known head for the pending transaction.
 		userAttribution := i.attribution.GetUserAttributionForBlock(from, int64(latestBlockNum))
 
-		metrics := calculateBlobMetrics(tx, blobBaseFee)
-
-		// Create the blob record
-		blob := models.Blob{
-			NetworkID:         i.network.ChainID,
-			BlockNumber:       -1, // Pending transaction
-			BlobIndex:         0,  // Placeholder
-			TxHash:            tx.Hash().Hex(),
-			FromAddress:       from,
-			UserAttribution:   userAttribution,
-			BlobSizeBytes:     metrics.blobSizeBytes,
-			BaseFeePerBlobGas: metrics.baseFeePerBlobGas,
-			TipPerBlobGas:     metrics.tipPerBlobGas,
-			TotalCostETH:      metrics.totalCostETH,
-			Timestamp:         time.Now(),
-			Confirmed:         false,
-			IndexerVersion:    i.indexerVersion,
-			MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
-			BlobGasUsed:       metrics.blobGasUsed,
+		pendingBlobs := buildPendingBlobs(tx, blobBaseFee, i.network.ChainID, from, userAttribution, i.indexerVersion)
+		if len(pendingBlobs) == 0 {
+			continue
 		}
 
-		// Insert the blob record
-		if err := i.insertPendingBlob(blob); err != nil {
-			logger.Error("Failed to insert pending blob record",
+		if err := i.insertPendingBlobs(pendingBlobs); err != nil {
+			logger.Error("Failed to insert pending blob records",
 				zap.String("network", i.network.Name),
 				zap.String("tx_hash", tx.Hash().Hex()),
 				zap.Error(err))
@@ -1466,58 +1475,82 @@ func (i *Indexer) processPendingTransactions() error {
 	return nil
 }
 
-// insertPendingBlob inserts a pending blob record into the database
-func (i *Indexer) insertPendingBlob(blob models.Blob) error {
-	query := `
-		WITH chosen_index AS (
-			SELECT COALESCE(
-				(
-					SELECT blob_index
-					FROM blobs
-					WHERE network_id = $1 AND tx_hash = $2 AND block_number < 0
-					LIMIT 1
-				),
-				(
-					SELECT COALESCE(MAX(blob_index), -1) + 1
-					FROM blobs
-					WHERE network_id = $1 AND block_number = $3
-				)
-			) AS blob_index
-		)
+// insertPendingBlobs upserts the per-blob pending rows for a single transaction.
+// All blobs in the slice must share the same NetworkID and TxHash. Re-insertion
+// is idempotent: any existing pending rows for the tx are replaced atomically.
+// If the tx already has confirmed rows, this is a no-op.
+func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
+	if len(blobs) == 0 {
+		return nil
+	}
+	networkID := blobs[0].NetworkID
+	txHash := blobs[0].TxHash
+	pendingBlock := blobs[0].BlockNumber
+
+	tx, err := i.db.BeginTxx(i.ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin pending blob transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// If the tx is already confirmed, do not (re)create pending rows.
+	var hasConfirmed bool
+	if err := tx.QueryRowContext(i.ctx,
+		`SELECT EXISTS (SELECT 1 FROM blobs WHERE network_id = $1 AND tx_hash = $2 AND block_number >= 0)`,
+		networkID, txHash,
+	).Scan(&hasConfirmed); err != nil {
+		return fmt.Errorf("failed to check confirmed blobs for pending tx: %w", err)
+	}
+	if hasConfirmed {
+		return tx.Commit()
+	}
+
+	// Clear any prior pending rows for this tx so re-detection is idempotent.
+	if _, err := tx.ExecContext(i.ctx,
+		`DELETE FROM blobs WHERE network_id = $1 AND tx_hash = $2 AND block_number < 0`,
+		networkID, txHash,
+	); err != nil {
+		return fmt.Errorf("failed to clear prior pending blobs: %w", err)
+	}
+
+	// Allocate distinct blob_index values inside the pending pool. The
+	// UNIQUE(network_id, block_number, blob_index) constraint applies here too,
+	// so we just continue the running counter past the current max.
+	var nextIdx sql.NullInt64
+	if err := tx.QueryRowContext(i.ctx,
+		`SELECT MAX(blob_index) FROM blobs WHERE network_id = $1 AND block_number = $2`,
+		networkID, pendingBlock,
+	).Scan(&nextIdx); err != nil {
+		return fmt.Errorf("failed to compute next pending blob_index: %w", err)
+	}
+	base := 0
+	if nextIdx.Valid {
+		base = int(nextIdx.Int64) + 1
+	}
+
+	stmt, err := tx.PrepareContext(i.ctx, `
 		INSERT INTO blobs (
 			network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
 			timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
-		)
-		SELECT
-			$1, $3, chosen_index.blob_index, $2, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
-		FROM chosen_index
-		WHERE NOT EXISTS (
-			SELECT 1 FROM blobs
-			WHERE network_id = $1 AND tx_hash = $2 AND block_number >= 0
-		)
-		ON CONFLICT (network_id, tx_hash) WHERE block_number < 0 DO UPDATE SET
-			blob_index = EXCLUDED.blob_index,
-			from_address = EXCLUDED.from_address,
-			user_attribution = EXCLUDED.user_attribution,
-			blob_size_bytes = EXCLUDED.blob_size_bytes,
-			base_fee_per_blob_gas = EXCLUDED.base_fee_per_blob_gas,
-			tip_per_blob_gas = EXCLUDED.tip_per_blob_gas,
-			total_cost_eth = EXCLUDED.total_cost_eth,
-			timestamp = EXCLUDED.timestamp,
-			confirmed = EXCLUDED.confirmed,
-			indexer_version = EXCLUDED.indexer_version,
-			max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
-			blob_gas_used = EXCLUDED.blob_gas_used
-	`
-	if _, err := i.db.ExecContext(i.ctx, query,
-		blob.NetworkID, blob.TxHash, blob.BlockNumber, blob.FromAddress, blob.UserAttribution,
-		blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
-		blob.Timestamp, blob.Confirmed, blob.IndexerVersion, blob.MaxFeePerBlobGas, blob.BlobGasUsed,
-	); err != nil {
-		return fmt.Errorf("failed to upsert pending blob: %w", err)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare pending blob insert: %w", err)
 	}
-	return nil
+	defer stmt.Close()
+
+	for offset, b := range blobs {
+		if _, err := stmt.ExecContext(i.ctx,
+			b.NetworkID, b.BlockNumber, base+offset, b.TxHash, b.FromAddress, b.UserAttribution,
+			b.BlobSizeBytes, b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostETH,
+			b.Timestamp, b.Confirmed, b.IndexerVersion, b.MaxFeePerBlobGas, b.BlobGasUsed,
+		); err != nil {
+			return fmt.Errorf("failed to insert pending blob (tx: %s): %w", b.TxHash, err)
+		}
+	}
+
+	return tx.Commit()
 }
 
 // processBlockRange processes a range of blocks by queuing them for the worker pool

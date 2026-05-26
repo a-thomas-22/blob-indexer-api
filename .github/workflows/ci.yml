@@ -138,6 +138,41 @@ jobs:
       - name: Run tests with race detector
         run: go test -race -v ./...
 
+  migrations:
+    name: Migrations (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: blob_indexer_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DB_URL: postgres://postgres:postgres@127.0.0.1:5432/blob_indexer_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Generate Swagger docs
+        run: make swagger
+
+      - name: Run migration integration tests
+        run: go test -tags integration -count=1 -v ./internal/db/...
+
   build:
     name: Build
     runs-on: ubuntu-latest
