@@ -288,18 +288,50 @@ const (
 		ORDER BY category_totals.blob_count DESC, category_totals.total_cost_eth DESC, category_totals.category ASC
 	`
 
-	// queryBlobStats computes aggregate statistics for all blobs on a network.
+	// queryBlobStats reads whole-history statistics from the maintained network summary.
+	// Pending rows stay tiny and indexed, so they are folded in at read time.
 	queryBlobStats = `
+		WITH pending AS (
+			SELECT
+				COUNT(*)::bigint AS total_pending_blobs,
+				COALESCE(SUM(base_fee_per_blob_gas::numeric), 0) AS pending_base_fee,
+				COALESCE(SUM(tip_per_blob_gas::numeric), 0) AS pending_tip,
+				COALESCE(SUM(total_cost_eth::numeric), 0) AS pending_total_cost
+			FROM blobs
+			WHERE network_id = $1 AND confirmed = false
+		)
 		SELECT
-			COUNT(*) as total_blobs,
-			COALESCE(SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END), 0) as total_confirmed_blobs,
-			COALESCE(SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END), 0) as total_pending_blobs,
-			COALESCE(AVG(base_fee_per_blob_gas::numeric), '0'::numeric) as average_base_fee,
-			COALESCE(AVG(tip_per_blob_gas::numeric), '0'::numeric) as average_tip,
-			COALESCE(AVG(total_cost_eth::numeric), '0'::numeric) as average_total_cost,
-			COALESCE(MAX(timestamp), '1970-01-01'::timestamp) as last_indexed_time
-		FROM blobs
-		WHERE network_id = $1
+			(COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs) AS total_blobs,
+			COALESCE(s.total_confirmed_blobs, 0) AS total_confirmed_blobs,
+			p.total_pending_blobs AS total_pending_blobs,
+			CASE
+				WHEN (COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs) > 0
+				THEN (
+					(COALESCE(s.sum_base_fee_per_blob_gas, 0) + p.pending_base_fee)
+					/ (COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs)
+				)::text
+				ELSE '0'
+			END AS average_base_fee,
+			CASE
+				WHEN (COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs) > 0
+				THEN (
+					(COALESCE(s.sum_tip_per_blob_gas, 0) + p.pending_tip)
+					/ (COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs)
+				)::text
+				ELSE '0'
+			END AS average_tip,
+			CASE
+				WHEN (COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs) > 0
+				THEN (
+					(COALESCE(s.sum_total_cost, 0) + p.pending_total_cost)
+					/ (COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs)
+				)::text
+				ELSE '0'
+			END AS average_total_cost,
+			COALESCE(s.last_indexed_block, 0) AS last_indexed_block,
+			COALESCE(s.last_indexed_time, '1970-01-01'::timestamp) AS last_indexed_time
+		FROM pending p
+		LEFT JOIN network_blob_stats s ON s.network_id = $1
 	`
 
 	// queryRollingStatsWindows computes time-windowed blob market statistics.

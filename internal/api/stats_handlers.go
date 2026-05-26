@@ -8,6 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
@@ -92,15 +93,7 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) queryBlobStats(ctx context.Context, networkID int, networkName string) (StatsResponse, error) {
-	var stats struct {
-		TotalBlobs          int       `db:"total_blobs"`
-		TotalConfirmedBlobs int       `db:"total_confirmed_blobs"`
-		TotalPendingBlobs   int       `db:"total_pending_blobs"`
-		AverageBaseFee      string    `db:"average_base_fee"`
-		AverageTip          string    `db:"average_tip"`
-		AverageTotalCost    string    `db:"average_total_cost"`
-		LastIndexedTime     time.Time `db:"last_indexed_time"`
-	}
+	var stats models.BlobStatsAggregate
 
 	queryCtx, cancel := context.WithTimeout(ctx, aggregateQueryTimeout)
 	defer cancel()
@@ -108,7 +101,19 @@ func (a *API) queryBlobStats(ctx context.Context, networkID int, networkName str
 		return StatsResponse{}, err
 	}
 
-	response := StatsResponse{
+	response := toStatsResponse(stats, networkID, networkName)
+
+	a.cacheMu.Lock()
+	a.statsCache[networkID] = statsCacheEntry{
+		response:  response,
+		expiresAt: time.Now().Add(aggregateCacheTTL),
+	}
+	a.cacheMu.Unlock()
+	return response, nil
+}
+
+func toStatsResponse(stats models.BlobStatsAggregate, networkID int, networkName string) StatsResponse {
+	return StatsResponse{
 		NetworkID:                   networkID,
 		NetworkName:                 networkName,
 		TotalBlobs:                  stats.TotalBlobs,
@@ -120,15 +125,7 @@ func (a *API) queryBlobStats(ctx context.Context, networkID int, networkName str
 		AverageBaseFee:              stats.AverageBaseFee,
 		AverageTip:                  stats.AverageTip,
 		AverageTotalCost:            stats.AverageTotalCost,
-		LastIndexedBlock:            a.getLastIndexedBlockFromDB(ctx, networkID),
+		LastIndexedBlock:            stats.LastIndexedBlock,
 		LastIndexedTime:             stats.LastIndexedTime,
 	}
-
-	a.cacheMu.Lock()
-	a.statsCache[networkID] = statsCacheEntry{
-		response:  response,
-		expiresAt: time.Now().Add(aggregateCacheTTL),
-	}
-	a.cacheMu.Unlock()
-	return response, nil
 }
