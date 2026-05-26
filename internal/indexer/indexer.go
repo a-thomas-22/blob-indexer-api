@@ -48,9 +48,12 @@ const (
 	// failedBlockSafetyRetryInterval keeps failed blocks recoverable without retrying them every scan forever.
 	failedBlockSafetyRetryInterval = time.Hour
 
-	// bytesPerBlob is the EIP-4844 blob size (4096 field elements * 32 bytes).
-	// Each blob also consumes exactly params.BlobTxBlobGasPerBlob (131072) of blob gas.
-	bytesPerBlob = params.BlobTxBlobGasPerBlob
+	// bytesPerBlob is the on-wire blob size in bytes (EIP-4844 fixes blobs at
+	// 4096 field elements of 32 bytes each = 131072 bytes). It is numerically
+	// equal to params.BlobTxBlobGasPerBlob but expresses a byte quantity, not
+	// a gas amount — keep the two units separate so a future protocol change
+	// to one does not silently corrupt the other.
+	bytesPerBlob = 4096 * 32
 )
 
 // errReorgDetected is returned when a chain reorganization is detected and handled
@@ -1063,7 +1066,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 	}
 
 	// Build block-level metrics. BlobCount is the actual blob count, not the
-	// blob-tx count — a single tx may carry up to params.BlobTxBlobGasPerBlob worth of blobs.
+	// blob-tx count — a single EIP-4844 tx may carry multiple blobs.
 	blockMetrics := &models.BlockMetrics{
 		NetworkID:        i.network.ChainID,
 		BlockNumber:      int64(blockNumber),
@@ -1476,9 +1479,14 @@ func (i *Indexer) processPendingTransactions() error {
 }
 
 // insertPendingBlobs upserts the per-blob pending rows for a single transaction.
-// All blobs in the slice must share the same NetworkID and TxHash. Re-insertion
-// is idempotent: any existing pending rows for the tx are replaced atomically.
-// If the tx already has confirmed rows, this is a no-op.
+// All blobs in the slice must share the same NetworkID and TxHash. The method
+// is idempotent in the steady state: when a poll re-discovers a tx that is
+// already represented at the right count, existing rows are UPDATEd in place
+// (their blob_index values are preserved). Only when the row count changes do
+// we delete and reallocate from MAX(blob_index)+1. Without this short-circuit
+// the pending pool's max blob_index would climb on every poll, and because
+// blobs.blob_index is SMALLINT a sticky mempool would eventually overflow.
+// If the tx is already confirmed, the call is a no-op.
 func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	if len(blobs) == 0 {
 		return nil
@@ -1505,7 +1513,69 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 		return tx.Commit()
 	}
 
-	// Clear any prior pending rows for this tx so re-detection is idempotent.
+	// Read any existing pending rows for this tx so we can either reuse their
+	// blob_index values (steady state) or fall back to reallocation.
+	rows, err := tx.QueryContext(i.ctx,
+		`SELECT blob_index FROM blobs
+		 WHERE network_id = $1 AND tx_hash = $2 AND block_number < 0
+		 ORDER BY blob_index ASC`,
+		networkID, txHash,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to load existing pending blob indices: %w", err)
+	}
+	existingIdx := make([]int, 0, len(blobs))
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to scan pending blob index: %w", err)
+		}
+		existingIdx = append(existingIdx, v)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to iterate pending blob indices: %w", err)
+	}
+
+	// Steady-state path: same number of rows as expected → update in place.
+	if len(existingIdx) == len(blobs) {
+		updateStmt, err := tx.PrepareContext(i.ctx, `
+			UPDATE blobs SET
+				from_address = $1,
+				user_attribution = $2,
+				blob_size_bytes = $3,
+				base_fee_per_blob_gas = $4,
+				tip_per_blob_gas = $5,
+				total_cost_eth = $6,
+				timestamp = $7,
+				indexer_version = $8,
+				max_fee_per_blob_gas = $9,
+				blob_gas_used = $10
+			WHERE network_id = $11 AND block_number = $12 AND blob_index = $13
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to prepare pending blob update: %w", err)
+		}
+		defer updateStmt.Close()
+
+		for offset, b := range blobs {
+			if _, err := updateStmt.ExecContext(i.ctx,
+				b.FromAddress, b.UserAttribution, b.BlobSizeBytes,
+				b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostETH,
+				b.Timestamp, b.IndexerVersion, b.MaxFeePerBlobGas, b.BlobGasUsed,
+				b.NetworkID, b.BlockNumber, existingIdx[offset],
+			); err != nil {
+				return fmt.Errorf("failed to update pending blob (tx: %s): %w", b.TxHash, err)
+			}
+		}
+		return tx.Commit()
+	}
+
+	// Mismatch path: row count differs from expected. Delete and reinsert at
+	// freshly-allocated indices. This happens when a tx is newly seen, when an
+	// indexer restart loses partial state, or if the protocol blob-per-tx
+	// count for this tx changed under us.
 	if _, err := tx.ExecContext(i.ctx,
 		`DELETE FROM blobs WHERE network_id = $1 AND tx_hash = $2 AND block_number < 0`,
 		networkID, txHash,
@@ -1528,7 +1598,7 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 		base = int(nextIdx.Int64) + 1
 	}
 
-	stmt, err := tx.PrepareContext(i.ctx, `
+	insertStmt, err := tx.PrepareContext(i.ctx, `
 		INSERT INTO blobs (
 			network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
@@ -1538,10 +1608,10 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare pending blob insert: %w", err)
 	}
-	defer stmt.Close()
+	defer insertStmt.Close()
 
 	for offset, b := range blobs {
-		if _, err := stmt.ExecContext(i.ctx,
+		if _, err := insertStmt.ExecContext(i.ctx,
 			b.NetworkID, b.BlockNumber, base+offset, b.TxHash, b.FromAddress, b.UserAttribution,
 			b.BlobSizeBytes, b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostETH,
 			b.Timestamp, b.Confirmed, b.IndexerVersion, b.MaxFeePerBlobGas, b.BlobGasUsed,

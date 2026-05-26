@@ -128,9 +128,15 @@ func TestBackfillPerBlobRows(t *testing.T) {
 		t.Fatalf("seed network: %v", err)
 	}
 
-	// Seed two confirmed blocks of legacy data:
+	// Seed three confirmed blocks of legacy data:
 	//   block 100 — one 5-blob tx (collapsed to 1 row, blob_gas_used = 5*131072)
 	//   block 101 — one 5-blob tx + one 1-blob tx (2 rows total)
+	//   block 102 — two multi-blob txs interleaved: txDD at txIndex 1 with 3
+	//               blobs, txEE at txIndex 2 with 2 blobs. After backfill the
+	//               per-blob order must be [txDD blob0..2, txEE blob0..1] so
+	//               consumers ordering by blob_index see DD's blobs before
+	//               EE's — matching the runtime indexer. legacy_blob_index
+	//               (the tx's position in the block) drives that order.
 	type seed struct {
 		blockNumber int64
 		blobIndex   int
@@ -141,6 +147,8 @@ func TestBackfillPerBlobRows(t *testing.T) {
 		{100, 0, "0xaa", 5},
 		{101, 0, "0xbb", 5},
 		{101, 1, "0xcc", 1},
+		{102, 1, "0xdd", 3},
+		{102, 2, "0xee", 2},
 	}
 	for _, s := range seeds {
 		if _, err := db.Exec(`
@@ -173,8 +181,9 @@ func TestBackfillPerBlobRows(t *testing.T) {
 			blob_params_target, blob_params_max, update_fraction
 		) VALUES
 			(1, 100, NOW(), 1, $1, 0, 0, 0, 7, 0, 3, 6, 0),
-			(1, 101, NOW(), 2, $2, 0, 0, 0, 7, 0, 3, 6, 0)
-	`, gasPerBlob*5, gasPerBlob*6); err != nil {
+			(1, 101, NOW(), 2, $2, 0, 0, 0, 7, 0, 3, 6, 0),
+			(1, 102, NOW(), 2, $3, 0, 0, 0, 7, 0, 3, 6, 0)
+	`, gasPerBlob*5, gasPerBlob*6, gasPerBlob*5); err != nil {
 		t.Fatalf("seed block_metrics: %v", err)
 	}
 
@@ -186,12 +195,17 @@ func TestBackfillPerBlobRows(t *testing.T) {
 	// Expectations:
 	// block 100: 5 blob rows
 	// block 101: 6 blob rows (5+1)
+	// block 102: 5 blob rows (3+2)
 	type blockCheck struct {
 		blockNumber int64
 		wantRows    int
 		wantGas     int64
 	}
-	for _, c := range []blockCheck{{100, 5, 5 * gasPerBlob}, {101, 6, 6 * gasPerBlob}} {
+	for _, c := range []blockCheck{
+		{100, 5, 5 * gasPerBlob},
+		{101, 6, 6 * gasPerBlob},
+		{102, 5, 5 * gasPerBlob},
+	} {
 		var got int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM blobs WHERE network_id = 1 AND block_number = $1`, c.blockNumber).Scan(&got); err != nil {
 			t.Fatalf("count blobs for block %d: %v", c.blockNumber, err)
@@ -217,14 +231,21 @@ func TestBackfillPerBlobRows(t *testing.T) {
 			t.Errorf("block %d: max blob_gas_used = %d, want %d (one blob's worth)", c.blockNumber, maxGas.Int64, gasPerBlob)
 		}
 
-		// blob_index values within the block must be unique (enforced by the
-		// UNIQUE constraint, but doubly checked here).
-		var distinct, total int
-		if err := db.QueryRow(`SELECT COUNT(DISTINCT blob_index), COUNT(*) FROM blobs WHERE network_id = 1 AND block_number = $1`, c.blockNumber).Scan(&distinct, &total); err != nil {
-			t.Fatalf("blob_index uniqueness for block %d: %v", c.blockNumber, err)
+		// blob_index values must be contiguous 0..N-1 (not merely unique).
+		// Consumers order by (block_number ASC, blob_index ASC) and expect
+		// no gaps and no out-of-order ordinals. Compare MIN/MAX/COUNT/
+		// COUNT(DISTINCT) so we catch both gaps and accidental duplicates.
+		var minIdx, maxIdx, distinct, total int
+		if err := db.QueryRow(`
+			SELECT MIN(blob_index), MAX(blob_index), COUNT(DISTINCT blob_index), COUNT(*)
+			FROM blobs
+			WHERE network_id = 1 AND block_number = $1
+		`, c.blockNumber).Scan(&minIdx, &maxIdx, &distinct, &total); err != nil {
+			t.Fatalf("blob_index shape for block %d: %v", c.blockNumber, err)
 		}
-		if distinct != total {
-			t.Errorf("block %d: %d distinct blob_index values across %d rows", c.blockNumber, distinct, total)
+		if minIdx != 0 || maxIdx != c.wantRows-1 || distinct != c.wantRows || total != c.wantRows {
+			t.Errorf("block %d: blob_index expected contiguous 0..%d (rows=%d), got min=%d max=%d distinct=%d total=%d",
+				c.blockNumber, c.wantRows-1, c.wantRows, minIdx, maxIdx, distinct, total)
 		}
 
 		// block_metrics.blob_count must match the actual blob count.
@@ -250,8 +271,8 @@ func TestBackfillPerBlobRows(t *testing.T) {
 		t.Fatalf("%d blob rows have total_cost_eth != base_fee * 131072", bad)
 	}
 
-	// Per-tx blob count should match what we seeded (5, 5, 1).
-	wantByTx := map[string]int{"0xaa": 5, "0xbb": 5, "0xcc": 1}
+	// Per-tx blob count should match what we seeded.
+	wantByTx := map[string]int{"0xaa": 5, "0xbb": 5, "0xcc": 1, "0xdd": 3, "0xee": 2}
 	for txHash, want := range wantByTx {
 		var got int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM blobs WHERE tx_hash = $1`, txHash).Scan(&got); err != nil {
@@ -262,13 +283,59 @@ func TestBackfillPerBlobRows(t *testing.T) {
 		}
 	}
 
-	// Sanity: schema_migrations should be at version 9.
-	var v int
+	// Per-block tx ordering invariant: in block 102 the legacy tx ordering
+	// was [txDD at txIndex 1, txEE at txIndex 2], so the per-blob ordering
+	// must be txDD's three blobs (indices 0..2) before txEE's two blobs
+	// (indices 3..4). This catches backfills that interleave blobs across
+	// txs or place extra blobs after MAX(blob_index) instead of grouping
+	// per tx.
+	type ordered struct {
+		blobIndex int
+		txHash    string
+	}
+	rowsOrd, err := db.Query(`
+		SELECT blob_index, tx_hash FROM blobs
+		WHERE network_id = 1 AND block_number = 102
+		ORDER BY blob_index ASC
+	`)
+	if err != nil {
+		t.Fatalf("ordering query: %v", err)
+	}
+	var ord []ordered
+	for rowsOrd.Next() {
+		var o ordered
+		if err := rowsOrd.Scan(&o.blobIndex, &o.txHash); err != nil {
+			rowsOrd.Close()
+			t.Fatalf("scan ordering row: %v", err)
+		}
+		ord = append(ord, o)
+	}
+	rowsOrd.Close()
+	wantOrd := []ordered{
+		{0, "0xdd"}, {1, "0xdd"}, {2, "0xdd"},
+		{3, "0xee"}, {4, "0xee"},
+	}
+	if len(ord) != len(wantOrd) {
+		t.Fatalf("block 102 ordering: got %d rows, want %d", len(ord), len(wantOrd))
+	}
+	for i, w := range wantOrd {
+		if ord[i] != w {
+			t.Errorf("block 102 row %d: got (idx=%d, tx=%s), want (idx=%d, tx=%s)",
+				i, ord[i].blobIndex, ord[i].txHash, w.blobIndex, w.txHash)
+		}
+	}
+
+	// Sanity: schema_migrations should be at the latest version.
+	latest, err := LatestMigrationVersion()
+	if err != nil {
+		t.Fatalf("LatestMigrationVersion: %v", err)
+	}
+	var v uint
 	if err := db.QueryRow(`SELECT version FROM schema_migrations LIMIT 1`).Scan(&v); err != nil {
 		t.Fatalf("schema_migrations: %v", err)
 	}
-	if v != 9 {
-		t.Fatalf("schema_migrations version = %d, want 9", v)
+	if v != latest {
+		t.Fatalf("schema_migrations version = %d, want %d", v, latest)
 	}
 }
 
