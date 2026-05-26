@@ -86,49 +86,135 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION network_blob_stats_blobs_trigger()
+CREATE OR REPLACE FUNCTION network_blob_stats_blobs_insert_trigger()
 RETURNS trigger AS $$
+DECLARE
+    delta RECORD;
 BEGIN
-    IF TG_OP = 'UPDATE'
-        AND OLD.network_id IS NOT DISTINCT FROM NEW.network_id
-        AND OLD.confirmed IS NOT DISTINCT FROM NEW.confirmed
-        AND OLD.base_fee_per_blob_gas IS NOT DISTINCT FROM NEW.base_fee_per_blob_gas
-        AND OLD.tip_per_blob_gas IS NOT DISTINCT FROM NEW.tip_per_blob_gas
-        AND OLD.total_cost_eth IS NOT DISTINCT FROM NEW.total_cost_eth THEN
-        RETURN NEW;
-    END IF;
-
-    IF TG_OP IN ('UPDATE', 'DELETE') AND OLD.confirmed = true THEN
+    FOR delta IN
+        SELECT
+            network_id,
+            COUNT(*)::bigint AS count_delta,
+            COALESCE(SUM(base_fee_per_blob_gas::numeric), 0) AS sum_base_fee_delta,
+            COALESCE(SUM(tip_per_blob_gas::numeric), 0) AS sum_tip_delta,
+            COALESCE(SUM(total_cost_eth::numeric), 0) AS sum_total_cost_delta
+        FROM new_rows
+        WHERE confirmed = true
+        GROUP BY network_id
+    LOOP
         PERFORM network_blob_stats_apply_delta(
-            OLD.network_id,
-            -1,
-            -OLD.base_fee_per_blob_gas,
-            -OLD.tip_per_blob_gas,
-            -OLD.total_cost_eth
+            delta.network_id,
+            delta.count_delta,
+            delta.sum_base_fee_delta,
+            delta.sum_tip_delta,
+            delta.sum_total_cost_delta
         );
-    END IF;
+    END LOOP;
 
-    IF TG_OP IN ('INSERT', 'UPDATE') AND NEW.confirmed = true THEN
-        PERFORM network_blob_stats_apply_delta(
-            NEW.network_id,
-            1,
-            NEW.base_fee_per_blob_gas,
-            NEW.tip_per_blob_gas,
-            NEW.total_cost_eth
-        );
-    END IF;
-
-    IF TG_OP = 'DELETE' THEN
-        RETURN OLD;
-    END IF;
-    RETURN NEW;
+    RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trg_network_blob_stats_blobs
-AFTER INSERT OR UPDATE OR DELETE ON blobs
-FOR EACH ROW
-EXECUTE FUNCTION network_blob_stats_blobs_trigger();
+CREATE OR REPLACE FUNCTION network_blob_stats_blobs_delete_trigger()
+RETURNS trigger AS $$
+DECLARE
+    delta RECORD;
+BEGIN
+    FOR delta IN
+        SELECT
+            network_id,
+            -COUNT(*)::bigint AS count_delta,
+            -COALESCE(SUM(base_fee_per_blob_gas::numeric), 0) AS sum_base_fee_delta,
+            -COALESCE(SUM(tip_per_blob_gas::numeric), 0) AS sum_tip_delta,
+            -COALESCE(SUM(total_cost_eth::numeric), 0) AS sum_total_cost_delta
+        FROM old_rows
+        WHERE confirmed = true
+        GROUP BY network_id
+    LOOP
+        PERFORM network_blob_stats_apply_delta(
+            delta.network_id,
+            delta.count_delta,
+            delta.sum_base_fee_delta,
+            delta.sum_tip_delta,
+            delta.sum_total_cost_delta
+        );
+    END LOOP;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION network_blob_stats_blobs_update_trigger()
+RETURNS trigger AS $$
+DECLARE
+    delta RECORD;
+BEGIN
+    FOR delta IN
+        SELECT
+            network_id,
+            SUM(count_delta)::bigint AS count_delta,
+            SUM(sum_base_fee_delta) AS sum_base_fee_delta,
+            SUM(sum_tip_delta) AS sum_tip_delta,
+            SUM(sum_total_cost_delta) AS sum_total_cost_delta
+        FROM (
+            SELECT
+                network_id,
+                -COUNT(*)::bigint AS count_delta,
+                -COALESCE(SUM(base_fee_per_blob_gas::numeric), 0) AS sum_base_fee_delta,
+                -COALESCE(SUM(tip_per_blob_gas::numeric), 0) AS sum_tip_delta,
+                -COALESCE(SUM(total_cost_eth::numeric), 0) AS sum_total_cost_delta
+            FROM old_rows
+            WHERE confirmed = true
+            GROUP BY network_id
+
+            UNION ALL
+
+            SELECT
+                network_id,
+                COUNT(*)::bigint AS count_delta,
+                COALESCE(SUM(base_fee_per_blob_gas::numeric), 0) AS sum_base_fee_delta,
+                COALESCE(SUM(tip_per_blob_gas::numeric), 0) AS sum_tip_delta,
+                COALESCE(SUM(total_cost_eth::numeric), 0) AS sum_total_cost_delta
+            FROM new_rows
+            WHERE confirmed = true
+            GROUP BY network_id
+        ) deltas
+        GROUP BY network_id
+        HAVING SUM(count_delta) <> 0
+            OR SUM(sum_base_fee_delta) <> 0
+            OR SUM(sum_tip_delta) <> 0
+            OR SUM(sum_total_cost_delta) <> 0
+    LOOP
+        PERFORM network_blob_stats_apply_delta(
+            delta.network_id,
+            delta.count_delta,
+            delta.sum_base_fee_delta,
+            delta.sum_tip_delta,
+            delta.sum_total_cost_delta
+        );
+    END LOOP;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_network_blob_stats_blobs_insert
+AFTER INSERT ON blobs
+REFERENCING NEW TABLE AS new_rows
+FOR EACH STATEMENT
+EXECUTE FUNCTION network_blob_stats_blobs_insert_trigger();
+
+CREATE TRIGGER trg_network_blob_stats_blobs_update
+AFTER UPDATE ON blobs
+REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
+FOR EACH STATEMENT
+EXECUTE FUNCTION network_blob_stats_blobs_update_trigger();
+
+CREATE TRIGGER trg_network_blob_stats_blobs_delete
+AFTER DELETE ON blobs
+REFERENCING OLD TABLE AS old_rows
+FOR EACH STATEMENT
+EXECUTE FUNCTION network_blob_stats_blobs_delete_trigger();
 
 CREATE OR REPLACE FUNCTION network_blob_stats_refresh_latest(p_network_id INTEGER)
 RETURNS void AS $$
@@ -164,24 +250,69 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION network_blob_stats_block_metrics_trigger()
+CREATE OR REPLACE FUNCTION network_blob_stats_block_metrics_insert_trigger()
 RETURNS trigger AS $$
+DECLARE
+    affected RECORD;
 BEGIN
-    IF TG_OP = 'UPDATE' AND OLD.network_id <> NEW.network_id THEN
-        PERFORM network_blob_stats_refresh_latest(OLD.network_id);
-    END IF;
+    FOR affected IN
+        SELECT DISTINCT network_id
+        FROM new_rows
+    LOOP
+        PERFORM network_blob_stats_refresh_latest(affected.network_id);
+    END LOOP;
 
-    IF TG_OP = 'DELETE' THEN
-        PERFORM network_blob_stats_refresh_latest(OLD.network_id);
-        RETURN OLD;
-    END IF;
-
-    PERFORM network_blob_stats_refresh_latest(NEW.network_id);
-    RETURN NEW;
+    RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trg_network_blob_stats_block_metrics
-AFTER INSERT OR UPDATE OR DELETE ON block_metrics
-FOR EACH ROW
-EXECUTE FUNCTION network_blob_stats_block_metrics_trigger();
+CREATE OR REPLACE FUNCTION network_blob_stats_block_metrics_update_trigger()
+RETURNS trigger AS $$
+DECLARE
+    affected RECORD;
+BEGIN
+    FOR affected IN
+        SELECT network_id FROM old_rows
+        UNION
+        SELECT network_id FROM new_rows
+    LOOP
+        PERFORM network_blob_stats_refresh_latest(affected.network_id);
+    END LOOP;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION network_blob_stats_block_metrics_delete_trigger()
+RETURNS trigger AS $$
+DECLARE
+    affected RECORD;
+BEGIN
+    FOR affected IN
+        SELECT DISTINCT network_id
+        FROM old_rows
+    LOOP
+        PERFORM network_blob_stats_refresh_latest(affected.network_id);
+    END LOOP;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_network_blob_stats_block_metrics_insert
+AFTER INSERT ON block_metrics
+REFERENCING NEW TABLE AS new_rows
+FOR EACH STATEMENT
+EXECUTE FUNCTION network_blob_stats_block_metrics_insert_trigger();
+
+CREATE TRIGGER trg_network_blob_stats_block_metrics_update
+AFTER UPDATE ON block_metrics
+REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
+FOR EACH STATEMENT
+EXECUTE FUNCTION network_blob_stats_block_metrics_update_trigger();
+
+CREATE TRIGGER trg_network_blob_stats_block_metrics_delete
+AFTER DELETE ON block_metrics
+REFERENCING OLD TABLE AS old_rows
+FOR EACH STATEMENT
+EXECUTE FUNCTION network_blob_stats_block_metrics_delete_trigger();
