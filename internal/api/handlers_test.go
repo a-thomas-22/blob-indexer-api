@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -11,6 +12,24 @@ import (
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
+
+type aggregateContextTestKey struct{}
+
+func TestAggregateWorkContextDropsCancellation(t *testing.T) {
+	ctx := context.WithValue(context.Background(), aggregateContextTestKey{}, "request-value")
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody).WithContext(ctx)
+	got := aggregateWorkContext(req)
+
+	if err := got.Err(); err != nil {
+		t.Fatalf("expected aggregate work context to ignore request cancellation, got %v", err)
+	}
+	if value := got.Value(aggregateContextTestKey{}); value != "request-value" {
+		t.Fatalf("expected request context value to be preserved, got %v", value)
+	}
+}
 
 func TestFormatBytes(t *testing.T) {
 	tests := []struct {

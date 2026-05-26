@@ -100,32 +100,39 @@ func RespondMaxBytesError(w http.ResponseWriter) {
 
 // LoggerMiddleware logs HTTP requests with details
 func LoggerMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
+	return LoggerMiddlewareWithResolver(newClientIPResolver(nil))(next)
+}
 
-		// Create a request ID
-		requestID := uuid.New().String()
-		ctx := context.WithValue(r.Context(), logger.RequestIDKey, requestID)
-		r = r.WithContext(ctx)
+// LoggerMiddlewareWithResolver logs HTTP requests using the provided client IP resolver.
+func LoggerMiddlewareWithResolver(resolver clientIPResolver) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
 
-		// Create a response wrapper to capture status code
-		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			// Create a request ID
+			requestID := uuid.New().String()
+			ctx := context.WithValue(r.Context(), logger.RequestIDKey, requestID)
+			r = r.WithContext(ctx)
 
-		// Process request
-		next.ServeHTTP(ww, r)
+			// Create a response wrapper to capture status code
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 
-		// Log request details
-		logger.Info("HTTP request",
-			zap.String("method", r.Method),
-			zap.String("path", r.URL.Path),
-			zap.Int("status", ww.Status()),
-			zap.Duration("duration", time.Since(start)),
-			zap.String("request_id", requestID),
-			zap.String("client_ip", clientIP(r)),
-			zap.String("remote_addr", r.RemoteAddr),
-			zap.String("user_agent", r.UserAgent()),
-		)
-	})
+			// Process request
+			next.ServeHTTP(ww, r)
+
+			// Log request details
+			logger.Info("HTTP request",
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.Int("status", ww.Status()),
+				zap.Duration("duration", time.Since(start)),
+				zap.String("request_id", requestID),
+				zap.String("client_ip", resolver.IP(r)),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("user_agent", r.UserAgent()),
+			)
+		})
+	}
 }
 
 // ContentTypeJSON is a middleware that validates the Content-Type header

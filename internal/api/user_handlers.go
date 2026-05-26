@@ -205,10 +205,36 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 	}
 	a.cacheMu.RUnlock()
 
-	var users []models.BlobUserStats
-	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
-	defer cancel()
-	if err := a.db.SelectContext(queryCtx, &users, query, network.ChainID, limit, offset, string(window), string(sort)); err != nil {
+	value, err, _ := a.aggregateGroup.Do("top_users:"+cacheKey, func() (interface{}, error) {
+		a.cacheMu.RLock()
+		if cached, ok := a.topUsersCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+			a.cacheMu.RUnlock()
+			return cached.response, nil
+		}
+		a.cacheMu.RUnlock()
+
+		var users []models.BlobUserStats
+		queryCtx, cancel := context.WithTimeout(aggregateWorkContext(r), aggregateQueryTimeout)
+		defer cancel()
+		if err := a.db.SelectContext(queryCtx, &users, query, network.ChainID, limit, offset, string(window), string(sort)); err != nil {
+			return nil, err
+		}
+
+		response := make([]UserResponse, 0, len(users))
+		for _, user := range users {
+			response = append(response, toUserResponse(user, network.ChainID, network.Name))
+		}
+
+		a.cacheMu.Lock()
+		a.topUsersCache[cacheKey] = topUsersCacheEntry{
+			response:  response,
+			expiresAt: time.Now().Add(aggregateCacheTTL),
+		}
+		a.cacheMu.Unlock()
+
+		return response, nil
+	})
+	if err != nil {
 		logger.Error(errMessage,
 			zap.String("network", network.Name),
 			zap.String("sort", string(sort)),
@@ -218,22 +244,15 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 		return
 	}
 
-	response := make([]UserResponse, 0, len(users))
-	for _, user := range users {
-		response = append(response, toUserResponse(user, network.ChainID, network.Name))
-	}
+	// The singleflight closure above always returns []UserResponse or an error,
+	// so the assertion's ok value can never be false here.
+	response, _ := value.([]UserResponse)
 
 	logger.Debug(returnMessage,
 		zap.String("network", network.Name),
 		zap.String("sort", string(sort)),
 		zap.String("window", string(window)),
 		zap.Int("count", len(response)))
-	a.cacheMu.Lock()
-	a.topUsersCache[cacheKey] = topUsersCacheEntry{
-		response:  response,
-		expiresAt: time.Now().Add(aggregateCacheTTL),
-	}
-	a.cacheMu.Unlock()
 	a.respondSuccess(w, response)
 }
 
@@ -266,11 +285,60 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 		zap.String("network", network.Name),
 		zap.String("window", string(window)))
 
-	queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
-	defer cancel()
+	cacheKey := fmt.Sprintf("breakdown:%d:%s", network.ChainID, window)
+	a.cacheMu.RLock()
+	if cached, ok := a.breakdownCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+		a.cacheMu.RUnlock()
+		a.respondSuccess(w, cached.response)
+		return
+	}
+	a.cacheMu.RUnlock()
 
-	var categories []models.BlobUserCategoryShare
-	if err := a.db.SelectContext(queryCtx, &categories, queryBlobUserCategoryBreakdown, network.ChainID, string(window)); err != nil {
+	value, err, _ := a.aggregateGroup.Do(cacheKey, func() (interface{}, error) {
+		a.cacheMu.RLock()
+		if cached, ok := a.breakdownCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+			a.cacheMu.RUnlock()
+			return cached.response, nil
+		}
+		a.cacheMu.RUnlock()
+
+		queryCtx, cancel := context.WithTimeout(aggregateWorkContext(r), aggregateQueryTimeout)
+		defer cancel()
+
+		var categories []models.BlobUserCategoryShare
+		if err := a.db.SelectContext(queryCtx, &categories, queryBlobUserCategoryBreakdown, network.ChainID, string(window)); err != nil {
+			return UserBreakdownResponse{}, err
+		}
+
+		categoryShares := make([]CategoryShareResponse, 0, len(categories))
+		for _, category := range categories {
+			categoryShares = append(categoryShares, CategoryShareResponse{
+				Category:          category.Category,
+				BlobCount:         category.BlobCount,
+				TotalCostWei:      category.TotalCostETH,
+				TotalCostETH:      category.TotalCostETH,
+				BlobSharePercent:  category.BlobSharePercent,
+				SpendSharePercent: category.SpendSharePercent,
+			})
+		}
+
+		response := UserBreakdownResponse{
+			NetworkID:      network.ChainID,
+			NetworkName:    network.Name,
+			Window:         string(window),
+			CategoryShares: categoryShares,
+		}
+
+		a.cacheMu.Lock()
+		a.breakdownCache[cacheKey] = userBreakdownCacheEntry{
+			response:  response,
+			expiresAt: time.Now().Add(aggregateCacheTTL),
+		}
+		a.cacheMu.Unlock()
+
+		return response, nil
+	})
+	if err != nil {
 		logger.Error("Failed to get blob user breakdown",
 			zap.String("network", network.Name),
 			zap.String("window", string(window)),
@@ -279,24 +347,11 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	categoryShares := make([]CategoryShareResponse, 0, len(categories))
-	for _, category := range categories {
-		categoryShares = append(categoryShares, CategoryShareResponse{
-			Category:          category.Category,
-			BlobCount:         category.BlobCount,
-			TotalCostWei:      category.TotalCostETH,
-			TotalCostETH:      category.TotalCostETH,
-			BlobSharePercent:  category.BlobSharePercent,
-			SpendSharePercent: category.SpendSharePercent,
-		})
-	}
+	// The singleflight closure above always returns UserBreakdownResponse or an error,
+	// so the assertion's ok value can never be false here.
+	response, _ := value.(UserBreakdownResponse)
 
-	a.respondSuccess(w, UserBreakdownResponse{
-		NetworkID:      network.ChainID,
-		NetworkName:    network.Name,
-		Window:         string(window),
-		CategoryShares: categoryShares,
-	})
+	a.respondSuccess(w, response)
 }
 
 // GetUserByAddress godoc

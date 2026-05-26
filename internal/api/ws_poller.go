@@ -75,6 +75,9 @@ func (p *Poller) Run(ctx context.Context) {
 			logger.Info("WebSocket poller stopped")
 			return
 		case <-ticker.C:
+			if p.hub != nil && p.hub.ClientCount() == 0 {
+				continue
+			}
 			p.poll(ctx)
 		}
 	}

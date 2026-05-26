@@ -155,3 +155,35 @@ func TestAsyncAPISpecEndpoint(t *testing.T) {
 		t.Fatalf("asyncapi response missing expected websocket schema content")
 	}
 }
+
+func TestNewRouter_RateLimitIgnoresUntrustedIPHeaders(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Port:           8080,
+			RateLimitRPS:   1,
+			RateLimitBurst: 1,
+		},
+		Indexer: config.IndexerConfig{Version: "test"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler := NewRouter(ctx, nil, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/asyncapi.yaml", http.NoBody)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("X-Real-IP", "198.51.100.1")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected first request to return 200, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/asyncapi.yaml", http.NoBody)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("X-Real-IP", "198.51.100.2")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected second request from same remote address to return 429, got %d", w.Code)
+	}
+}
