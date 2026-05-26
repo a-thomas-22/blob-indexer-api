@@ -74,7 +74,7 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 		}
 		a.cacheMu.RUnlock()
 
-		return a.queryBlobStats(r.Context(), network.ChainID, network.Name)
+		return a.queryBlobStats(aggregateWorkContext(r), network.ChainID, network.Name)
 	})
 	if err != nil {
 		logger.Error("Failed to get blob statistics",

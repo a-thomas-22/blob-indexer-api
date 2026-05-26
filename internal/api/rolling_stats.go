@@ -137,7 +137,7 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 		a.cacheMu.RUnlock()
 
 		generatedAt := time.Now().UTC()
-		queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
+		queryCtx, cancel := context.WithTimeout(aggregateWorkContext(r), aggregateQueryTimeout)
 		defer cancel()
 
 		var rows []rollingStatsWindowRow

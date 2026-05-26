@@ -214,7 +214,7 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 		a.cacheMu.RUnlock()
 
 		var users []models.BlobUserStats
-		queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
+		queryCtx, cancel := context.WithTimeout(aggregateWorkContext(r), aggregateQueryTimeout)
 		defer cancel()
 		if err := a.db.SelectContext(queryCtx, &users, query, network.ChainID, limit, offset, string(window), string(sort)); err != nil {
 			return nil, err
@@ -302,7 +302,7 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 		}
 		a.cacheMu.RUnlock()
 
-		queryCtx, cancel := context.WithTimeout(r.Context(), aggregateQueryTimeout)
+		queryCtx, cancel := context.WithTimeout(aggregateWorkContext(r), aggregateQueryTimeout)
 		defer cancel()
 
 		var categories []models.BlobUserCategoryShare
