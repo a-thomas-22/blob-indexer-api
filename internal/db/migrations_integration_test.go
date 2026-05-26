@@ -590,6 +590,9 @@ func TestPublicAPIRollupsStayConsistent(t *testing.T) {
 		t.Fatalf("migrate up: %v", err)
 	}
 
+	t10 := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	t11 := time.Date(2026, 5, 26, 0, 0, 12, 0, time.UTC)
+
 	if _, err := db.Exec(`
 		INSERT INTO block_metrics (
 			network_id, block_number, block_timestamp, blob_count,
@@ -597,9 +600,9 @@ func TestPublicAPIRollupsStayConsistent(t *testing.T) {
 			excess_blob_gas, blob_base_fee, utilization_ratio,
 			blob_params_target, blob_params_max, update_fraction
 		) VALUES
-			(1, 10, '2026-05-26 00:00:00', 2, 262144, 393216, 786432, 0, 10, 0.333333, 3, 6, 0),
-			(1, 11, '2026-05-26 00:00:12', 1, 131072, 393216, 786432, 0, 30, 0.166667, 3, 6, 0)
-	`); err != nil {
+			(1, 10, $1, 2, 262144, 393216, 786432, 0, 10, 0.333333, 3, 6, 0),
+			(1, 11, $2, 1, 131072, 393216, 786432, 0, 30, 0.166667, 3, 6, 0)
+	`, t10, t11); err != nil {
 		t.Fatalf("insert block metrics: %v", err)
 	}
 
@@ -609,14 +612,22 @@ func TestPublicAPIRollupsStayConsistent(t *testing.T) {
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
 			timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
 		) VALUES
-			(1, 10, 0, '0xaa', '0x1111111111111111111111111111111111111111', 'Rollup A', 131072, 10, 1, 100, '2026-05-26 00:00:00', true, 'test', 11, 131072),
-			(1, 10, 1, '0xbb', '0x2222222222222222222222222222222222222222', '', 131072, 20, 2, 200, '2026-05-26 00:00:00', true, 'test', 22, 131072),
-			(1, -1, 0, '0xcc', '0x1111111111111111111111111111111111111111', 'Rollup A', 131072, 30, 3, 300, '2026-05-26 00:00:06', false, 'test', 33, 131072)
-	`); err != nil {
+			(1, 10, 0, '0xaa', '0x1111111111111111111111111111111111111111', 'Rollup A', 131072, 10, 1, 100, $1, true, 'test', 11, 131072),
+			(1, 10, 1, '0xbb', '0x2222222222222222222222222222222222222222', '', 131072, 20, 2, 200, $1, true, 'test', 22, 131072),
+			(1, -1, 0, '0xcc', '0x1111111111111111111111111111111111111111', 'Rollup A', 131072, 30, 3, 300, $2, false, 'test', 33, 131072)
+	`, t10, t10.Add(6*time.Second)); err != nil {
 		t.Fatalf("insert blobs: %v", err)
 	}
 
-	assertNetworkBlobStats(t, db, 2, 30, 3, 300, 11)
+	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
+		networkID:       1,
+		confirmed:       2,
+		sumBaseFee:      "30",
+		sumTip:          "3",
+		sumTotalCost:    "300",
+		lastBlock:       11,
+		lastIndexedTime: t11,
+	})
 	assertBlobUserStats(t, db, "0x1111111111111111111111111111111111111111", 2, 400)
 	assertBlobUserStats(t, db, "0x2222222222222222222222222222222222222222", 1, 200)
 
@@ -627,18 +638,42 @@ func TestPublicAPIRollupsStayConsistent(t *testing.T) {
 	`); err != nil {
 		t.Fatalf("promote pending blob: %v", err)
 	}
-	assertNetworkBlobStats(t, db, 3, 60, 6, 600, 11)
+	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
+		networkID:       1,
+		confirmed:       3,
+		sumBaseFee:      "60",
+		sumTip:          "6",
+		sumTotalCost:    "600",
+		lastBlock:       11,
+		lastIndexedTime: t11,
+	})
 	assertBlobUserStats(t, db, "0x1111111111111111111111111111111111111111", 2, 400)
 
 	if _, err := db.Exec(`DELETE FROM block_metrics WHERE network_id = 1 AND block_number = 11`); err != nil {
 		t.Fatalf("delete latest block metric: %v", err)
 	}
-	assertNetworkBlobStats(t, db, 3, 60, 6, 600, 10)
+	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
+		networkID:       1,
+		confirmed:       3,
+		sumBaseFee:      "60",
+		sumTip:          "6",
+		sumTotalCost:    "600",
+		lastBlock:       10,
+		lastIndexedTime: t10,
+	})
 
 	if _, err := db.Exec(`DELETE FROM blobs WHERE network_id = 1 AND from_address = '0x1111111111111111111111111111111111111111'`); err != nil {
 		t.Fatalf("delete sender blobs: %v", err)
 	}
-	assertNetworkBlobStats(t, db, 1, 20, 2, 200, 10)
+	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
+		networkID:       1,
+		confirmed:       1,
+		sumBaseFee:      "20",
+		sumTip:          "2",
+		sumTotalCost:    "200",
+		lastBlock:       10,
+		lastIndexedTime: t10,
+	})
 
 	var remaining int
 	if err := db.QueryRow(`
@@ -649,37 +684,6 @@ func TestPublicAPIRollupsStayConsistent(t *testing.T) {
 	}
 	if remaining != 0 {
 		t.Fatalf("expected sender rollup to be removed, got %d rows", remaining)
-	}
-}
-
-func assertNetworkBlobStats(t *testing.T, db *sqlx.DB, wantCount, wantBase, wantTip, wantTotal, wantBlock int64) {
-	t.Helper()
-	var got struct {
-		TotalConfirmedBlobs int64 `db:"total_confirmed_blobs"`
-		SumBaseFee          int64 `db:"sum_base_fee_per_blob_gas"`
-		SumTip              int64 `db:"sum_tip_per_blob_gas"`
-		SumTotalCost        int64 `db:"sum_total_cost"`
-		LastIndexedBlock    int64 `db:"last_indexed_block"`
-	}
-	if err := db.Get(&got, `
-		SELECT
-			total_confirmed_blobs,
-			sum_base_fee_per_blob_gas::bigint,
-			sum_tip_per_blob_gas::bigint,
-			sum_total_cost::bigint,
-			last_indexed_block
-		FROM network_blob_stats
-		WHERE network_id = 1
-	`); err != nil {
-		t.Fatalf("get network_blob_stats: %v", err)
-	}
-	if got.TotalConfirmedBlobs != wantCount ||
-		got.SumBaseFee != wantBase ||
-		got.SumTip != wantTip ||
-		got.SumTotalCost != wantTotal ||
-		got.LastIndexedBlock != wantBlock {
-		t.Fatalf("network_blob_stats = %+v, want count=%d base=%d tip=%d total=%d block=%d",
-			got, wantCount, wantBase, wantTip, wantTotal, wantBlock)
 	}
 }
 
