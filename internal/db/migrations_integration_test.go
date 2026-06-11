@@ -704,3 +704,111 @@ func assertBlobUserStats(t *testing.T, db *sqlx.DB, address string, wantCount, w
 		t.Fatalf("blob_user_stats[%s] = %+v, want count=%d total=%d", address, got, wantCount, wantTotal)
 	}
 }
+
+// TestBlockMetricsRollupThresholdCounts seeds block_metrics at migration 13
+// (rollup buckets exist but lack the threshold counters), then verifies that
+// migration 14 backfills blocks_above_target/blocks_at_max for every
+// granularity and that the redefined refresh function maintains them on
+// insert and delete. Covers explicit gas columns, the blob-params*131072
+// fallback, and unclassified blocks (neither source set).
+func TestBlockMetricsRollupThresholdCounts(t *testing.T) {
+	db, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	resetSchema(t, db)
+
+	m := migrator(t, db)
+	if err := m.Migrate(13); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to 13: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO networks (chain_id, name, start_block, is_enabled)
+		VALUES (1, 'mainnet-test', '0', true)
+		ON CONFLICT (chain_id) DO NOTHING
+	`); err != nil {
+		t.Fatalf("seed network: %v", err)
+	}
+
+	base := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	// target = 393216 (3 blobs), max = 786432 (6 blobs), explicitly or via the
+	// blob-params fallback:
+	//   100: above target only (explicit gas columns)
+	//   101: above target and at max (explicit gas columns)
+	//   102: below target (explicit gas columns)
+	//   103: above target and at max (params fallback, gas columns zero)
+	//   104: unclassified (no gas columns, no params) — counts toward neither
+	if _, err := db.Exec(`
+		INSERT INTO block_metrics (
+			network_id, block_number, block_timestamp, blob_count,
+			blob_gas_used, blob_gas_target, blob_gas_limit,
+			excess_blob_gas, blob_base_fee, utilization_ratio,
+			blob_params_target, blob_params_max, update_fraction
+		) VALUES
+			(1, 100, $1, 4, 393217, 393216, 786432, 0, 10, 0.5, 0, 0, 0),
+			(1, 101, $2, 6, 786432, 393216, 786432, 0, 20, 1.0, 0, 0, 0),
+			(1, 102, $3, 1, 131072, 393216, 786432, 0, 30, 0.166667, 0, 0, 0),
+			(1, 103, $4, 6, 786432, 0, 0, 0, 40, 1.0, 3, 6, 0),
+			(1, 104, $5, 2, 999999, 0, 0, 0, 50, 0.5, 0, 0, 0)
+	`, base, base.Add(12*time.Second), base.Add(24*time.Second), base.Add(36*time.Second), base.Add(48*time.Second)); err != nil {
+		t.Fatalf("seed block metrics: %v", err)
+	}
+
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to latest: %v", err)
+	}
+
+	// Migration 14's backfill must populate the counters for every granularity.
+	for _, bucketSeconds := range []int{3600, 21600, 86400} {
+		assertRollupThresholdCounts(t, db, bucketSeconds, 5, 3, 2)
+	}
+
+	// The redefined refresh function must maintain the counters via the
+	// block_metrics triggers: one more above-target block...
+	if _, err := db.Exec(`
+		INSERT INTO block_metrics (
+			network_id, block_number, block_timestamp, blob_count,
+			blob_gas_used, blob_gas_target, blob_gas_limit,
+			excess_blob_gas, blob_base_fee, utilization_ratio,
+			blob_params_target, blob_params_max, update_fraction
+		) VALUES (1, 105, $1, 4, 500000, 393216, 786432, 0, 60, 0.636, 0, 0, 0)
+	`, base.Add(time.Minute)); err != nil {
+		t.Fatalf("insert above-target block: %v", err)
+	}
+	for _, bucketSeconds := range []int{3600, 21600, 86400} {
+		assertRollupThresholdCounts(t, db, bucketSeconds, 6, 4, 2)
+	}
+
+	// ...and removing an at-max block drops both counters.
+	if _, err := db.Exec(`DELETE FROM block_metrics WHERE network_id = 1 AND block_number = 101`); err != nil {
+		t.Fatalf("delete at-max block: %v", err)
+	}
+	for _, bucketSeconds := range []int{3600, 21600, 86400} {
+		assertRollupThresholdCounts(t, db, bucketSeconds, 5, 3, 1)
+	}
+}
+
+func assertRollupThresholdCounts(t *testing.T, db *sqlx.DB, bucketSeconds int, wantBlocks, wantAbove, wantAtMax int64) {
+	t.Helper()
+	var got struct {
+		BlockCount        int64 `db:"block_count"`
+		BlocksAboveTarget int64 `db:"blocks_above_target"`
+		BlocksAtMax       int64 `db:"blocks_at_max"`
+	}
+	if err := db.Get(&got, `
+		SELECT block_count, blocks_above_target, blocks_at_max
+		FROM block_metrics_rollups
+		WHERE network_id = 1 AND bucket_seconds = $1
+	`, bucketSeconds); err != nil {
+		t.Fatalf("get rollup counts for bucket %d: %v", bucketSeconds, err)
+	}
+	if got.BlockCount != wantBlocks || got.BlocksAboveTarget != wantAbove || got.BlocksAtMax != wantAtMax {
+		t.Fatalf(
+			"rollup[%d] = blocks=%d above=%d atMax=%d, want blocks=%d above=%d atMax=%d",
+			bucketSeconds, got.BlockCount, got.BlocksAboveTarget, got.BlocksAtMax,
+			wantBlocks, wantAbove, wantAtMax,
+		)
+	}
+}
