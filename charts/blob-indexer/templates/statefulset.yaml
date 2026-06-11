@@ -1,21 +1,46 @@
-apiVersion: apps/v1
-kind: Deployment
+{{- if .Values.indexer.enabled }}
+{{/*
+The indexer runs as a StatefulSet purely for identity/ordering semantics: it is
+a single-writer process per network, and StatefulSet rollouts delete a pod
+before creating its replacement, so two indexers never write concurrently.
+State lives in PostgreSQL, so no volumeClaimTemplates are needed. The headless
+Service below exists only to satisfy the StatefulSet serviceName requirement.
+*/}}
+apiVersion: v1
+kind: Service
 metadata:
-  name: {{ include "blob-indexer.fullname" . }}-api
+  name: {{ include "blob-indexer.fullname" . }}-indexer
   labels:
     {{- include "blob-indexer.labels" . | nindent 4 }}
-    app.kubernetes.io/component: api
+    app.kubernetes.io/component: indexer
 spec:
-  replicas: {{ .Values.api.replicaCount | default .Values.replicaCount }}
+  clusterIP: None
+  selector:
+    {{- include "blob-indexer.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: indexer
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "blob-indexer.fullname" . }}-indexer
+  labels:
+    {{- include "blob-indexer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: indexer
+spec:
+  serviceName: {{ include "blob-indexer.fullname" . }}-indexer
+  replicas: {{ .Values.indexer.replicaCount | default 1 }}
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
   selector:
     matchLabels:
       {{- include "blob-indexer.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: api
+      app.kubernetes.io/component: indexer
   template:
     metadata:
       labels:
         {{- include "blob-indexer.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: api
+        app.kubernetes.io/component: indexer
       annotations:
         {{- if .Values.configMap.create }}
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
@@ -33,22 +58,13 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-        - name: {{ .Chart.Name }}-api
-          image: "{{ include "blob-indexer.image" (list . .Values.api.image) }}"
+        - name: {{ .Chart.Name }}-indexer
+          image: "{{ include "blob-indexer.image" (list . .Values.indexer.image) }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.containerSecurityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          ports:
-            - name: http
-              containerPort: {{ .Values.appConfig.server.port }}
-              protocol: TCP
-            {{- if .Values.appConfig.server.dev_port }}
-            - name: dev-http
-              containerPort: {{ .Values.appConfig.server.dev_port }}
-              protocol: TCP
-            {{- end }}
           env:
             - name: CONFIG_PATH
               value: /etc/config/config.yaml
@@ -60,21 +76,10 @@ spec:
           volumeMounts:
             - name: config-volume
               mountPath: /etc/config
-          livenessProbe:
-            httpGet:
-              path: {{ .Values.healthCheck.path }}
-              port: http
-            initialDelaySeconds: {{ .Values.healthCheck.initialDelaySeconds }}
-            periodSeconds: {{ .Values.healthCheck.periodSeconds }}
-          readinessProbe:
-            httpGet:
-              path: {{ .Values.healthCheck.path }}
-              port: http
-            initialDelaySeconds: 5
-            periodSeconds: 5
           resources:
-            {{- toYaml (.Values.api.resources | default .Values.resources) | nindent 12 }}
+            {{- toYaml (.Values.indexer.resources | default .Values.resources) | nindent 12 }}
       volumes:
         - name: config-volume
           configMap:
             name: {{ include "blob-indexer.fullname" . }}-config
+{{- end }}

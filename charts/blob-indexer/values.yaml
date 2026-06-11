@@ -15,6 +15,9 @@ api:
     repository: blob-indexer-api-api
   resources: {}
 
+# The indexer runs as a StatefulSet (no PVCs; state lives in PostgreSQL) so
+# rollouts replace pods delete-before-create — at most one indexer per ordinal
+# writes at a time. Keep replicaCount at 1 unless running one indexer per network.
 indexer:
   enabled: true
   replicaCount: 1
