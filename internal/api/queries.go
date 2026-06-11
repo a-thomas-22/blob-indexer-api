@@ -656,6 +656,8 @@ const (
 					ELSE 0
 				END AS average_utilization,
 				COALESCE(SUM(r.block_count), 0)::bigint AS total_blocks,
+				COALESCE(SUM(r.blocks_above_target), 0)::bigint AS blocks_above_target,
+				COALESCE(SUM(r.blocks_at_max), 0)::bigint AS blocks_at_max,
 				COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY r.median_blob_base_fee), 0) AS median_blob_base_fee,
 				COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY r.p95_blob_base_fee), 0) AS p95_blob_base_fee
 			FROM window_bounds wb
@@ -680,12 +682,8 @@ const (
 			COALESCE(bs.unique_senders, 0) AS unique_senders,
 			COALESCE(bms.average_utilization, 0) AS average_utilization,
 			COALESCE(bms.total_blocks, 0) AS total_blocks,
-			-- The per-block threshold counters need per-bucket rollup columns
-			-- (block_metrics_rollups does not record above-target/at-max counts
-			-- yet), so rollup-served windows report zero until a follow-up
-			-- migration adds them.
-			0::bigint AS blocks_above_target,
-			0::bigint AS blocks_at_max
+			COALESCE(bms.blocks_above_target, 0) AS blocks_above_target,
+			COALESCE(bms.blocks_at_max, 0) AS blocks_at_max
 		FROM window_bounds wb
 		LEFT JOIN blob_windows bs ON bs.ord = wb.ord
 		LEFT JOIN metric_windows bms ON bms.ord = wb.ord

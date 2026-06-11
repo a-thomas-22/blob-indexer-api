@@ -189,11 +189,17 @@ func TestGetRollingStatsWindows_SplitsRawAndRollupWindows(t *testing.T) {
 				if strings.Contains(query, "FROM blobs b") || strings.Contains(query, "FROM block_metrics bm") {
 					t.Fatalf("rollup query must not scan raw tables: %s", query)
 				}
+				if !strings.Contains(query, "SUM(r.blocks_above_target)") || !strings.Contains(query, "SUM(r.blocks_at_max)") {
+					t.Fatalf("expected rollup query to aggregate per-bucket threshold counters: %s", query)
+				}
+				if strings.Contains(query, "0::bigint AS blocks_above_target") || strings.Contains(query, "0::bigint AS blocks_at_max") {
+					t.Fatalf("rollup query must not hardcode zero threshold counters: %s", query)
+				}
 				requireDriverValue(t, args[1], `{"7d","30d"}`)
 				requireDriverValue(t, args[2], `{604800,2592000}`)
 				setSliceResult(dest, []rollingStatsWindowRow{
-					{Window: "7d", DurationSeconds: 604800, TotalBlobs: 168},
-					{Window: "30d", DurationSeconds: 2592000, TotalBlobs: 720},
+					{Window: "7d", DurationSeconds: 604800, TotalBlobs: 168, TotalBlocks: 50400, BlocksAboveTarget: 31000, BlocksAtMax: 1200},
+					{Window: "30d", DurationSeconds: 2592000, TotalBlobs: 720, TotalBlocks: 216000, BlocksAboveTarget: 130000, BlocksAtMax: 5400},
 				})
 			default:
 				t.Fatalf("unexpected query: %s", query)
@@ -222,9 +228,11 @@ func TestGetRollingStatsWindows_SplitsRawAndRollupWindows(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 	wantOrder := []struct {
-		label string
-		blobs int
-	}{{"1h", 1}, {"7d", 168}, {apiWindow24h, 24}, {"30d", 720}}
+		label       string
+		blobs       int
+		aboveTarget int64
+		atMax       int64
+	}{{"1h", 1, 0, 0}, {"7d", 168, 31000, 1200}, {apiWindow24h, 24, 0, 0}, {"30d", 720, 130000, 5400}}
 	if len(resp.Data.Windows) != len(wantOrder) {
 		t.Fatalf("expected %d windows, got %d", len(wantOrder), len(resp.Data.Windows))
 	}
@@ -232,6 +240,9 @@ func TestGetRollingStatsWindows_SplitsRawAndRollupWindows(t *testing.T) {
 		got := resp.Data.Windows[i]
 		if got.Window != want.label || got.TotalBlobs != want.blobs {
 			t.Fatalf("window %d = %q/%d, want %q/%d", i, got.Window, got.TotalBlobs, want.label, want.blobs)
+		}
+		if got.BlocksAboveTarget != want.aboveTarget || got.BlocksAtMax != want.atMax {
+			t.Fatalf("window %d block counters = %d/%d, want %d/%d", i, got.BlocksAboveTarget, got.BlocksAtMax, want.aboveTarget, want.atMax)
 		}
 	}
 }
