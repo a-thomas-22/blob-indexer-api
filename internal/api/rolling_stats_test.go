@@ -169,6 +169,88 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 	}
 }
 
+func TestGetRollingStatsWindows_SplitsRawAndRollupWindows(t *testing.T) {
+	var queries []string
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			queries = append(queries, query)
+			switch {
+			case strings.Contains(query, "FROM blobs b"):
+				requireDriverValue(t, args[1], `{"1h","24h"}`)
+				requireDriverValue(t, args[2], `{3600,86400}`)
+				setSliceResult(dest, []rollingStatsWindowRow{
+					{Window: "1h", DurationSeconds: 3600, TotalBlobs: 1},
+					{Window: apiWindow24h, DurationSeconds: 86400, TotalBlobs: 24},
+				})
+			case strings.Contains(query, "blob_chart_rollups"):
+				if !strings.Contains(query, "block_metrics_rollups") {
+					t.Fatalf("expected rollup query to read block_metrics_rollups: %s", query)
+				}
+				if strings.Contains(query, "FROM blobs b") || strings.Contains(query, "FROM block_metrics bm") {
+					t.Fatalf("rollup query must not scan raw tables: %s", query)
+				}
+				requireDriverValue(t, args[1], `{"7d","30d"}`)
+				requireDriverValue(t, args[2], `{604800,2592000}`)
+				setSliceResult(dest, []rollingStatsWindowRow{
+					{Window: "7d", DurationSeconds: 604800, TotalBlobs: 168},
+					{Window: "30d", DurationSeconds: 2592000, TotalBlobs: 720},
+				})
+			default:
+				t.Fatalf("unexpected query: %s", query)
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=testnet&windows=1h,7d,24h,30d", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetRollingStatsWindows(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if len(queries) != 2 {
+		t.Fatalf("expected one raw and one rollup query, got %d queries", len(queries))
+	}
+
+	var resp struct {
+		Success bool                 `json:"success"`
+		Data    RollingStatsResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	wantOrder := []struct {
+		label string
+		blobs int
+	}{{"1h", 1}, {"7d", 168}, {apiWindow24h, 24}, {"30d", 720}}
+	if len(resp.Data.Windows) != len(wantOrder) {
+		t.Fatalf("expected %d windows, got %d", len(wantOrder), len(resp.Data.Windows))
+	}
+	for i, want := range wantOrder {
+		got := resp.Data.Windows[i]
+		if got.Window != want.label || got.TotalBlobs != want.blobs {
+			t.Fatalf("window %d = %q/%d, want %q/%d", i, got.Window, got.TotalBlobs, want.label, want.blobs)
+		}
+	}
+}
+
+func TestSplitRollingStatsWindows_CutoffBoundary(t *testing.T) {
+	raw, rollup := splitRollingStatsWindows([]statsWindowSpec{
+		{Label: "5m", Duration: 5 * time.Minute},
+		{Label: apiWindow24h, Duration: 24 * time.Hour},
+		{Label: "25h", Duration: 25 * time.Hour},
+		{Label: "7d", Duration: 7 * 24 * time.Hour},
+	})
+	if len(raw) != 2 || raw[0].Label != "5m" || raw[1].Label != apiWindow24h {
+		t.Fatalf("unexpected raw windows: %+v", raw)
+	}
+	if len(rollup) != 2 || rollup[0].Label != "25h" || rollup[1].Label != "7d" {
+		t.Fatalf("unexpected rollup windows: %+v", rollup)
+	}
+}
+
 func requireDriverValue(t *testing.T, arg interface{}, want string) {
 	t.Helper()
 
