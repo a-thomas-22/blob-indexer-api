@@ -91,10 +91,10 @@ func TestGetBlobMarketChart_Success(t *testing.T) {
 			if !strings.Contains(query, "generate_series") || !strings.Contains(query, "selected_metrics AS MATERIALIZED") || !strings.Contains(query, "summary_current_base_fee_wei") {
 				t.Fatalf("unexpected blob market query: %s", query)
 			}
-			if len(args) != 6 {
-				t.Fatalf("expected 6 args, got %d", len(args))
+			if len(args) != 4 {
+				t.Fatalf("expected 4 args, got %d", len(args))
 			}
-			if args[0] != 42 || args[1] != chartRange1h {
+			if args[0] != 42 || args[3] != int64(60) {
 				t.Fatalf("unexpected args: %#v", args)
 			}
 			setSliceResult(dest, []blobMarketChartRow{
@@ -261,11 +261,14 @@ func TestGetCostComparisonChart_Success(t *testing.T) {
 			if !strings.Contains(query, "calldata_equivalent_cost_wei") || !strings.Contains(query, "summary_savings_percent") {
 				t.Fatalf("unexpected cost comparison query: %s", query)
 			}
-			if len(args) != 7 {
-				t.Fatalf("expected 7 args, got %d", len(args))
+			if !strings.Contains(query, "blob_chart_rollups") {
+				t.Fatalf("expected hour granularity to read rollups: %s", query)
 			}
-			if args[6] != calldataGasPerByte {
-				t.Fatalf("expected calldata gas per byte arg %d, got %#v", calldataGasPerByte, args[6])
+			if len(args) != 6 {
+				t.Fatalf("expected 6 args, got %d", len(args))
+			}
+			if args[5] != calldataGasPerByte {
+				t.Fatalf("expected calldata gas per byte arg %d, got %#v", calldataGasPerByte, args[5])
 			}
 			setSliceResult(dest, []costComparisonChartRow{
 				{
@@ -646,5 +649,165 @@ func TestChartRoutesMounted(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("%s returned %d", path, w.Code)
 		}
+	}
+}
+
+func TestChartServedByRollups(t *testing.T) {
+	tests := []struct {
+		granularity   string
+		bucketSeconds int64
+		want          bool
+	}{
+		{chartGranularityMinute, 60, false},
+		{chartGranularityMinute, 300, false},
+		{chartGranularityHour, 3600, true},
+		{chartGranularityHour, 21600, true},
+		{chartGranularityDay, 86400, true},
+		{chartGranularityBlock, approxBlockSeconds, false},
+	}
+	for _, tc := range tests {
+		chart := chartRequest{Granularity: tc.granularity, BucketSeconds: tc.bucketSeconds}
+		if got := chartServedByRollups(chart); got != tc.want {
+			t.Fatalf("chartServedByRollups(%s, %d) = %v, want %v", tc.granularity, tc.bucketSeconds, got, tc.want)
+		}
+	}
+}
+
+func TestGetBlobMarketChart_RollupRouting(t *testing.T) {
+	queried := false
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			queried = true
+			if !strings.Contains(query, "block_metrics_rollups") || !strings.Contains(query, "blob_chart_rollups") {
+				t.Fatalf("expected rollup-backed query for range=7d, got: %s", query)
+			}
+			if len(args) != 4 {
+				t.Fatalf("expected 4 args, got %d", len(args))
+			}
+			if args[0] != 42 || args[3] != int64(3600) {
+				t.Fatalf("unexpected args: %#v", args)
+			}
+			setSliceResult(dest, []blobMarketChartRow{})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?range=7d", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetBlobMarketChart(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !queried {
+		t.Fatal("expected a database query")
+	}
+}
+
+func TestGetAttributionUsageChart_AllRangeUsesRollups(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if !strings.Contains(query, "blob_chart_rollups") || !strings.Contains(query, "LIMIT $6") {
+				t.Fatalf("expected rollup-backed attribution query for range=all, got: %s", query)
+			}
+			if len(args) != 6 {
+				t.Fatalf("expected 6 args, got %d", len(args))
+			}
+			if args[1] != chartRangeAll || args[4] != int64(86400) {
+				t.Fatalf("unexpected args: %#v", args)
+			}
+			setSliceResult(dest, []attributionUsageChartRow{})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?range=all", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetAttributionUsageChart(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestChartHandlers_ResponseCacheHitsDBOnce(t *testing.T) {
+	queries := 0
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			queries++
+			setSliceResult(dest, []costComparisonChartRow{})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/?range=30d", http.NoBody)
+		w := httptest.NewRecorder()
+		a.GetCostComparisonChart(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("request %d: expected 200, got %d", i, w.Code)
+		}
+		if got := w.Header().Get("Cache-Control"); got != "public, max-age=30" {
+			t.Fatalf("request %d: Cache-Control = %q", i, got)
+		}
+	}
+
+	if queries != 1 {
+		t.Fatalf("expected exactly 1 database query across identical requests, got %d", queries)
+	}
+}
+
+func TestChartHandlers_CacheErrorNotStored(t *testing.T) {
+	queries := 0
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			queries++
+			if queries == 1 {
+				return errors.New("db failed")
+			}
+			setSliceResult(dest, []blobMarketChartRow{})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+
+	req := httptest.NewRequest(http.MethodGet, "/?range=24h", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobMarketChart(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/?range=24h", http.NoBody)
+	w = httptest.NewRecorder()
+	a.GetBlobMarketChart(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 after transient failure, got %d", w.Code)
+	}
+	if queries != 2 {
+		t.Fatalf("expected 2 queries, got %d", queries)
+	}
+}
+
+func TestChartHandlers_DBTimeoutReturns503(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return context.DeadlineExceeded
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?range=24h", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetBlobMarketChart(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+	if got := w.Header().Get("Retry-After"); got != "5" {
+		t.Fatalf("Retry-After = %q, want \"5\"", got)
 	}
 }

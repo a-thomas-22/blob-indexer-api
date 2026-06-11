@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/lib/pq"
 	"go.uber.org/zap"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
@@ -22,6 +24,51 @@ const MaxQueryOffset = 10000
 const aggregateCacheTTL = 30 * time.Second
 const aggregateQueryTimeout = 5 * time.Second
 const apiWindow24h = "24h"
+
+// statsCacheTTL keeps /stats and /stats/windows fresher than the chart and
+// leaderboard caches: roughly one block of staleness.
+const statsCacheTTL = 15 * time.Second
+
+// mempoolPressureCacheTTL bounds mempool pressure staleness to under one block.
+const mempoolPressureCacheTTL = 10 * time.Second
+
+// pricingCacheMaxAge is the client/CDN cache hint for /blob/pricing, which is
+// cheap enough to serve uncached but identical across users within a block.
+const pricingCacheMaxAge = 10 * time.Second
+
+// setCacheControl marks a response as publicly cacheable for ttl so browsers
+// and CDNs can absorb the dashboard's identical concurrent requests.
+func setCacheControl(w http.ResponseWriter, ttl time.Duration) {
+	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(ttl.Seconds())))
+}
+
+// dbQueryCanceled is the Postgres query_canceled error code, raised when the
+// server-side statement timeout aborts a query.
+const dbQueryCanceled = "57014"
+
+// isDBTimeout reports whether err means the database query was cut off by a
+// deadline — the request-scoped query timeout or the server statement timeout.
+func isDBTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && string(pqErr.Code) == dbQueryCanceled
+}
+
+// respondAggregateError maps database timeouts to 503 with Retry-After so
+// clients can tell overload from bugs; other errors remain generic 500s.
+func (a *API) respondAggregateError(w http.ResponseWriter, err error, message string) {
+	if isDBTimeout(err) {
+		w.Header().Set("Retry-After", "5")
+		a.respondError(w, http.StatusServiceUnavailable, message)
+		return
+	}
+	a.respondError(w, http.StatusInternalServerError, message)
+}
 
 // aggregateWorkContext keeps request-scoped values but decouples shared
 // singleflight work from one caller's cancellation.
