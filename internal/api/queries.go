@@ -538,7 +538,21 @@ const (
 		metric_source AS MATERIALIZED (
 			SELECT
 				bm.block_timestamp,
-				bm.utilization_ratio::numeric AS utilization_ratio
+				bm.utilization_ratio::numeric AS utilization_ratio,
+				GREATEST(bm.blob_gas_used, 0)::bigint AS blob_gas_used,
+				-- Effective target/max mirror effectiveBlobTargetGas/effectiveBlobMaxGas:
+				-- prefer the per-block gas columns, fall back to blob params * 131072
+				-- (params.BlobTxBlobGasPerBlob). Blocks with neither are left unclassified.
+				CASE
+					WHEN bm.blob_gas_target > 0 THEN bm.blob_gas_target
+					WHEN bm.blob_params_target > 0 THEN bm.blob_params_target::bigint * 131072
+					ELSE 0
+				END::bigint AS target_blob_gas,
+				CASE
+					WHEN bm.blob_gas_limit > 0 THEN bm.blob_gas_limit
+					WHEN bm.blob_params_max > 0 THEN bm.blob_params_max::bigint * 131072
+					ELSE 0
+				END::bigint AS max_blob_gas
 			FROM block_metrics bm
 			WHERE bm.network_id = $1
 				AND bm.block_timestamp >= (SELECT MIN(start_time) FROM window_bounds)
@@ -547,7 +561,14 @@ const (
 		metric_windows AS (
 			SELECT
 				wb.ord,
-				COALESCE(AVG(ms.utilization_ratio), 0) AS average_utilization
+				COALESCE(AVG(ms.utilization_ratio), 0) AS average_utilization,
+				COUNT(ms.block_timestamp) AS total_blocks,
+				COUNT(*) FILTER (
+					WHERE ms.target_blob_gas > 0 AND ms.blob_gas_used > ms.target_blob_gas
+				) AS blocks_above_target,
+				COUNT(*) FILTER (
+					WHERE ms.max_blob_gas > 0 AND ms.blob_gas_used >= ms.max_blob_gas
+				) AS blocks_at_max
 			FROM window_bounds wb
 			LEFT JOIN metric_source ms
 				ON ms.block_timestamp >= wb.start_time
@@ -566,7 +587,10 @@ const (
 			bs.total_blob_gas_used,
 			bs.total_cost_eth,
 			bs.unique_senders,
-			bms.average_utilization
+			bms.average_utilization,
+			bms.total_blocks,
+			bms.blocks_above_target,
+			bms.blocks_at_max
 		FROM window_bounds wb
 		LEFT JOIN blob_windows bs ON bs.ord = wb.ord
 		LEFT JOIN metric_windows bms ON bms.ord = wb.ord
