@@ -76,6 +76,10 @@ jobs:
       - uses: ./.github/actions/setup-chart-testing
 
       - name: Verify chart appVersion matches app release
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
@@ -87,10 +91,38 @@ jobs:
             exit 1
           fi
 
-          if [ "$chart_app_version" != "$app_version" ]; then
-            echo "::error::charts/blob-indexer/Chart.yaml appVersion (${chart_app_version}) must match the app release version (${app_version})"
+          if [ -z "$chart_app_version" ]; then
+            echo "::error::charts/blob-indexer/Chart.yaml is missing appVersion"
             exit 1
           fi
+
+          if [ "$chart_app_version" = "$app_version" ]; then
+            echo "Chart appVersion matches app version ${app_version}"
+            exit 0
+          fi
+
+          # The app release PR (and its merge commit on main) bumps the
+          # manifest before the sync-chart-app-version job pushes the
+          # appVersion bump, so the chart is allowed to lag by exactly the
+          # in-flight release.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            DIFF_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          elif git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            DIFF_BASE="$BASE_SHA"
+          else
+            DIFF_BASE=""
+          fi
+
+          if [ -n "$DIFF_BASE" ]; then
+            prev_app_version="$(git show "${DIFF_BASE}:.release-please-manifest.json" 2>/dev/null | jq -r '."."' || true)"
+            if [ -n "$prev_app_version" ] && [ "$prev_app_version" != "null" ] && [ "$chart_app_version" = "$prev_app_version" ]; then
+              echo "Chart appVersion (${chart_app_version}) lags the in-flight app release (${app_version}); sync-chart-app-version updates it after the release merges"
+              exit 0
+            fi
+          fi
+
+          echo "::error::charts/blob-indexer/Chart.yaml appVersion (${chart_app_version}) must match the app release version (${app_version}) or the previously released version while an app release is in flight"
+          exit 1
 
       - name: Run chart template tests
         run: make chart-template-test
