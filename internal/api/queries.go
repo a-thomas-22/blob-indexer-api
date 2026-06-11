@@ -116,37 +116,35 @@ const (
 	// queryBlobByTxHash retrieves a single blob by transaction hash and network.
 	queryBlobByTxHash = "SELECT " + blobSelectColumns + " FROM blobs WHERE tx_hash = $1 AND network_id = $2"
 
-	// queryTopBlobUsersWithOptions aggregates sender usage with safe sort/window parameters.
+	// queryTopBlobUsersWithOptions aggregates windowed sender usage ($4 is '24h'
+	// or '7d'; all-history reads use queryTopBlobUsersAll) from hourly chart
+	// rollups so wide windows stay O(buckets x senders) instead of scanning raw
+	// blobs. Windows align down to the rollup hour and cover confirmed blobs
+	// only; exact last-seen times come from blob_user_stats.
 	queryTopBlobUsersWithOptions = `
-		WITH filtered_blobs AS (
-			SELECT
-				b.from_address,
-				b.user_attribution,
-				b.total_cost_eth,
-				b.timestamp,
-				bu.name AS known_name,
-				bu.category AS known_category
-			FROM blobs b
-			LEFT JOIN blob_users bu
-				ON bu.network_id = b.network_id
-				AND LOWER(bu.address) = LOWER(b.from_address)
-			WHERE b.network_id = $1
-				AND (
-					$4 = 'all'
-					OR ($4 = '24h' AND b.timestamp >= NOW() - INTERVAL '24 hours')
-					OR ($4 = '7d' AND b.timestamp >= NOW() - INTERVAL '7 days')
-				)
+		WITH window_bounds AS (
+			SELECT date_trunc('hour', NOW() - CASE
+				WHEN $4 = '24h' THEN INTERVAL '24 hours'
+				ELSE INTERVAL '7 days'
+			END) AS start_time
 		),
 		user_totals AS (
 			SELECT
-				from_address,
-				COALESCE(NULLIF(MAX(BTRIM(user_attribution)), ''), NULLIF(MAX(BTRIM(known_name)), ''), '') AS user_attribution,
-				COALESCE(NULLIF(MAX(BTRIM(known_category)), ''), 'unknown') AS category,
-				COUNT(*) AS blob_count,
-				COALESCE(SUM(total_cost_eth::numeric), 0) AS total_cost_eth,
-				MAX(timestamp) AS last_timestamp
-			FROM filtered_blobs
-			GROUP BY from_address
+				r.from_address,
+				COALESCE(NULLIF(MAX(BTRIM(r.user_attribution)), ''), NULLIF(MAX(BTRIM(bu.name)), ''), '') AS user_attribution,
+				COALESCE(NULLIF(MAX(BTRIM(bu.category)), ''), 'unknown') AS category,
+				COALESCE(SUM(r.blob_count), 0)::bigint AS blob_count,
+				COALESCE(SUM(r.total_cost_eth), 0) AS total_cost_eth,
+				MAX(r.bucket_start) AS last_bucket_start
+			FROM blob_chart_rollups r
+			CROSS JOIN window_bounds wb
+			LEFT JOIN blob_users bu
+				ON bu.network_id = r.network_id
+				AND LOWER(bu.address) = LOWER(r.from_address)
+			WHERE r.network_id = $1
+				AND r.bucket_seconds = 3600
+				AND r.bucket_start >= wb.start_time
+			GROUP BY r.from_address
 		),
 		totals AS (
 			SELECT
@@ -160,7 +158,7 @@ const (
 			user_totals.category,
 			user_totals.blob_count,
 			user_totals.total_cost_eth::text AS total_cost_eth,
-			user_totals.last_timestamp,
+			COALESCE(s.last_timestamp, user_totals.last_bucket_start) AS last_timestamp,
 			CASE
 				WHEN totals.total_blobs > 0 THEN ROUND((user_totals.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
 				ELSE 0
@@ -170,13 +168,16 @@ const (
 				ELSE 0
 			END AS spend_share_percent
 		FROM user_totals
+		LEFT JOIN blob_user_stats s
+			ON s.network_id = $1
+			AND s.from_address = user_totals.from_address
 		CROSS JOIN totals
 		ORDER BY
 			CASE WHEN $5 = 'count' THEN user_totals.blob_count END DESC,
 			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_eth END DESC,
 			user_totals.blob_count DESC,
 			user_totals.total_cost_eth DESC,
-			user_totals.last_timestamp DESC
+			COALESCE(s.last_timestamp, user_totals.last_bucket_start) DESC
 		LIMIT $2 OFFSET $3
 	`
 
@@ -237,39 +238,35 @@ const (
 		LIMIT $2 OFFSET $3
 	`
 
-	// queryTopUnattributedBlobUsersWithOptions aggregates sender usage for addresses
-	// without either indexed attribution or a known blob_users entry.
+	// queryTopUnattributedBlobUsersWithOptions aggregates windowed sender usage
+	// for addresses without either indexed attribution or a known blob_users
+	// entry. Same rollup-backed window semantics as queryTopBlobUsersWithOptions.
 	queryTopUnattributedBlobUsersWithOptions = `
-		WITH filtered_blobs AS (
-			SELECT
-				b.from_address,
-				b.user_attribution,
-				b.total_cost_eth,
-				b.timestamp,
-				bu.id AS known_user_id
-			FROM blobs b
-			LEFT JOIN blob_users bu
-				ON bu.network_id = b.network_id
-				AND LOWER(bu.address) = LOWER(b.from_address)
-			WHERE b.network_id = $1
-				AND (
-					$4 = 'all'
-					OR ($4 = '24h' AND b.timestamp >= NOW() - INTERVAL '24 hours')
-					OR ($4 = '7d' AND b.timestamp >= NOW() - INTERVAL '7 days')
-				)
+		WITH window_bounds AS (
+			SELECT date_trunc('hour', NOW() - CASE
+				WHEN $4 = '24h' THEN INTERVAL '24 hours'
+				ELSE INTERVAL '7 days'
+			END) AS start_time
 		),
 		user_totals AS (
 			SELECT
-				from_address,
+				r.from_address,
 				'' AS user_attribution,
 				'unknown' AS category,
-				COUNT(*) AS blob_count,
-				COALESCE(SUM(total_cost_eth::numeric), 0) AS total_cost_eth,
-				MAX(timestamp) AS last_timestamp
-			FROM filtered_blobs
-			GROUP BY from_address
-			HAVING NULLIF(MAX(BTRIM(user_attribution)), '') IS NULL
-				AND MAX(known_user_id) IS NULL
+				COALESCE(SUM(r.blob_count), 0)::bigint AS blob_count,
+				COALESCE(SUM(r.total_cost_eth), 0) AS total_cost_eth,
+				MAX(r.bucket_start) AS last_bucket_start
+			FROM blob_chart_rollups r
+			CROSS JOIN window_bounds wb
+			LEFT JOIN blob_users bu
+				ON bu.network_id = r.network_id
+				AND LOWER(bu.address) = LOWER(r.from_address)
+			WHERE r.network_id = $1
+				AND r.bucket_seconds = 3600
+				AND r.bucket_start >= wb.start_time
+			GROUP BY r.from_address
+			HAVING NULLIF(MAX(BTRIM(r.user_attribution)), '') IS NULL
+				AND MAX(bu.id) IS NULL
 		),
 		totals AS (
 			SELECT
@@ -283,7 +280,7 @@ const (
 			user_totals.category,
 			user_totals.blob_count,
 			user_totals.total_cost_eth::text AS total_cost_eth,
-			user_totals.last_timestamp,
+			COALESCE(s.last_timestamp, user_totals.last_bucket_start) AS last_timestamp,
 			CASE
 				WHEN totals.total_blobs > 0 THEN ROUND((user_totals.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
 				ELSE 0
@@ -293,13 +290,16 @@ const (
 				ELSE 0
 			END AS spend_share_percent
 		FROM user_totals
+		LEFT JOIN blob_user_stats s
+			ON s.network_id = $1
+			AND s.from_address = user_totals.from_address
 		CROSS JOIN totals
 		ORDER BY
 			CASE WHEN $5 = 'count' THEN user_totals.blob_count END DESC,
 			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_eth END DESC,
 			user_totals.blob_count DESC,
 			user_totals.total_cost_eth DESC,
-			user_totals.last_timestamp DESC
+			COALESCE(s.last_timestamp, user_totals.last_bucket_start) DESC
 		LIMIT $2 OFFSET $3
 	`
 
@@ -355,23 +355,30 @@ const (
 		LIMIT $2 OFFSET $3
 	`
 
-	// queryBlobUserCategoryBreakdown aggregates blob usage by known user category.
+	// queryBlobUserCategoryBreakdown aggregates windowed blob usage by known user
+	// category ($2 is '24h' or '7d'; all-history reads use
+	// queryBlobUserCategoryBreakdownAll). Same rollup-backed window semantics as
+	// queryTopBlobUsersWithOptions.
 	queryBlobUserCategoryBreakdown = `
-		WITH category_totals AS (
+		WITH window_bounds AS (
+			SELECT date_trunc('hour', NOW() - CASE
+				WHEN $2 = '24h' THEN INTERVAL '24 hours'
+				ELSE INTERVAL '7 days'
+			END) AS start_time
+		),
+		category_totals AS (
 			SELECT
 				COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown') AS category,
-				COUNT(*) AS blob_count,
-				COALESCE(SUM(b.total_cost_eth::numeric), 0) AS total_cost_eth
-			FROM blobs b
+				COALESCE(SUM(r.blob_count), 0)::bigint AS blob_count,
+				COALESCE(SUM(r.total_cost_eth), 0) AS total_cost_eth
+			FROM blob_chart_rollups r
+			CROSS JOIN window_bounds wb
 			LEFT JOIN blob_users bu
-				ON bu.network_id = b.network_id
-				AND LOWER(bu.address) = LOWER(b.from_address)
-			WHERE b.network_id = $1
-				AND (
-					$2 = 'all'
-					OR ($2 = '24h' AND b.timestamp >= NOW() - INTERVAL '24 hours')
-					OR ($2 = '7d' AND b.timestamp >= NOW() - INTERVAL '7 days')
-				)
+				ON bu.network_id = r.network_id
+				AND LOWER(bu.address) = LOWER(r.from_address)
+			WHERE r.network_id = $1
+				AND r.bucket_seconds = 3600
+				AND r.bucket_start >= wb.start_time
 			GROUP BY COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown')
 		),
 		totals AS (
@@ -567,6 +574,82 @@ const (
 			bs.total_cost_eth,
 			bs.unique_senders,
 			bms.average_utilization
+		FROM window_bounds wb
+		LEFT JOIN blob_windows bs ON bs.ord = wb.ord
+		LEFT JOIN metric_windows bms ON bms.ord = wb.ord
+		ORDER BY wb.ord
+	`
+
+	// queryRollingStatsWindowsRollup serves rolling windows longer than the raw
+	// cutoff from hourly chart rollups, staying O(buckets x senders) instead of
+	// scanning raw rows. Window starts align down to the rollup hour and cover
+	// confirmed blobs only. Sums, averages, and unique-sender counts are exact
+	// over the aligned window; median and p95 are estimated from per-bucket
+	// values (median of hourly medians/p95s), which discards within-vs-across
+	// hour weighting but tracks the true percentile closely at these widths.
+	queryRollingStatsWindowsRollup = `
+		WITH requested_windows AS (
+			SELECT window_label, duration_seconds, ord
+			FROM unnest($2::text[], $3::bigint[]) WITH ORDINALITY AS u(window_label, duration_seconds, ord)
+		),
+		window_bounds AS (
+			SELECT
+				window_label,
+				duration_seconds,
+				ord,
+				date_trunc('hour', $4::timestamp - (duration_seconds * INTERVAL '1 second')) AS start_time,
+				$4::timestamp AS end_time
+			FROM requested_windows
+		),
+		blob_windows AS (
+			SELECT
+				wb.ord,
+				COALESCE(SUM(r.blob_count), 0)::bigint AS total_blobs,
+				COALESCE(SUM(r.blob_gas_used), 0)::bigint AS total_blob_gas_used,
+				COALESCE(SUM(r.total_cost_eth), 0) AS total_cost_eth,
+				COUNT(DISTINCT r.from_address) AS unique_senders,
+				CASE
+					WHEN COALESCE(SUM(r.blob_bytes), 0) > 0 THEN SUM(r.sum_size_base_fee) / SUM(r.blob_bytes)
+					ELSE 0
+				END AS average_blob_base_fee
+			FROM window_bounds wb
+			LEFT JOIN blob_chart_rollups r
+				ON r.network_id = $1
+				AND r.bucket_seconds = 3600
+				AND r.bucket_start >= wb.start_time
+				AND r.bucket_start < wb.end_time
+			GROUP BY wb.ord
+		),
+		metric_windows AS (
+			SELECT
+				wb.ord,
+				CASE
+					WHEN COALESCE(SUM(r.block_count), 0) > 0 THEN SUM(r.sum_utilization) / SUM(r.block_count)
+					ELSE 0
+				END AS average_utilization,
+				COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY r.median_blob_base_fee), 0) AS median_blob_base_fee,
+				COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY r.p95_blob_base_fee), 0) AS p95_blob_base_fee
+			FROM window_bounds wb
+			LEFT JOIN block_metrics_rollups r
+				ON r.network_id = $1
+				AND r.bucket_seconds = 3600
+				AND r.bucket_start >= wb.start_time
+				AND r.bucket_start < wb.end_time
+			GROUP BY wb.ord
+		)
+		SELECT
+			wb.window_label AS stats_window,
+			wb.duration_seconds,
+			wb.start_time,
+			wb.end_time,
+			COALESCE(bs.average_blob_base_fee, 0) AS average_blob_base_fee,
+			COALESCE(bms.median_blob_base_fee, 0) AS median_blob_base_fee,
+			COALESCE(bms.p95_blob_base_fee, 0) AS p95_blob_base_fee,
+			COALESCE(bs.total_blobs, 0) AS total_blobs,
+			COALESCE(bs.total_blob_gas_used, 0) AS total_blob_gas_used,
+			COALESCE(bs.total_cost_eth, 0) AS total_cost_eth,
+			COALESCE(bs.unique_senders, 0) AS unique_senders,
+			COALESCE(bms.average_utilization, 0) AS average_utilization
 		FROM window_bounds wb
 		LEFT JOIN blob_windows bs ON bs.ord = wb.ord
 		LEFT JOIN metric_windows bms ON bms.ord = wb.ord

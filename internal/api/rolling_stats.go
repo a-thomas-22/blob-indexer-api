@@ -18,6 +18,12 @@ const (
 	maxRollingStatsWindows        = 8
 	minRollingStatsWindowDuration = time.Minute
 	maxRollingStatsWindowDuration = 30 * 24 * time.Hour
+
+	// rollingStatsRawWindowCutoff is the longest window served by raw blob and
+	// block-metric scans. Longer windows read hourly chart rollups instead,
+	// because raw scans grow with window width and blow the aggregate query
+	// timeout on large deployments.
+	rollingStatsRawWindowCutoff = 24 * time.Hour
 )
 
 var defaultRollingStatsWindows = []statsWindowSpec{
@@ -114,10 +120,8 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 		zap.Int("windows", len(windows)))
 
 	labels := make([]string, 0, len(windows))
-	durationSeconds := make([]int64, 0, len(windows))
 	for _, window := range windows {
 		labels = append(labels, window.Label)
-		durationSeconds = append(durationSeconds, int64(window.Duration/time.Second))
 	}
 
 	cacheKey := fmt.Sprintf("rolling:%d:%s", network.ChainID, strings.Join(labels, ","))
@@ -142,16 +146,39 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 		queryCtx, cancel := context.WithTimeout(aggregateWorkContext(r), aggregateQueryTimeout)
 		defer cancel()
 
-		var rows []rollingStatsWindowRow
-		if err := a.db.SelectContext(
-			queryCtx,
-			&rows,
-			queryRollingStatsWindows,
-			network.ChainID,
-			pq.Array(labels),
-			pq.Array(durationSeconds),
-			generatedAt,
-		); err != nil {
+		rawWindows, rollupWindows := splitRollingStatsWindows(windows)
+		rowsByLabel := make(map[string]rollingStatsWindowRow, len(windows))
+		runWindowsQuery := func(query string, specs []statsWindowSpec) error {
+			if len(specs) == 0 {
+				return nil
+			}
+			queryLabels := make([]string, 0, len(specs))
+			queryDurations := make([]int64, 0, len(specs))
+			for _, spec := range specs {
+				queryLabels = append(queryLabels, spec.Label)
+				queryDurations = append(queryDurations, int64(spec.Duration/time.Second))
+			}
+			var rows []rollingStatsWindowRow
+			if err := a.db.SelectContext(
+				queryCtx,
+				&rows,
+				query,
+				network.ChainID,
+				pq.Array(queryLabels),
+				pq.Array(queryDurations),
+				generatedAt,
+			); err != nil {
+				return err
+			}
+			for _, row := range rows {
+				rowsByLabel[row.Window] = row
+			}
+			return nil
+		}
+		if err := runWindowsQuery(queryRollingStatsWindows, rawWindows); err != nil {
+			return RollingStatsResponse{}, err
+		}
+		if err := runWindowsQuery(queryRollingStatsWindowsRollup, rollupWindows); err != nil {
 			return RollingStatsResponse{}, err
 		}
 
@@ -159,10 +186,12 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 			NetworkID:   network.ChainID,
 			NetworkName: network.Name,
 			GeneratedAt: generatedAt,
-			Windows:     make([]RollingWindowStats, 0, len(rows)),
+			Windows:     make([]RollingWindowStats, 0, len(windows)),
 		}
-		for _, row := range rows {
-			response.Windows = append(response.Windows, toRollingWindowStats(row))
+		for _, window := range windows {
+			if row, ok := rowsByLabel[window.Label]; ok {
+				response.Windows = append(response.Windows, toRollingWindowStats(row))
+			}
 		}
 
 		a.cacheMu.Lock()
@@ -205,6 +234,19 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 // @Router /charts/rolling-stats [get]
 func (a *API) GetRollingStatsChart(w http.ResponseWriter, r *http.Request) {
 	a.GetRollingStatsWindows(w, r)
+}
+
+// splitRollingStatsWindows partitions requested windows into those served by
+// raw scans (the cutoff and shorter) and those served by hourly rollups.
+func splitRollingStatsWindows(windows []statsWindowSpec) (raw, rollup []statsWindowSpec) {
+	for _, window := range windows {
+		if window.Duration > rollingStatsRawWindowCutoff {
+			rollup = append(rollup, window)
+		} else {
+			raw = append(raw, window)
+		}
+	}
+	return raw, rollup
 }
 
 func toRollingWindowStats(row rollingStatsWindowRow) RollingWindowStats {
