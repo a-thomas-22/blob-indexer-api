@@ -203,10 +203,7 @@ func TestGetTopUnattributedBlobUsers_DefaultAllUsesRollup(t *testing.T) {
 }
 
 func TestTopUnattributedBlobUsersQueryUsesKnownUserRowExistence(t *testing.T) {
-	if !strings.Contains(queryTopUnattributedBlobUsersWithOptions, "bu.id AS known_user_id") {
-		t.Fatal("expected unattributed query to select a known user row marker")
-	}
-	if !strings.Contains(queryTopUnattributedBlobUsersWithOptions, "MAX(known_user_id) IS NULL") {
+	if !strings.Contains(queryTopUnattributedBlobUsersWithOptions, "MAX(bu.id) IS NULL") {
 		t.Fatal("expected unattributed query to filter by known user row existence")
 	}
 	if strings.Contains(queryTopUnattributedBlobUsersWithOptions, "known_name") {
