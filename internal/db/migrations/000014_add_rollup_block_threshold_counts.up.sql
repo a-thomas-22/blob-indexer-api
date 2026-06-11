@@ -13,10 +13,15 @@ ALTER TABLE block_metrics_rollups
     ADD COLUMN blocks_above_target BIGINT NOT NULL DEFAULT 0,
     ADD COLUMN blocks_at_max BIGINT NOT NULL DEFAULT 0;
 
--- Exact recompute of one block-metrics bucket. Bounded by the bucket span
--- (at most one day of block_metrics rows) and served by
--- idx_block_metrics_network_timestamp_cover. Same as migration 13 plus the
--- per-bucket threshold counters.
+-- Exact recompute of one block-metrics bucket. Bounded by the bucket span (at
+-- most one day of block_metrics rows). idx_block_metrics_network_timestamp_cover
+-- still serves the (network_id, block_timestamp) range scan, but the threshold
+-- counters read blob_gas_limit/blob_params_target/blob_params_max, which are
+-- outside its INCLUDE list, so the scan fetches heap pages instead of staying
+-- index-only. That is acceptable: the recently written buckets this function
+-- touches are rarely all-visible (heap fetches happened anyway), and widening
+-- the INCLUDE list would force a full index rebuild inside the migration hook.
+-- Same as migration 13 plus the per-bucket threshold counters.
 CREATE OR REPLACE FUNCTION block_metrics_rollups_refresh(
     p_network_id INTEGER,
     p_bucket_seconds INTEGER,
