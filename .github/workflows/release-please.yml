@@ -14,10 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
-      # App release outputs
-      app_release_created: ${{ steps.release.outputs['blob-indexer-api--release_created'] }}
-      app_tag_name: ${{ steps.release.outputs['blob-indexer-api--tag_name'] }}
-      app_version: ${{ steps.release.outputs['blob-indexer-api--version'] }}
+      # App release outputs. The app package lives at the root path ".", and
+      # release-please emits root-path outputs without a path prefix — the
+      # component-prefixed keys are kept only as a fallback.
+      app_release_created: ${{ steps.release.outputs.release_created || steps.release.outputs['blob-indexer-api--release_created'] }}
+      app_tag_name: ${{ steps.release.outputs.tag_name || steps.release.outputs['blob-indexer-api--tag_name'] }}
+      app_version: ${{ steps.release.outputs.version || steps.release.outputs['blob-indexer-api--version'] }}
       # Chart release outputs
       chart_release_created: ${{ steps.release.outputs['charts/blob-indexer--release_created'] || steps.release.outputs['blob-indexer-chart--release_created'] }}
       chart_tag_name: ${{ steps.release.outputs['charts/blob-indexer--tag_name'] || steps.release.outputs['blob-indexer-chart--tag_name'] }}
