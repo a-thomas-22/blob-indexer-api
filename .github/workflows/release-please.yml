@@ -30,6 +30,39 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+  sync-chart-app-version:
+    # The app release commit is a hidden `chore` type, so it never triggers a
+    # chart release on its own. Push the appVersion bump as a releasable
+    # fix(helm) commit instead, so release-please opens a chart release PR
+    # that ships the new app version.
+    name: Sync Chart App Version
+    needs: release-please
+    if: needs.release-please.outputs.app_release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          # Use the PAT so the push triggers the release-please workflow run
+          # that opens the chart release PR (GITHUB_TOKEN pushes do not
+          # trigger workflows).
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Commit chart appVersion bump
+        run: |
+          set -euo pipefail
+          version="${{ needs.release-please.outputs.app_version }}"
+          sed -i "s/^appVersion: .*/appVersion: ${version}/" charts/blob-indexer/Chart.yaml
+          if git diff --quiet; then
+            echo "Chart appVersion is already ${version}; nothing to do"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add charts/blob-indexer/Chart.yaml
+          git commit -m "fix(helm): update chart app version to ${version}"
+          git push origin HEAD:main
+
   publish-helm-chart:
     name: Publish Helm Chart
     needs: release-please

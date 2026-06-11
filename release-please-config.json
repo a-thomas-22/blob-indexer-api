@@ -13,14 +13,7 @@
       "release-type": "go",
       "component": "blob-indexer-api",
       "changelog-path": "CHANGELOG.md",
-      "bump-minor-pre-major": true,
-      "extra-files": [
-        {
-          "type": "yaml",
-          "path": "charts/blob-indexer/Chart.yaml",
-          "jsonpath": "$.appVersion"
-        }
-      ]
+      "bump-minor-pre-major": true
     },
     "charts/blob-indexer": {
       "release-type": "helm",
