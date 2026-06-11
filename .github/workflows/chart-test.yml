@@ -91,6 +91,11 @@ jobs:
             exit 1
           fi
 
+          if [ -z "$chart_app_version" ]; then
+            echo "::error::charts/blob-indexer/Chart.yaml is missing appVersion"
+            exit 1
+          fi
+
           if [ "$chart_app_version" = "$app_version" ]; then
             echo "Chart appVersion matches app version ${app_version}"
             exit 0
@@ -109,14 +114,14 @@ jobs:
           fi
 
           if [ -n "$DIFF_BASE" ]; then
-            prev_app_version="$(git show "${DIFF_BASE}:.release-please-manifest.json" | jq -r '."."')"
-            if [ "$chart_app_version" = "$prev_app_version" ]; then
+            prev_app_version="$(git show "${DIFF_BASE}:.release-please-manifest.json" 2>/dev/null | jq -r '."."' || true)"
+            if [ -n "$prev_app_version" ] && [ "$prev_app_version" != "null" ] && [ "$chart_app_version" = "$prev_app_version" ]; then
               echo "Chart appVersion (${chart_app_version}) lags the in-flight app release (${app_version}); sync-chart-app-version updates it after the release merges"
               exit 0
             fi
           fi
 
-          echo "::error::charts/blob-indexer/Chart.yaml appVersion (${chart_app_version}) must match the app release version (${app_version})"
+          echo "::error::charts/blob-indexer/Chart.yaml appVersion (${chart_app_version}) must match the app release version (${app_version}) or the previously released version while an app release is in flight"
           exit 1
 
       - name: Run chart template tests
