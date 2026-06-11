@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.4](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.3...blob-indexer-chart-v0.6.4) (2026-06-11)
+
+
+### Bug Fixes
+
+* auto-recover dirty schema and stop Argo CD killing running migrations ([#225](https://github.com/a-thomas-22/blob-indexer-api/issues/225)) ([5053b81](https://github.com/a-thomas-22/blob-indexer-api/commit/5053b8141cc947d29186702224079652a8b65455))
+* **helm:** run the indexer as a StatefulSet for single-writer rollouts ([#226](https://github.com/a-thomas-22/blob-indexer-api/issues/226)) ([b995a62](https://github.com/a-thomas-22/blob-indexer-api/commit/b995a62039fe00398aa07ccd641bf91693032acb))
+* **helm:** update chart app version to 0.8.0 ([#230](https://github.com/a-thomas-22/blob-indexer-api/issues/230)) ([de7dce8](https://github.com/a-thomas-22/blob-indexer-api/commit/de7dce8abb83a0626f1e16c4d14ce0e5a254d225))
+
 ## [0.6.3](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.2...blob-indexer-chart-v0.6.3) (2026-06-11)
 
 
