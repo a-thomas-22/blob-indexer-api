@@ -1740,9 +1740,12 @@ const queryBlobMarketTimeChartRollup = `
 		GROUP BY r.bucket_start
 	),
 	summary_metrics AS (
-		-- Range-wide aggregates from the same rollup rows the buckets read, so
-		-- wide ranges never scan raw block_metrics. Averages are exact; the
-		-- range median/p95 are estimated as the median of per-bucket values.
+		-- Range-wide aggregates from rollup rows, so wide ranges never scan raw
+		-- block_metrics. Always reads the hourly rollups regardless of chart
+		-- granularity: sums and averages are granularity-independent anyway,
+		-- and pinning the bucket size keeps the estimated range median/p95
+		-- (median of per-bucket values) stable when the caller switches
+		-- granularity over the same range.
 		SELECT
 			CASE
 				WHEN COALESCE(SUM(r.block_count), 0) > 0 THEN (SUM(r.sum_blob_base_fee) / SUM(r.block_count))::text
@@ -1759,7 +1762,7 @@ const queryBlobMarketTimeChartRollup = `
 		FROM block_metrics_rollups r
 		CROSS JOIN bounds b
 		WHERE r.network_id = $1
-			AND r.bucket_seconds = $4::int
+			AND r.bucket_seconds = 3600
 			AND r.bucket_start >= b.range_start
 			AND r.bucket_start < b.range_end
 	),

@@ -582,11 +582,15 @@ const (
 
 	// queryRollingStatsWindowsRollup serves rolling windows longer than the raw
 	// cutoff from hourly chart rollups, staying O(buckets x senders) instead of
-	// scanning raw rows. Window starts align down to the rollup hour and cover
-	// confirmed blobs only. Sums, averages, and unique-sender counts are exact
-	// over the aligned window; median and p95 are estimated from per-bucket
-	// values (median of hourly medians/p95s), which discards within-vs-across
-	// hour weighting but tracks the true percentile closely at these widths.
+	// scanning raw rows. Windows align down to the rollup hour: the end is the
+	// last completed hour boundary and the start is derived from it, so the
+	// served window always spans exactly the advertised duration (the
+	// in-progress hour is excluded, which at these widths is noise). Rollups
+	// cover confirmed blobs only. Sums, averages, and unique-sender counts are
+	// exact over the aligned window; median and p95 are estimated from
+	// per-bucket values (median of hourly medians/p95s), which discards
+	// within-vs-across hour weighting but tracks the true percentile closely
+	// at these widths.
 	queryRollingStatsWindowsRollup = `
 		WITH requested_windows AS (
 			SELECT window_label, duration_seconds, ord
@@ -597,8 +601,8 @@ const (
 				window_label,
 				duration_seconds,
 				ord,
-				date_trunc('hour', $4::timestamp - (duration_seconds * INTERVAL '1 second')) AS start_time,
-				$4::timestamp AS end_time
+				date_trunc('hour', $4::timestamp) - (duration_seconds * INTERVAL '1 second') AS start_time,
+				date_trunc('hour', $4::timestamp) AS end_time
 			FROM requested_windows
 		),
 		blob_windows AS (
