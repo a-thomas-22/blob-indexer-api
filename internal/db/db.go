@@ -71,9 +71,20 @@ func RunMigrations(dbURL string) error {
 		return fmt.Errorf("failed to create migration instance: %w", err)
 	}
 
-	// Run migrations
+	// Run migrations. A dirty schema (a previous run died mid-migration, e.g.
+	// the migration Job was deleted by an Argo CD sync retry) is recovered
+	// automatically when verifiably safe; see recoverDirtySchema.
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return fmt.Errorf("failed to run migrations: %w", err)
+		var dirty migrate.ErrDirty
+		if !errors.As(err, &dirty) {
+			return fmt.Errorf("failed to run migrations: %w", err)
+		}
+		if recErr := recoverDirtySchema(m, db, migrationsPath, dirty.Version); recErr != nil {
+			return fmt.Errorf("failed to run migrations: %w (automatic dirty-schema recovery refused: %w)", err, recErr)
+		}
+		if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+			return fmt.Errorf("failed to run migrations after dirty-schema recovery: %w", err)
+		}
 	}
 
 	log.Println("Database migrations completed successfully")

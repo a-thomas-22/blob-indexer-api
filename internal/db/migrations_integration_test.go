@@ -340,6 +340,64 @@ func TestBackfillPerBlobRows(t *testing.T) {
 	}
 }
 
+// TestRunMigrationsRecoversDirtySchema reproduces the 2026-06-11 production
+// incident: an Argo CD sync retry deleted the running migration Job while
+// migration 12's backfill was executing, leaving schema_migrations at
+// (version=12, dirty=true) with the migration body rolled back. Every
+// subsequent run then failed with "Dirty database version 12" until manual
+// intervention. RunMigrations must now detect that state, force back to the
+// previous version, and re-run to completion.
+func TestRunMigrationsRecoversDirtySchema(t *testing.T) {
+	url := integrationDBURL(t)
+	db, err := sqlx.Connect("postgres", url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	resetSchema(t, db)
+
+	m := migrator(t, db)
+	if err := m.Migrate(11); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to 11: %v", err)
+	}
+
+	// Simulate the killed run: golang-migrate writes (12, dirty) before
+	// executing 12.up.sql, and the kill rolls the migration body back while
+	// the version row persists.
+	if _, err := db.Exec(`UPDATE schema_migrations SET version = 12, dirty = true`); err != nil {
+		t.Fatalf("mark schema dirty: %v", err)
+	}
+
+	if err := RunMigrations(url); err != nil {
+		t.Fatalf("RunMigrations should recover a dirty schema: %v", err)
+	}
+
+	latest, err := LatestMigrationVersion()
+	if err != nil {
+		t.Fatalf("LatestMigrationVersion: %v", err)
+	}
+	var v uint
+	var dirty bool
+	if err := db.QueryRow(`SELECT version, dirty FROM schema_migrations LIMIT 1`).Scan(&v, &dirty); err != nil {
+		t.Fatalf("schema_migrations: %v", err)
+	}
+	if dirty {
+		t.Fatal("schema still dirty after recovery")
+	}
+	if v != latest {
+		t.Fatalf("recovered to version %d, want %d", v, latest)
+	}
+
+	// Spot-check that migration 12 actually applied on the re-run.
+	var exists bool
+	if err := db.QueryRow(`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'blob_user_stats')`).Scan(&exists); err != nil {
+		t.Fatalf("check blob_user_stats: %v", err)
+	}
+	if !exists {
+		t.Fatal("blob_user_stats missing after dirty-schema recovery")
+	}
+}
+
 type networkBlobStatsCheck struct {
 	networkID       int
 	confirmed       int64
