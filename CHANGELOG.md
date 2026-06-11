@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.2](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.7.1...blob-indexer-api-v0.7.2) (2026-06-11)
+
+
+### Performance Improvements
+
+* serve charts from pre-aggregated rollups and cache chart responses ([#216](https://github.com/a-thomas-22/blob-indexer-api/issues/216)) ([13a7271](https://github.com/a-thomas-22/blob-indexer-api/commit/13a7271bfcb0d7f7364e1f24b4e00bc5110732c1))
+
+
+### Dependencies
+
+* bump gitleaks/gitleaks-action from 2 to 3 ([#215](https://github.com/a-thomas-22/blob-indexer-api/issues/215)) ([ca30537](https://github.com/a-thomas-22/blob-indexer-api/commit/ca30537318f140b52384e6d42698bf86d6a2852f))
+* bump golang.org/x/sync from 0.19.0 to 0.20.0 ([#214](https://github.com/a-thomas-22/blob-indexer-api/issues/214)) ([d32729a](https://github.com/a-thomas-22/blob-indexer-api/commit/d32729a7517d99d0f405ea59c7a6ece71d7aa1dc))
+
 ## [0.7.1](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.7.0...blob-indexer-api-v0.7.1) (2026-05-26)
 
 
