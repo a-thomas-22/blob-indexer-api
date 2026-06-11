@@ -72,6 +72,7 @@ func newTestAPIWithDB(db DBProvider) *API {
 		breakdownCache: make(map[string]userBreakdownCacheEntry),
 		rollingCache:   make(map[string]rollingStatsCacheEntry),
 		mempoolCache:   make(map[int]mempoolPressureCacheEntry),
+		chartCache:     make(map[string]chartCacheEntry),
 	}
 }
 

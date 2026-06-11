@@ -125,6 +125,7 @@ func parseUserWindowOption(r *http.Request) (userWindowOption, error) {
 // @Success 200 {object} Response{data=[]UserResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
+// @Failure 503 {object} Response "Database overloaded; retry later"
 // @Router /users [get]
 func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 	a.getTopBlobUsers(w, r, false)
@@ -144,6 +145,7 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} Response{data=[]UserResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
+// @Failure 503 {object} Response "Database overloaded; retry later"
 // @Router /users/unattributed [get]
 func (a *API) GetTopUnattributedBlobUsers(w http.ResponseWriter, r *http.Request) {
 	a.getTopBlobUsers(w, r, true)
@@ -203,6 +205,7 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 	a.cacheMu.RLock()
 	if cached, ok := a.topUsersCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		a.cacheMu.RUnlock()
+		setCacheControl(w, aggregateCacheTTL)
 		a.respondJSON(w, http.StatusOK, Response{
 			Success: true,
 			Data:    cached.response,
@@ -246,7 +249,7 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 			zap.String("sort", string(sort)),
 			zap.String("window", string(window)),
 			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, errMessage)
+		a.respondAggregateError(w, err, errMessage)
 		return
 	}
 
@@ -254,6 +257,7 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 	// so the assertion's ok value can never be false here.
 	response, _ := value.([]UserResponse)
 
+	setCacheControl(w, aggregateCacheTTL)
 	logger.Debug(returnMessage,
 		zap.String("network", network.Name),
 		zap.String("sort", string(sort)),
@@ -273,6 +277,7 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 // @Success 200 {object} Response{data=UserBreakdownResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
+// @Failure 503 {object} Response "Database overloaded; retry later"
 // @Router /users/breakdown [get]
 func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 	network, err := a.getNetworkFromRequest(r)
@@ -295,6 +300,7 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 	a.cacheMu.RLock()
 	if cached, ok := a.breakdownCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		a.cacheMu.RUnlock()
+		setCacheControl(w, aggregateCacheTTL)
 		a.respondSuccess(w, cached.response)
 		return
 	}
@@ -353,7 +359,7 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 			zap.String("network", network.Name),
 			zap.String("window", string(window)),
 			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get user breakdown")
+		a.respondAggregateError(w, err, "Failed to get user breakdown")
 		return
 	}
 
@@ -361,6 +367,7 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 	// so the assertion's ok value can never be false here.
 	response, _ := value.(UserBreakdownResponse)
 
+	setCacheControl(w, aggregateCacheTTL)
 	a.respondSuccess(w, response)
 }
 
@@ -376,6 +383,7 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} Response "Bad request"
 // @Failure 404 {object} Response "User not found"
 // @Failure 500 {object} Response "Internal server error"
+// @Failure 503 {object} Response "Database overloaded; retry later"
 // @Router /users/{address} [get]
 func (a *API) GetUserByAddress(w http.ResponseWriter, r *http.Request) {
 	network, err := a.getNetworkFromRequest(r)
@@ -404,9 +412,10 @@ func (a *API) GetUserByAddress(w http.ResponseWriter, r *http.Request) {
 			zap.String("network", network.Name),
 			zap.String("address", address),
 			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get user")
+		a.respondAggregateError(w, err, "Failed to get user")
 		return
 	}
 
+	setCacheControl(w, aggregateCacheTTL)
 	a.respondSuccess(w, toUserResponse(user, network.ChainID, network.Name))
 }

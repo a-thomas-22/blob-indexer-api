@@ -94,6 +94,7 @@ type rollingStatsWindowRow struct {
 // @Success 200 {object} Response{data=RollingStatsResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
+// @Failure 503 {object} Response "Database overloaded; retry later"
 // @Router /stats/windows [get]
 func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 	network, err := a.getNetworkFromRequest(r)
@@ -123,6 +124,7 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 	a.cacheMu.RLock()
 	if cached, ok := a.rollingCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		a.cacheMu.RUnlock()
+		setCacheControl(w, statsCacheTTL)
 		a.respondSuccess(w, cached.response)
 		return
 	}
@@ -166,7 +168,7 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 		a.cacheMu.Lock()
 		a.rollingCache[cacheKey] = rollingStatsCacheEntry{
 			response:  response,
-			expiresAt: time.Now().Add(aggregateCacheTTL),
+			expiresAt: time.Now().Add(statsCacheTTL),
 		}
 		a.cacheMu.Unlock()
 
@@ -176,7 +178,7 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 		logger.Error("Failed to get rolling blob market statistics",
 			zap.String("network", network.Name),
 			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get rolling blob market statistics")
+		a.respondAggregateError(w, err, "Failed to get rolling blob market statistics")
 		return
 	}
 
@@ -184,6 +186,7 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 	// so the assertion's ok value can never be false here.
 	response, _ := value.(RollingStatsResponse)
 
+	setCacheControl(w, statsCacheTTL)
 	a.respondSuccess(w, response)
 }
 
@@ -198,6 +201,7 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} Response{data=RollingStatsResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
+// @Failure 503 {object} Response "Database overloaded; retry later"
 // @Router /charts/rolling-stats [get]
 func (a *API) GetRollingStatsChart(w http.ResponseWriter, r *http.Request) {
 	a.GetRollingStatsWindows(w, r)

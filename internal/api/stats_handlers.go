@@ -45,6 +45,7 @@ type StatsResponse struct {
 // @Success 200 {object} Response{data=StatsResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
+// @Failure 503 {object} Response "Database overloaded; retry later"
 // @Router /stats [get]
 func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 	network, err := a.getNetworkFromRequest(r)
@@ -58,6 +59,7 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 	a.cacheMu.RLock()
 	if cached, ok := a.statsCache[network.ChainID]; ok && time.Now().Before(cached.expiresAt) {
 		a.cacheMu.RUnlock()
+		setCacheControl(w, statsCacheTTL)
 		a.respondJSON(w, http.StatusOK, Response{
 			Success: true,
 			Data:    cached.response,
@@ -81,7 +83,7 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 		logger.Error("Failed to get blob statistics",
 			zap.String("network", network.Name),
 			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get blob statistics")
+		a.respondAggregateError(w, err, "Failed to get blob statistics")
 		return
 	}
 
@@ -89,6 +91,7 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 	// so the assertion's ok value can never be false here.
 	response, _ := value.(StatsResponse)
 
+	setCacheControl(w, statsCacheTTL)
 	a.respondSuccess(w, response)
 }
 
@@ -106,7 +109,7 @@ func (a *API) queryBlobStats(ctx context.Context, networkID int, networkName str
 	a.cacheMu.Lock()
 	a.statsCache[networkID] = statsCacheEntry{
 		response:  response,
-		expiresAt: time.Now().Add(aggregateCacheTTL),
+		expiresAt: time.Now().Add(statsCacheTTL),
 	}
 	a.cacheMu.Unlock()
 	return response, nil

@@ -3,11 +3,16 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/lib/pq"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
@@ -231,5 +236,57 @@ func TestToBlobResponse_OmitsUnavailableBlobCostFields(t *testing.T) {
 	}
 	if response.MaxCostWei != nil || response.HeadroomWei != nil || response.HeadroomPercent != nil {
 		t.Fatal("expected fee-cap fields to be omitted without max_fee_per_blob_gas")
+	}
+}
+
+func TestIsDBTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"deadline", context.DeadlineExceeded, true},
+		{"wrapped deadline", fmt.Errorf("query: %w", context.DeadlineExceeded), true},
+		{"statement timeout", &pq.Error{Code: "57014"}, true},
+		{"other pq error", &pq.Error{Code: "23505"}, false},
+		{"generic", errors.New("boom"), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDBTimeout(tc.err); got != tc.want {
+				t.Fatalf("isDBTimeout(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRespondAggregateError_TimeoutMapsTo503(t *testing.T) {
+	a := newTestAPI()
+
+	w := httptest.NewRecorder()
+	a.respondAggregateError(w, context.DeadlineExceeded, "overloaded")
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+	if w.Header().Get("Retry-After") != "5" {
+		t.Fatalf("Retry-After = %q, want \"5\"", w.Header().Get("Retry-After"))
+	}
+
+	w = httptest.NewRecorder()
+	a.respondAggregateError(w, errors.New("boom"), "failed")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+	if w.Header().Get("Retry-After") != "" {
+		t.Fatalf("unexpected Retry-After on 500: %q", w.Header().Get("Retry-After"))
+	}
+}
+
+func TestSetCacheControl(t *testing.T) {
+	w := httptest.NewRecorder()
+	setCacheControl(w, 15*time.Second)
+	if got := w.Header().Get("Cache-Control"); got != "public, max-age=15" {
+		t.Fatalf("Cache-Control = %q", got)
 	}
 }

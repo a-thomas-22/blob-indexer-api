@@ -36,6 +36,7 @@ type API struct {
 	breakdownCache map[string]userBreakdownCacheEntry
 	rollingCache   map[string]rollingStatsCacheEntry
 	mempoolCache   map[int]mempoolPressureCacheEntry
+	chartCache     map[string]chartCacheEntry
 	hub            *Hub
 	poller         *Poller
 }
@@ -62,6 +63,11 @@ type rollingStatsCacheEntry struct {
 
 type mempoolPressureCacheEntry struct {
 	response  MempoolPressureResponse
+	expiresAt time.Time
+}
+
+type chartCacheEntry struct {
+	response  interface{}
 	expiresAt time.Time
 }
 
@@ -153,6 +159,7 @@ func newAPI(ctx context.Context, db DBProvider, cfg *config.Config) *API {
 		breakdownCache: make(map[string]userBreakdownCacheEntry),
 		rollingCache:   make(map[string]rollingStatsCacheEntry),
 		mempoolCache:   make(map[int]mempoolPressureCacheEntry),
+		chartCache:     make(map[string]chartCacheEntry),
 		hub:            hub,
 		poller:         poller,
 	}
