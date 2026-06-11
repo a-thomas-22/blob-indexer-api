@@ -10,6 +10,18 @@ metadata:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    # Argo CD ignores all helm.sh/hook* annotations once any
+    # argocd.argoproj.io/hook annotation is present, so the three below fully
+    # define hook behavior under Argo CD (plain Helm ignores them). Without
+    # them Argo maps the Helm annotations to BeforeHookCreation, and a sync
+    # retry deletes a still-RUNNING migration Job — killing the migration
+    # mid-flight and leaving golang-migrate's dirty flag set (2026-06-11
+    # incident). With HookSucceeded,HookFailed a retry instead fails fast on
+    # "job already exists" while the migration keeps running, and finished
+    # jobs are cleaned up so the next sync starts fresh.
+    "argocd.argoproj.io/hook": PreSync
+    "argocd.argoproj.io/sync-wave": "-5"
+    "argocd.argoproj.io/hook-delete-policy": HookSucceeded,HookFailed
 spec:
   backoffLimit: 3
   template:

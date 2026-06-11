@@ -45,6 +45,7 @@ Both share the same database. Production deployments run migrations with the ded
 
 - PostgreSQL with golang-migrate (migrations in `internal/db/migrations/`)
 - Migrations run via `cmd/migrate`, `make db-migrate`, Helm-managed migration containers, or local `database.run_migrations: true`
+- Migration authoring rules (fast DDL-only files, no explicit transaction control, idempotent, heavy backfills chunked outside schema migrations): see `internal/db/migrations/README.md`. A dirty schema left by a killed migration run is auto-recovered by `db.RunMigrations` when verifiably safe.
 - Key tables: `blobs`, `networks`, `blob_users`, `indexer_metadata`, `indexed_blocks`, `block_metrics`
 - Connection pooling: 25 max open, 10 idle
 
