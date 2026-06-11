@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.7.2...blob-indexer-api-v0.8.0) (2026-06-11)
+
+
+### Features
+
+* add per-window block counts to /stats/windows ([#222](https://github.com/a-thomas-22/blob-indexer-api/issues/222)) ([a406530](https://github.com/a-thomas-22/blob-indexer-api/commit/a406530b3d809f9cb7182a9d670e199bd83c3ef2))
+
+
+### Bug Fixes
+
+* auto-recover dirty schema and stop Argo CD killing running migrations ([#225](https://github.com/a-thomas-22/blob-indexer-api/issues/225)) ([5053b81](https://github.com/a-thomas-22/blob-indexer-api/commit/5053b8141cc947d29186702224079652a8b65455))
+* report real block threshold counts for rollup-served rolling windows ([#228](https://github.com/a-thomas-22/blob-indexer-api/issues/228)) ([3504cdc](https://github.com/a-thomas-22/blob-indexer-api/commit/3504cdc791def8664d28dc7f14e02a629e9d0204))
+* serve wide rolling windows and windowed user stats from chart rollups ([#224](https://github.com/a-thomas-22/blob-indexer-api/issues/224)) ([8890434](https://github.com/a-thomas-22/blob-indexer-api/commit/88904340998012850afe0259f287c864b0209abd))
+* unblock app release CI ([#227](https://github.com/a-thomas-22/blob-indexer-api/issues/227)) ([0d4ebb2](https://github.com/a-thomas-22/blob-indexer-api/commit/0d4ebb2c22527e3bb1e480265104b736aed66eb3))
+
 ## [0.7.2](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.7.1...blob-indexer-api-v0.7.2) (2026-06-11)
 
 
