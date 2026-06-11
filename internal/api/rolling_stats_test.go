@@ -80,6 +80,8 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 				"FROM blobs b",
 				"b.confirmed = true",
 				"FROM block_metrics bm",
+				"blocks_above_target",
+				"blocks_at_max",
 				"ORDER BY wb.ord",
 			} {
 				if !strings.Contains(query, want) {
@@ -112,6 +114,9 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 					TotalBlobs:         12,
 					TotalBlobGasUsed:   1572864,
 					AverageUtilization: "0.750000",
+					TotalBlocks:        300,
+					BlocksAboveTarget:  187,
+					BlocksAtMax:        42,
 					TotalCostETH:       "26494271031506069",
 					UniqueSenders:      3,
 				},
@@ -158,6 +163,9 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 	}
 	if window.AverageUtilization != "0.750000" || window.TotalCostETH != "26494271031506069" || window.TotalCostWei != "26494271031506069" || window.UniqueSenders != 3 {
 		t.Fatalf("unexpected market stats: %+v", window)
+	}
+	if window.TotalBlocks != 300 || window.BlocksAboveTarget != 187 || window.BlocksAtMax != 42 {
+		t.Fatalf("unexpected block counts: %+v", window)
 	}
 }
 

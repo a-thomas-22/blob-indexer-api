@@ -67,6 +67,12 @@ type RollingWindowStats struct {
 	TotalBlobs         int    `json:"total_blobs"`
 	TotalBlobGasUsed   int64  `json:"total_blob_gas_used"`
 	AverageUtilization string `json:"average_utilization"`
+	// Total blocks indexed in the window (from block metrics).
+	TotalBlocks int64 `json:"total_blocks"`
+	// Blocks in the window whose blob gas used exceeded the block's blob gas target.
+	BlocksAboveTarget int64 `json:"blocks_above_target"`
+	// Blocks in the window whose blob gas used reached the block's blob gas limit.
+	BlocksAtMax int64 `json:"blocks_at_max"`
 	// Total realized blob base-fee cost in wei for the window (sum of per-blob integer wei costs).
 	TotalCostWei string `json:"total_cost_wei" example:"26494271031506069"`
 	// Deprecated alias: use total_cost_wei. This legacy field contains wei, not ETH.
@@ -85,6 +91,9 @@ type rollingStatsWindowRow struct {
 	TotalBlobs         int       `db:"total_blobs"`
 	TotalBlobGasUsed   int64     `db:"total_blob_gas_used"`
 	AverageUtilization string    `db:"average_utilization"`
+	TotalBlocks        int64     `db:"total_blocks"`
+	BlocksAboveTarget  int64     `db:"blocks_above_target"`
+	BlocksAtMax        int64     `db:"blocks_at_max"`
 	TotalCostETH       string    `db:"total_cost_eth"`
 	UniqueSenders      int       `db:"unique_senders"`
 }
@@ -264,6 +273,9 @@ func toRollingWindowStats(row rollingStatsWindowRow) RollingWindowStats {
 		TotalBlobs:            row.TotalBlobs,
 		TotalBlobGasUsed:      row.TotalBlobGasUsed,
 		AverageUtilization:    row.AverageUtilization,
+		TotalBlocks:           row.TotalBlocks,
+		BlocksAboveTarget:     row.BlocksAboveTarget,
+		BlocksAtMax:           row.BlocksAtMax,
 		TotalCostWei:          row.TotalCostETH,
 		TotalCostETH:          row.TotalCostETH,
 		UniqueSenders:         row.UniqueSenders,
