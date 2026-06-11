@@ -53,7 +53,7 @@ def assert_equal(label, expected, actual)
 end
 
 api = find_doc(docs, "Deployment", "#{fullname}-api") || raise("API Deployment missing")
-indexer = find_doc(docs, "Deployment", "#{fullname}-indexer") || raise("Indexer Deployment missing")
+indexer = find_doc(docs, "StatefulSet", "#{fullname}-indexer") || raise("Indexer StatefulSet missing")
 job = find_doc(docs, "Job", "#{fullname}-migrate") || raise("Migration Job missing")
 
 assert_equal("API DB Secret ref", [app_secret, app_key], db_url_ref(api))
