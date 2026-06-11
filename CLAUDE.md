@@ -110,6 +110,7 @@ Managed by **release-please** (`.github/workflows/release-please.yml`). The app 
 - PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `deps:`, `chore:`, etc.) without assistant/tooling prefixes such as `[codex]` — enforced by CI
 - On merge to `main`, release-please maintains a running release PR with changelog
 - Merging the release PR creates a GitHub Release + tag, which triggers Docker/Helm publish workflows
+- After an app release, the `sync-chart-app-version` workflow job pushes a `fix(helm): update chart app version to X.Y.Z` commit to `main`, which makes release-please open a chart release PR pinning the new app version — merge it to publish the updated chart
 - Config: `release-please-config.json`, `.release-please-manifest.json`
 - Docker images: `registry.ahkc.win/public/blob-indexer-api-api`, `registry.ahkc.win/public/blob-indexer-api-indexer`
 - Helm charts: `oci://registry.ahkc.win/public/charts/blob-indexer`
