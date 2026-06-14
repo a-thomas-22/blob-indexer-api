@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.8.0...blob-indexer-api-v0.8.1) (2026-06-14)
+
+
+### Bug Fixes
+
+* serialize indexer database writes ([#232](https://github.com/a-thomas-22/blob-indexer-api/issues/232)) ([31cd563](https://github.com/a-thomas-22/blob-indexer-api/commit/31cd56362249b7d65d09888e7c376bafc52e4194))
+
 ## [0.8.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.7.2...blob-indexer-api-v0.8.0) (2026-06-11)
 
 
