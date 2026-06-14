@@ -965,6 +965,78 @@ func TestReindex(t *testing.T) {
 	})
 }
 
+func TestClaimNextReindexRequest(t *testing.T) {
+	idx := newTestIndexer()
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	rows := sqlmock.NewRows([]string{"id", "network_id", "start_block", "end_block", "attempts"}).
+		AddRow(int64(12), idx.network.ChainID, int64(100), int64(105), 2)
+	mock.ExpectQuery("UPDATE block_reindex_requests").
+		WithArgs(idx.network.ChainID, "blob-indexer/testnet/test-v1", int(reindexRequestStaleAfter.Seconds())).
+		WillReturnRows(rows)
+
+	request, err := idx.claimNextReindexRequest()
+	if err != nil {
+		t.Fatalf("claimNextReindexRequest() error = %v", err)
+	}
+	if request.ID != 12 || request.NetworkID != idx.network.ChainID || request.StartBlock != 100 || request.EndBlock != 105 || request.Attempts != 2 {
+		t.Fatalf("unexpected request: %+v", request)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+func TestReindexRequestStatusUpdates(t *testing.T) {
+	idx := newTestIndexer()
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	mock.ExpectExec("UPDATE block_reindex_requests").
+		WithArgs(int64(12), idx.network.ChainID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := idx.completeReindexRequest(12); err != nil {
+		t.Fatalf("completeReindexRequest() error = %v", err)
+	}
+
+	mock.ExpectExec("UPDATE block_reindex_requests").
+		WithArgs(int64(13), idx.network.ChainID, "boom").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	idx.failReindexRequest(13, errors.New("boom"))
+
+	mock.ExpectExec("UPDATE block_reindex_requests").
+		WithArgs(int64(14), idx.network.ChainID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	idx.heartbeatReindexRequest(14)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+func TestCountMissingIndexedBlocks(t *testing.T) {
+	idx := newTestIndexer()
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	rows := sqlmock.NewRows([]string{"count"}).AddRow(int64(3))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(idx.network.ChainID, uint64(100), uint64(105)).
+		WillReturnRows(rows)
+
+	missing, err := idx.countMissingIndexedBlocks(100, 105)
+	if err != nil {
+		t.Fatalf("countMissingIndexedBlocks() error = %v", err)
+	}
+	if missing != 3 {
+		t.Fatalf("expected 3 missing blocks, got %d", missing)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
 func TestGetBlobCountsAndTopUsers(t *testing.T) {
 	idx := newTestIndexer()
 	idxDB, mock := newMockIndexerDB(t)

@@ -64,6 +64,24 @@ type IndexedBlock struct {
 	IndexedAt   time.Time `db:"indexed_at"`
 }
 
+// BlockReindexRequest records an operator-requested block reindex range.
+type BlockReindexRequest struct {
+	ID          int64      `db:"id" json:"id"`
+	NetworkID   int        `db:"network_id" json:"network_id"`
+	StartBlock  int64      `db:"start_block" json:"start_block"`
+	EndBlock    int64      `db:"end_block" json:"end_block"`
+	Status      string     `db:"status" json:"status"`
+	RequestedBy string     `db:"requested_by" json:"requested_by"`
+	Reason      string     `db:"reason" json:"reason"`
+	Attempts    int        `db:"attempts" json:"attempts"`
+	LastError   *string    `db:"last_error" json:"last_error,omitempty"`
+	ClaimedBy   *string    `db:"claimed_by" json:"claimed_by,omitempty"`
+	RequestedAt time.Time  `db:"requested_at" json:"requested_at"`
+	StartedAt   *time.Time `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt *time.Time `db:"completed_at" json:"completed_at,omitempty"`
+	UpdatedAt   time.Time  `db:"updated_at" json:"updated_at"`
+}
+
 // BlobUserStats holds aggregated blob user statistics returned by queries.
 type BlobUserStats struct {
 	Address           string    `db:"from_address" json:"address"`
