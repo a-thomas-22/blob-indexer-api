@@ -133,6 +133,7 @@ type Indexer struct {
 	lastIndexedBlock       uint64 // accessed with sync/atomic
 	indexerVersion         string
 	mu                     sync.Mutex // protects DB metadata writes
+	dbWriteMu              sync.Mutex // serializes same-network writes that fire summary rollup triggers
 	blockTaskCh            chan BlockTask
 	useWebsocket           bool
 	blockSub               *ethereum.BlockSubscription
@@ -230,6 +231,11 @@ func (i *Indexer) setNetworkMetadataValuesLocked(updates ...metadataUpdate) {
 				zap.Error(err))
 		}
 	}
+}
+
+func (i *Indexer) lockDBWrites() func() {
+	i.dbWriteMu.Lock()
+	return i.dbWriteMu.Unlock
 }
 
 func (i *Indexer) updateCurrentChainHead(blockNumber uint64, observedAt time.Time) {
@@ -1168,6 +1174,9 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 		zap.Uint64("fork_point", forkBlock),
 		zap.Uint64("invalidated_blocks", fromBlock-forkBlock-1))
 
+	unlockWrites := i.lockDBWrites()
+	defer unlockWrites()
+
 	tx, err := i.db.BeginTxx(i.ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin reorg transaction: %w", err)
@@ -1211,6 +1220,9 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 // insertBlockData inserts all blobs, block metrics, and records the indexed block in a single
 // database transaction. This ensures atomicity — either the entire block is recorded or nothing is.
 func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.IndexedBlock, blockMetrics *models.BlockMetrics) error {
+	unlockWrites := i.lockDBWrites()
+	defer unlockWrites()
+
 	tx, err := i.db.BeginTxx(i.ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -1406,7 +1418,9 @@ func (i *Indexer) runMempoolCleanup() {
 			return
 		case <-ticker.C:
 			cutoff := time.Now().Add(-i.mempoolTTL)
+			unlockWrites := i.lockDBWrites()
 			deleted, err := i.db.DeleteStalePendingBlobs(i.ctx, i.network.ChainID, cutoff)
+			unlockWrites()
 			if err != nil {
 				logger.Error("Failed to clean up stale pending blobs",
 					zap.String("network", i.network.Name),
@@ -1494,6 +1508,9 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	networkID := blobs[0].NetworkID
 	txHash := blobs[0].TxHash
 	pendingBlock := blobs[0].BlockNumber
+
+	unlockWrites := i.lockDBWrites()
+	defer unlockWrites()
 
 	tx, err := i.db.BeginTxx(i.ctx, nil)
 	if err != nil {
@@ -1650,25 +1667,37 @@ func (i *Indexer) Reindex(startBlock, endBlock uint64) error {
 		zap.Uint64("start_block", startBlock),
 		zap.Uint64("end_block", endBlock))
 
+	if err := i.deleteReindexRange(startBlock, endBlock); err != nil {
+		return err
+	}
+
+	// Process the block range
+	return i.processBlockRange(startBlock, endBlock)
+}
+
+func (i *Indexer) deleteReindexRange(startBlock, endBlock uint64) error {
+	unlockWrites := i.lockDBWrites()
+	defer unlockWrites()
+
 	tx, err := i.db.BeginTxx(i.ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin reindex transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Delete existing blob records in the range
+	// Delete existing blob records in the range.
 	query := "DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3"
 	if _, err := tx.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock); err != nil {
 		return fmt.Errorf("failed to delete existing blob records: %w", err)
 	}
 
-	// Delete existing block metrics in the range
+	// Delete existing block metrics in the range.
 	query = "DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3"
 	if _, err := tx.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock); err != nil {
 		return fmt.Errorf("failed to delete existing block metrics: %w", err)
 	}
 
-	// Delete existing indexed block records in the range
+	// Delete existing indexed block records in the range.
 	query = "DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3"
 	if _, err := tx.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock); err != nil {
 		return fmt.Errorf("failed to delete existing indexed block records: %w", err)
@@ -1677,8 +1706,7 @@ func (i *Indexer) Reindex(startBlock, endBlock uint64) error {
 		return fmt.Errorf("failed to commit reindex cleanup: %w", err)
 	}
 
-	// Process the block range
-	return i.processBlockRange(startBlock, endBlock)
+	return nil
 }
 
 // runGapScanner periodically retries blocks that failed processing
