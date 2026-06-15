@@ -181,6 +181,39 @@ func TestHub_Stop_ClosesAllClients(t *testing.T) {
 	}
 }
 
+// TestHub_Stop_DrainsQueuedRegister verifies that a client which was admitted
+// and enqueued on register but not yet processed when the hub shuts down still
+// has its send channel closed and its admission slot released, rather than
+// leaking. done is closed before Run starts so the drain path is exercised
+// deterministically.
+func TestHub_Stop_DrainsQueuedRegister(t *testing.T) {
+	hub := NewHub()
+	if !hub.admit("1.1.1.1", 0, 0) {
+		t.Fatal("admit should succeed")
+	}
+	queued := &Client{hub: hub, send: make(chan []byte, 1), networkName: "a", remoteIP: "1.1.1.1"}
+	hub.register <- queued // buffered, not yet processed by Run
+	hub.Stop()             // close done before Run picks up the queued client
+
+	finished := make(chan struct{})
+	go func() { hub.Run(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after Stop")
+	}
+
+	if _, ok := <-queued.send; ok {
+		t.Error("expected queued client's send channel to be closed")
+	}
+	hub.admitMu.Lock()
+	total, perIP := hub.total, hub.perIP["1.1.1.1"]
+	hub.admitMu.Unlock()
+	if total != 0 || perIP != 0 {
+		t.Errorf("expected admission slot released, got total=%d perIP=%d", total, perIP)
+	}
+}
+
 func TestHub_ClientCount(t *testing.T) {
 	hub := NewHub()
 	go hub.Run()

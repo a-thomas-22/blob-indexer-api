@@ -26,6 +26,8 @@ type API struct {
 	db             DBProvider
 	networks       map[int]config.NetworkConfig
 	config         *config.Config
+	clientIPs      clientIPResolver
+	wsOriginPolicy corsPolicy
 	startTime      time.Time
 	totalRequests  int64 // accessed via sync/atomic
 	activeRequests int64 // accessed via sync/atomic
@@ -153,6 +155,8 @@ func newAPI(ctx context.Context, db DBProvider, cfg *config.Config) *API {
 		db:             db,
 		networks:       networks,
 		config:         cfg,
+		clientIPs:      newClientIPResolver(cfg.Server.TrustedIPHeaders),
+		wsOriginPolicy: newCORSPolicy(cfg.CORS),
 		startTime:      time.Now(),
 		statsCache:     make(map[int]statsCacheEntry),
 		topUsersCache:  make(map[string]topUsersCacheEntry),
@@ -171,7 +175,7 @@ func (a *API) newRouter(opts routerOptions) http.Handler {
 	cfg := a.config
 	r := chi.NewRouter()
 
-	clientIPs := newClientIPResolver(cfg.Server.TrustedIPHeaders)
+	clientIPs := a.clientIPs
 	rateLimiter := NewRateLimiter(cfg.Server.RateLimitRPS, cfg.Server.RateLimitBurst)
 	aggregateRateLimiter := NewRateLimiter(cfg.Server.AggregateRateLimitRPS, cfg.Server.AggregateRateLimitBurst)
 	aggregateLimit := RateLimitMiddlewareWithResolver(aggregateRateLimiter, clientIPs)

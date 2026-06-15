@@ -50,7 +50,7 @@ func (a *API) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Reserve a connection slot before upgrading so over-cap clients are
 	// rejected without allocating goroutines or buffers.
-	remoteIP := newClientIPResolver(a.config.Server.TrustedIPHeaders).IP(r)
+	remoteIP := a.clientIPs.IP(r)
 	if !a.hub.admit(remoteIP, a.config.WebSocket.MaxClients, a.config.WebSocket.MaxConnsPerIP) {
 		logger.Warn("WebSocket connection rejected: capacity reached",
 			zap.String("network", network.Name),
@@ -62,7 +62,7 @@ func (a *API) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
-		CheckOrigin:     wsCheckOrigin(newCORSPolicy(a.config.CORS)),
+		CheckOrigin:     wsCheckOrigin(a.wsOriginPolicy),
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)

@@ -91,6 +91,9 @@ func TestHandleWebSocket_OriginAllowed(t *testing.T) {
 		Enabled:        true,
 		AllowedOrigins: []string{"https://app.example.com"},
 	}
+	// Production builds the origin policy once in newAPI; refresh it here since
+	// the test mutates config after construction.
+	api.wsOriginPolicy = newCORSPolicy(api.config.CORS)
 
 	r := chi.NewRouter()
 	r.Get("/ws", api.HandleWebSocket)
@@ -109,6 +112,9 @@ func TestHandleWebSocket_OriginBlocked(t *testing.T) {
 		Enabled:        true,
 		AllowedOrigins: []string{"https://app.example.com"},
 	}
+	// Production builds the origin policy once in newAPI; refresh it here since
+	// the test mutates config after construction.
+	api.wsOriginPolicy = newCORSPolicy(api.config.CORS)
 
 	r := chi.NewRouter()
 	r.Get("/ws", api.HandleWebSocket)

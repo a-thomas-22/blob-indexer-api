@@ -137,6 +137,21 @@ func (h *Hub) Run() {
 			}
 
 		case <-h.done:
+			// Best-effort drain of queued admissions/removals so a client that
+			// was admitted (slot reserved) and sent to register/unregister but
+			// not yet processed has its slot released and goroutines unblocked,
+			// rather than leaking. Registered clients fall through to the
+			// teardown below; unregistered ones are released by removeClient.
+			for draining := true; draining; {
+				select {
+				case client := <-h.register:
+					h.clients[client] = struct{}{}
+				case client := <-h.unregister:
+					h.removeClient(client)
+				default:
+					draining = false
+				}
+			}
 			for client := range h.clients {
 				close(client.send)
 				delete(h.clients, client)
