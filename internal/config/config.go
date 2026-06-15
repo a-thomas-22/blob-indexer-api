@@ -116,6 +116,12 @@ type AttributionConfig struct {
 type WebSocketConfig struct {
 	PollInterval          time.Duration `mapstructure:"poll_interval" yaml:"poll_interval"`
 	UsersThrottleInterval time.Duration `mapstructure:"users_throttle_interval" yaml:"users_throttle_interval"`
+	// MaxClients caps the total number of concurrent WebSocket clients across
+	// all networks. Zero or negative disables the global cap.
+	MaxClients int `mapstructure:"max_clients" yaml:"max_clients"`
+	// MaxConnsPerIP caps concurrent WebSocket connections from a single client
+	// IP. Zero or negative disables the per-IP cap.
+	MaxConnsPerIP int `mapstructure:"max_conns_per_ip" yaml:"max_conns_per_ip"`
 }
 
 // Config holds the application configuration
@@ -202,6 +208,8 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("attribution.blob_list_request_timeout", "10s")
 	v.SetDefault("websocket.poll_interval", "3s")
 	v.SetDefault("websocket.users_throttle_interval", "30s")
+	v.SetDefault("websocket.max_clients", 10000)
+	v.SetDefault("websocket.max_conns_per_ip", 32)
 	v.SetDefault("networks", []NetworkConfig{})
 
 	// Configure Viper to read from config file

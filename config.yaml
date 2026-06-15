@@ -50,6 +50,12 @@ attribution:
   blob_list_refresh_interval: "1h"
   blob_list_request_timeout: "10s"
 
+websocket:
+  poll_interval: 3s
+  users_throttle_interval: 30s
+  max_clients: 10000 # Global cap on concurrent WebSocket clients (0 = unlimited)
+  max_conns_per_ip: 32 # Per-IP cap on concurrent WebSocket connections (0 = unlimited)
+
 networks:
   - name: "mainnet"
     chain_id: 1

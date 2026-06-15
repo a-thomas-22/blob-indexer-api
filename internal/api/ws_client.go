@@ -35,6 +35,10 @@ type Client struct {
 	send           chan []byte
 	networkChainID int
 	networkName    string
+	// remoteIP is the resolved client IP used for the per-IP connection cap.
+	// It must match the value passed to Hub.admit so the slot is released on
+	// disconnect.
+	remoteIP string
 
 	mu               sync.RWMutex
 	subscribedEvents map[WSEventType]struct{} // nil = all events
