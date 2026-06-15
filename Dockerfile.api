@@ -15,7 +15,7 @@ RUN go run github.com/swaggo/swag/cmd/swag@${SWAG_VERSION} init -g cmd/api/main.
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags "-X main.version=${VERSION}" -o blob-indexer-api ./cmd/api
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o blob-indexer-migrate ./cmd/migrate
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 WORKDIR /app
 
