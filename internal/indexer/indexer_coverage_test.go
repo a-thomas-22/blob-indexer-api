@@ -2120,7 +2120,7 @@ func TestSubscriptionHandlers(t *testing.T) {
 		}
 	})
 
-	t.Run("handlePendingTransactionSubscription handles hash and exits on resubscribe failure", func(t *testing.T) {
+	t.Run("handlePendingTransactionSubscription handles hash and starts polling on resubscribe failure", func(t *testing.T) {
 		idx := newTestIndexer()
 		idx.ethClient, _ = newMockEthClient(t, 10)
 		errCh := make(chan error, 1)
@@ -2146,5 +2146,67 @@ func TestSubscriptionHandlers(t *testing.T) {
 		case <-time.After(200 * time.Millisecond):
 			t.Fatal("expected pending tx handler to exit after resubscribe failure")
 		}
+
+		if atomic.LoadUint32(&idx.mempoolPollingStarted) != 1 {
+			t.Fatal("expected mempool polling fallback to start after resubscribe failure")
+		}
+		idx.cancel()
+		idx.wg.Wait()
+	})
+
+	t.Run("handlePendingTransactionSubscription starts polling when error channel closes", func(t *testing.T) {
+		idx := newTestIndexer()
+		errCh := make(chan error)
+		close(errCh)
+		idx.pendingTxSub = &ethereum.PendingTxSubscription{
+			Subscription: &mockSubscription{errCh: errCh},
+			Hashes:       make(chan common.Hash),
+		}
+
+		done := make(chan struct{})
+		go func() {
+			idx.handlePendingTransactionSubscription()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("expected handler to exit after closed error channel")
+		}
+
+		if atomic.LoadUint32(&idx.mempoolPollingStarted) != 1 {
+			t.Fatal("expected mempool polling fallback to start")
+		}
+		idx.cancel()
+		idx.wg.Wait()
+	})
+
+	t.Run("handlePendingTransactionSubscription starts polling when hash channel closes", func(t *testing.T) {
+		idx := newTestIndexer()
+		hashCh := make(chan common.Hash)
+		close(hashCh)
+		idx.pendingTxSub = &ethereum.PendingTxSubscription{
+			Subscription: &mockSubscription{errCh: make(chan error)},
+			Hashes:       hashCh,
+		}
+
+		done := make(chan struct{})
+		go func() {
+			idx.handlePendingTransactionSubscription()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("expected handler to exit after closed hash channel")
+		}
+
+		if atomic.LoadUint32(&idx.mempoolPollingStarted) != 1 {
+			t.Fatal("expected mempool polling fallback to start")
+		}
+		idx.cancel()
+		idx.wg.Wait()
 	})
 }

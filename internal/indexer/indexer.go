@@ -66,6 +66,12 @@ const (
 	// a gas amount — keep the two units separate so a future protocol change
 	// to one does not silently corrupt the other.
 	bytesPerBlob = 4096 * 32
+
+	// pendingTxProcessingQueueSize keeps websocket subscription reads fast. The
+	// subscription emits every pending tx hash, but only a tiny fraction are blob
+	// transactions; when processing falls behind, dropping hashes is preferable
+	// to letting the RPC subscription queue overflow and die.
+	pendingTxProcessingQueueSize = 8192
 )
 
 // errReorgDetected is returned when a chain reorganization is detected and handled
@@ -159,6 +165,7 @@ type Indexer struct {
 	useWebsocket           bool
 	blockSub               *ethereum.BlockSubscription
 	pendingTxSub           *ethereum.PendingTxSubscription
+	mempoolPollingStarted  uint32
 	failedBlocks           map[uint64]int // block number -> cumulative failure count
 	failedBlockNextRetry   map[uint64]time.Time
 	failedBlocksMu         sync.Mutex
@@ -406,7 +413,22 @@ func (i *Indexer) subscribeToPendingTransactions() (*ethereum.PendingTxSubscript
 	return i.ethClient.SubscribeToPendingTransactions(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
 }
 
+func (i *Indexer) resubscribeToPendingTransactions() (*ethereum.PendingTxSubscription, error) {
+	return i.ethClient.ResubscribeToPendingTransactions(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+}
+
+func (i *Indexer) unsubscribeFromPendingTransactions() {
+	if i.ethClient == nil {
+		return
+	}
+	i.ethClient.UnsubscribeFromPendingTransactions(fmt.Sprintf("indexer-%s", i.network.Name))
+}
+
 func (i *Indexer) startMempoolIndexer() {
+	if !atomic.CompareAndSwapUint32(&i.mempoolPollingStarted, 0, 1) {
+		return
+	}
+
 	i.wg.Add(1)
 	go func() {
 		defer i.wg.Done()
@@ -875,30 +897,85 @@ func (i *Indexer) handlePendingTransactionSubscription() {
 	logger.Info("Starting pending transaction subscription handler",
 		zap.String("network", i.network.Name))
 
+	processCh := make(chan common.Hash, pendingTxProcessingQueueSize)
+	workerCount := i.workerCount
+	if workerCount <= 0 {
+		workerCount = DefaultWorkerCount
+	}
+
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for w := 0; w < workerCount; w++ {
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-i.ctx.Done():
+					return
+				case hash, ok := <-processCh:
+					if !ok {
+						return
+					}
+					i.processPendingTransaction(hash)
+				}
+			}
+		}()
+	}
+	defer func() {
+		close(processCh)
+		workers.Wait()
+	}()
+
+	droppedHashes := 0
 	for {
 		select {
 		case <-i.ctx.Done():
 			logger.Info("Pending transaction subscription handler stopped",
 				zap.String("network", i.network.Name))
 			return
-		case err := <-i.pendingTxSub.Subscription.Err():
+		case err, ok := <-i.pendingTxSub.Subscription.Err():
+			if !ok {
+				logger.Warn("Pending transaction subscription error channel closed, falling back to polling",
+					zap.String("network", i.network.Name))
+				i.unsubscribeFromPendingTransactions()
+				i.startMempoolIndexer()
+				return
+			}
 			logger.Error("Pending transaction subscription error, reconnecting...",
 				zap.String("network", i.network.Name),
 				zap.Error(err))
 
 			// Try to resubscribe
-			pendingTxSub, err := i.subscribeToPendingTransactions()
+			pendingTxSub, err := i.resubscribeToPendingTransactions()
 			if err != nil {
 				logger.Error("Failed to resubscribe to pending transactions, falling back to polling",
 					zap.String("network", i.network.Name),
 					zap.Error(err))
+				i.startMempoolIndexer()
 				return
 			}
 			i.pendingTxSub = pendingTxSub
 
-		case hash := <-i.pendingTxSub.Hashes:
-			// Process the pending transaction
-			i.processPendingTransaction(hash)
+		case hash, ok := <-i.pendingTxSub.Hashes:
+			if !ok {
+				logger.Warn("Pending transaction hash channel closed, falling back to polling",
+					zap.String("network", i.network.Name))
+				i.unsubscribeFromPendingTransactions()
+				i.startMempoolIndexer()
+				return
+			}
+
+			select {
+			case processCh <- hash:
+			default:
+				droppedHashes++
+				if droppedHashes == 1 || droppedHashes%1000 == 0 {
+					logger.Warn("Dropping pending transaction hash because processing queue is full",
+						zap.String("network", i.network.Name),
+						zap.Int("dropped_hashes", droppedHashes),
+						zap.Int("queue_size", pendingTxProcessingQueueSize))
+				}
+			}
 		}
 	}
 }

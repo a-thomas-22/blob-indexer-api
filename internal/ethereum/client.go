@@ -23,6 +23,8 @@ type clientOptions struct {
 	rateLimitConfig *RateLimitConfig
 }
 
+const pendingTxSubscriptionBuffer = 16384
+
 // WithRateLimit configures RPC rate limiting and 429 handling.
 func WithRateLimit(cfg RateLimitConfig) ClientOption {
 	return func(o *clientOptions) {
@@ -153,7 +155,7 @@ func (c *Client) SubscribeToPendingTransactions(ctx context.Context, id string) 
 	}
 
 	// Create a new subscription
-	hashes := make(chan common.Hash)
+	hashes := make(chan common.Hash, pendingTxSubscriptionBuffer)
 	sub, err := c.rpcClient.EthSubscribe(ctx, hashes, "newPendingTransactions")
 	if err != nil {
 		return nil, fmt.Errorf("failed to subscribe to pending transactions: %w", err)
@@ -167,6 +169,13 @@ func (c *Client) SubscribeToPendingTransactions(ctx context.Context, id string) 
 	// Store the subscription
 	c.pendingTxSubs[id] = pendingTxSub
 	return pendingTxSub, nil
+}
+
+// ResubscribeToPendingTransactions replaces any cached pending transaction
+// subscription for id with a fresh websocket subscription.
+func (c *Client) ResubscribeToPendingTransactions(ctx context.Context, id string) (*PendingTxSubscription, error) {
+	c.UnsubscribeFromPendingTransactions(id)
+	return c.SubscribeToPendingTransactions(ctx, id)
 }
 
 // UnsubscribeFromNewHeads unsubscribes from new block headers
