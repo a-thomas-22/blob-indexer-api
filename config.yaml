@@ -6,11 +6,13 @@ server:
   port: 8080
   dev_port: 8081
   dev_mode: true
-  # Deployed behind Cloudflare: trust CF-Connecting-IP as the real client IP for
-  # rate limiting and the WebSocket per-IP connection caps. Spoof-safe only when
-  # the origin refuses non-Cloudflare ingress (see the Cloudflare NetworkPolicy).
-  trusted_ip_headers:
-    - CF-Connecting-IP
+  # Real client IP source for rate limiting and the WebSocket per-IP connection
+  # caps. Empty by default (falls back to RemoteAddr). Set this to a proxy's
+  # client-IP header ONLY when the origin refuses direct, non-proxy ingress —
+  # the header is otherwise spoofable. Behind Cloudflare:
+  #   trusted_ip_headers:
+  #     - CF-Connecting-IP
+  trusted_ip_headers: []
   rate_limit_rps: 100
   rate_limit_burst: 200
   aggregate_rate_limit_rps: 5
