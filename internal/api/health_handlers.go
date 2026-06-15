@@ -49,7 +49,10 @@ func (a *API) Readyz(w http.ResponseWriter, r *http.Request) {
 
 	var ok int
 	if err := a.db.GetContext(ctx, &ok, "SELECT 1"); err != nil {
-		logger.Warn("Readiness probe failed: database unreachable", zap.Error(err))
+		// Debug level: the kubelet hits /readyz repeatedly while the DB is
+		// unreachable, and the 503 already surfaces the state — logging at warn
+		// would flood logs and trigger noisy alerts during an outage.
+		logger.Debug("Readiness probe failed: database unreachable", zap.Error(err))
 		a.respondJSON(w, http.StatusServiceUnavailable, HealthResponse{Status: "unavailable"})
 		return
 	}

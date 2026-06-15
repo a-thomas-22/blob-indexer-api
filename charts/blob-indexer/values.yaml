@@ -157,10 +157,13 @@ appConfig:
     port: 8080
     dev_port: 0
     dev_mode: false
-    # Enable when the API is only reachable through trusted proxies.
-    # For Cloudflare, use:
-    # trusted_ip_headers:
-    #   - CF-Connecting-IP
+    # Real client IP source for rate limiting and the WebSocket per-IP
+    # connection caps. Empty by default (falls back to RemoteAddr). Set this to
+    # a proxy's client-IP header ONLY when origin ingress is restricted to that
+    # proxy — the header is otherwise spoofable. For Cloudflare, set:
+    #   trusted_ip_headers:
+    #     - CF-Connecting-IP
+    # and restrict ingress to Cloudflare's IP ranges (see issue #248).
     trusted_ip_headers: []
     rate_limit_rps: 100
     rate_limit_burst: 200
