@@ -181,6 +181,12 @@ func TestGetAttributionUsageChart_SuccessAndZeroFill(t *testing.T) {
 			if !strings.Contains(query, "LIMIT $7") || !strings.Contains(query, "bucketed_usage") {
 				t.Fatalf("unexpected attribution query: %s", query)
 			}
+			if !strings.Contains(query, "FLOOR(EXTRACT(EPOCH FROM bl.timestamp)") || !strings.Contains(query, "FROM bounds b") {
+				t.Fatalf("expected raw attribution query to bucket one bounded blob scan: %s", query)
+			}
+			if strings.Contains(query, "FROM buckets bu") {
+				t.Fatalf("expected raw attribution query not to join blobs once per bucket: %s", query)
+			}
 			if len(args) != 7 {
 				t.Fatalf("expected 7 args, got %d", len(args))
 			}
@@ -321,6 +327,52 @@ func TestGetCostComparisonChart_Success(t *testing.T) {
 	}
 	if resp.Data.Summary.SavingsPercent != 93.75 {
 		t.Fatalf("unexpected summary: %+v", resp.Data.Summary)
+	}
+}
+
+func TestGetCostComparisonChart_MinuteUsesSingleRangeScan(t *testing.T) {
+	bucket := time.Date(2026, 5, 24, 11, 0, 0, 0, time.UTC)
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if !strings.Contains(query, "range_blobs AS MATERIALIZED") || !strings.Contains(query, "FLOOR(EXTRACT(EPOCH FROM bl.timestamp)") {
+				t.Fatalf("expected raw cost query to bucket one bounded blob scan: %s", query)
+			}
+			if strings.Contains(query, "blob_chart_rollups") {
+				t.Fatalf("expected minute granularity to read raw blobs, got rollup query: %s", query)
+			}
+			if strings.Contains(query, "bl.timestamp >= b.bucket_start") {
+				t.Fatalf("expected raw cost query not to join blobs once per bucket: %s", query)
+			}
+			if len(args) != 7 {
+				t.Fatalf("expected 7 args, got %d", len(args))
+			}
+			if args[4] != int64(300) || args[6] != calldataGasPerByte {
+				t.Fatalf("unexpected args: %#v", args)
+			}
+			setSliceResult(dest, []costComparisonChartRow{
+				{
+					Timestamp:                        bucket,
+					RangeStart:                       bucket,
+					RangeEnd:                         bucket.Add(24 * time.Hour),
+					BlobCostWei:                      "0",
+					CalldataEquivalentCostWei:        "0",
+					SavingsWei:                       "0",
+					SummaryBlobCostWei:               "0",
+					SummaryCalldataEquivalentCostWei: "0",
+					SummarySavingsWei:                "0",
+				},
+			})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?range=24h&granularity=auto", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetCostComparisonChart(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 }
 
