@@ -33,6 +33,186 @@ func newTestWSAPI(t *testing.T) *API {
 	}
 }
 
+// wsDialStatus dials the test server's /ws endpoint (network=sepolia) with
+// optional request headers and returns the handshake status code, closing any
+// connection and response body for the caller. A status of 0 means no response
+// was received.
+func wsDialStatus(t *testing.T, serverURL string, header http.Header) int {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(serverURL, "http") + "/ws?network=sepolia"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if conn != nil {
+		conn.Close()
+	}
+	if resp == nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	_ = err
+	return resp.StatusCode
+}
+
+func TestWSCheckOrigin(t *testing.T) {
+	allowList := config.CORSConfig{
+		Enabled:        true,
+		AllowedOrigins: []string{"https://app.example.com"},
+	}
+
+	tests := []struct {
+		name   string
+		cfg    config.CORSConfig
+		origin string
+		want   bool
+	}{
+		{"allowed origin", allowList, "https://app.example.com", true},
+		{"blocked origin", allowList, "https://evil.example.com", false},
+		{"empty origin allowed", allowList, "", true},
+		{"allow all origins", config.CORSConfig{Enabled: true, AllowAllOrigins: true}, "https://evil.example.com", true},
+		{"cors disabled is permissive", config.CORSConfig{Enabled: false}, "https://evil.example.com", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			check := wsCheckOrigin(newCORSPolicy(tt.cfg))
+			r := httptest.NewRequest(http.MethodGet, "/ws", http.NoBody)
+			if tt.origin != "" {
+				r.Header.Set("Origin", tt.origin)
+			}
+			if got := check(r); got != tt.want {
+				t.Errorf("wsCheckOrigin(%q) = %v, want %v", tt.origin, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleWebSocket_OriginAllowed(t *testing.T) {
+	api := newTestWSAPI(t)
+	api.config.CORS = config.CORSConfig{
+		Enabled:        true,
+		AllowedOrigins: []string{"https://app.example.com"},
+	}
+
+	r := chi.NewRouter()
+	r.Get("/ws", api.HandleWebSocket)
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	header := http.Header{"Origin": []string{"https://app.example.com"}}
+	if got := wsDialStatus(t, server.URL, header); got != http.StatusSwitchingProtocols {
+		t.Errorf("got status %d, want %d", got, http.StatusSwitchingProtocols)
+	}
+}
+
+func TestHandleWebSocket_OriginBlocked(t *testing.T) {
+	api := newTestWSAPI(t)
+	api.config.CORS = config.CORSConfig{
+		Enabled:        true,
+		AllowedOrigins: []string{"https://app.example.com"},
+	}
+
+	r := chi.NewRouter()
+	r.Get("/ws", api.HandleWebSocket)
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	header := http.Header{"Origin": []string{"https://evil.example.com"}}
+	if got := wsDialStatus(t, server.URL, header); got != http.StatusForbidden {
+		t.Errorf("got status %d, want %d", got, http.StatusForbidden)
+	}
+
+	// A blocked upgrade must not leak an admission slot.
+	api.hub.admitMu.Lock()
+	total := api.hub.total
+	api.hub.admitMu.Unlock()
+	if total != 0 {
+		t.Errorf("blocked origin leaked an admission slot: total=%d", total)
+	}
+}
+
+func TestHandleWebSocket_GlobalCapRejected(t *testing.T) {
+	api := newTestWSAPI(t)
+	api.config.WebSocket.MaxClients = 1
+
+	r := chi.NewRouter()
+	r.Get("/ws", api.HandleWebSocket)
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws?network=sepolia"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("first dial should succeed: %v", err)
+	}
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
+	defer conn.Close()
+
+	// Second connection exceeds the global cap and must be rejected.
+	if got := wsDialStatus(t, server.URL, nil); got != http.StatusTooManyRequests {
+		t.Errorf("got status %d, want %d", got, http.StatusTooManyRequests)
+	}
+}
+
+func TestHandleWebSocket_PerIPCapRejected(t *testing.T) {
+	api := newTestWSAPI(t)
+	api.config.WebSocket.MaxConnsPerIP = 1
+
+	r := chi.NewRouter()
+	r.Get("/ws", api.HandleWebSocket)
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws?network=sepolia"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("first dial should succeed: %v", err)
+	}
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
+	defer conn.Close()
+
+	// Same loopback IP — second connection exceeds the per-IP cap.
+	if got := wsDialStatus(t, server.URL, nil); got != http.StatusTooManyRequests {
+		t.Errorf("got status %d, want %d", got, http.StatusTooManyRequests)
+	}
+}
+
+func TestHandleWebSocket_CapReleasedOnDisconnect(t *testing.T) {
+	api := newTestWSAPI(t)
+	api.config.WebSocket.MaxConnsPerIP = 1
+
+	r := chi.NewRouter()
+	r.Get("/ws", api.HandleWebSocket)
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws?network=sepolia"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("first dial should succeed: %v", err)
+	}
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
+
+	// Close the first connection and wait for the hub to process unregister.
+	conn.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	var got int
+	for time.Now().Before(deadline) {
+		got = wsDialStatus(t, server.URL, nil)
+		if got == http.StatusSwitchingProtocols {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got != http.StatusSwitchingProtocols {
+		t.Fatalf("reconnect after disconnect should succeed, got status %d", got)
+	}
+}
+
 func TestHandleWebSocket_Success(t *testing.T) {
 	api := newTestWSAPI(t)
 

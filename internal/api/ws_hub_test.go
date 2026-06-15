@@ -209,6 +209,168 @@ func TestHub_ClientCount(t *testing.T) {
 	}
 }
 
+func TestHub_Admit_GlobalCap(t *testing.T) {
+	hub := NewHub()
+
+	if !hub.admit("1.1.1.1", 2, 0) {
+		t.Fatal("first admit should succeed")
+	}
+	if !hub.admit("2.2.2.2", 2, 0) {
+		t.Fatal("second admit should succeed")
+	}
+	if hub.admit("3.3.3.3", 2, 0) {
+		t.Fatal("third admit should be rejected by the global cap")
+	}
+
+	// Releasing a slot frees global capacity for a new connection.
+	hub.release("1.1.1.1")
+	if !hub.admit("3.3.3.3", 2, 0) {
+		t.Fatal("admit should succeed after a slot is released")
+	}
+}
+
+func TestHub_Admit_PerIPCap(t *testing.T) {
+	hub := NewHub()
+
+	if !hub.admit("1.1.1.1", 0, 2) {
+		t.Fatal("first connection from IP should be admitted")
+	}
+	if !hub.admit("1.1.1.1", 0, 2) {
+		t.Fatal("second connection from IP should be admitted")
+	}
+	if hub.admit("1.1.1.1", 0, 2) {
+		t.Fatal("third connection from same IP should be rejected")
+	}
+
+	// A different IP is unaffected by the first IP's count.
+	if !hub.admit("2.2.2.2", 0, 2) {
+		t.Fatal("connection from a different IP should be admitted")
+	}
+
+	// Releasing one slot for the capped IP frees capacity for it.
+	hub.release("1.1.1.1")
+	if !hub.admit("1.1.1.1", 0, 2) {
+		t.Fatal("admit should succeed after the IP releases a slot")
+	}
+}
+
+func TestHub_Admit_Unlimited(t *testing.T) {
+	hub := NewHub()
+	for i := 0; i < 100; i++ {
+		if !hub.admit("1.1.1.1", 0, 0) {
+			t.Fatalf("admit %d should succeed when caps are disabled", i)
+		}
+	}
+}
+
+func TestHub_Release_DoesNotUnderflow(t *testing.T) {
+	hub := NewHub()
+	// Releasing without a prior admit must not panic or go negative.
+	hub.release("1.1.1.1")
+	hub.release("")
+
+	if !hub.admit("1.1.1.1", 1, 1) {
+		t.Fatal("admit should succeed after spurious releases")
+	}
+	if hub.admit("1.1.1.1", 1, 1) {
+		t.Fatal("global cap should still be enforced after spurious releases")
+	}
+}
+
+func TestHub_Unregister_ReleasesSlot(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	// Reserve a slot the way the upgrade handler does.
+	if !hub.admit("1.1.1.1", 1, 1) {
+		t.Fatal("admit should succeed")
+	}
+	client := &Client{
+		hub:         hub,
+		send:        make(chan []byte, wsSendBufferSize),
+		networkName: "sepolia",
+		remoteIP:    "1.1.1.1",
+	}
+	hub.register <- client
+	time.Sleep(20 * time.Millisecond)
+
+	// The cap is full while the client is connected.
+	if hub.admit("1.1.1.1", 1, 1) {
+		hub.release("1.1.1.1")
+		t.Fatal("cap should be full while the client is connected")
+	}
+
+	hub.unregister <- client
+	time.Sleep(20 * time.Millisecond)
+
+	// Disconnect must release the slot so a new connection is admitted.
+	if !hub.admit("1.1.1.1", 1, 1) {
+		t.Fatal("slot should be released after the client unregisters")
+	}
+}
+
+func TestHub_SlowClientDrop_ReleasesSlot(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	if !hub.admit("1.1.1.1", 1, 1) {
+		t.Fatal("admit should succeed")
+	}
+	client := &Client{
+		hub:         hub,
+		send:        make(chan []byte, 1),
+		networkName: "sepolia",
+		remoteIP:    "1.1.1.1",
+	}
+	hub.register <- client
+	time.Sleep(20 * time.Millisecond)
+
+	// Fill the buffer, then force a drop on the next broadcast.
+	hub.BroadcastEvent("sepolia", WSEvent{Type: EventPing})
+	time.Sleep(20 * time.Millisecond)
+	hub.BroadcastEvent("sepolia", WSEvent{Type: EventPing})
+	time.Sleep(50 * time.Millisecond)
+
+	// Dropping the slow client must release its admission slot.
+	if !hub.admit("1.1.1.1", 1, 1) {
+		t.Fatal("slot should be released after the slow client is dropped")
+	}
+}
+
+func TestHub_Stop_ReleasesSlots(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+
+	if !hub.admit("1.1.1.1", 0, 1) {
+		t.Fatal("admit should succeed")
+	}
+	client := &Client{
+		hub:         hub,
+		send:        make(chan []byte, wsSendBufferSize),
+		networkName: "sepolia",
+		remoteIP:    "1.1.1.1",
+	}
+	hub.register <- client
+	time.Sleep(20 * time.Millisecond)
+
+	hub.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	// After shutdown the per-IP accounting is cleared.
+	hub.admitMu.Lock()
+	total := hub.total
+	perIP := len(hub.perIP)
+	hub.admitMu.Unlock()
+	if total != 0 {
+		t.Errorf("got total=%d, want 0 after Stop", total)
+	}
+	if perIP != 0 {
+		t.Errorf("got %d per-IP entries, want 0 after Stop", perIP)
+	}
+}
+
 func TestHub_BroadcastEvent_FullChannelDropsEvent(t *testing.T) {
 	hub := NewHub()
 	// Don't run the hub — fill the broadcast channel to test the default case.

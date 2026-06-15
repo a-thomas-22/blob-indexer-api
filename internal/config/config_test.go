@@ -24,6 +24,12 @@ func TestLoadForAPI(t *testing.T) {
 	if cfg.Database.SchemaPollInterval != 2*time.Second {
 		t.Errorf("Expected schema poll interval to default to 2s, got: %s", cfg.Database.SchemaPollInterval)
 	}
+	if cfg.WebSocket.MaxClients != 10000 {
+		t.Errorf("Expected websocket max_clients to default to 10000, got: %d", cfg.WebSocket.MaxClients)
+	}
+	if cfg.WebSocket.MaxConnsPerIP != 32 {
+		t.Errorf("Expected websocket max_conns_per_ip to default to 32, got: %d", cfg.WebSocket.MaxConnsPerIP)
+	}
 
 	if len(cfg.Networks) == 0 {
 		t.Fatal("Expected at least one network")
