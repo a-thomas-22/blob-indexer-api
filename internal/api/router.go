@@ -237,6 +237,13 @@ func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) 
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Timeout(60 * time.Second))
 
+		// Health probes. healthz is DB-independent (liveness); readyz pings the
+		// database (readiness). Per-IP rate limiting keys on the caller, so the
+		// kubelet's probe traffic has its own bucket and is not starved by
+		// external load.
+		r.Get("/healthz", a.Healthz)
+		r.Get("/readyz", a.Readyz)
+
 		// Networks endpoint
 		r.Route("/networks", func(r chi.Router) {
 			r.Get("/", a.GetNetworks)
