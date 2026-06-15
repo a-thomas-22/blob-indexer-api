@@ -52,6 +52,18 @@ data:
       blob_list_request_timeout: {{ .Values.appConfig.attribution.blob_list_request_timeout | quote }}
     {{- if .Values.appConfig.networks }}
     networks:
-      {{- toYaml .Values.appConfig.networks | nindent 6 }}
+      {{- /*
+        rpc_url is intentionally stripped here: it embeds a provider API key and
+        is injected at runtime as NETWORK_<NAME>_RPC_URL from a Secret (see
+        rpc-secret.yaml). Every other field is preserved verbatim (and with its
+        original type) so the ConfigMap stays credential-free without dropping
+        config. rpc_url is re-emitted as "" so the app's empty-string default is
+        explicit.
+      */}}
+      {{- range .Values.appConfig.networks }}
+      {{- $network := omit . "rpc_url" }}
+      {{- $_ := set $network "rpc_url" "" }}
+      - {{ toYaml $network | nindent 8 | trim }}
+      {{- end }}
     {{- end }}
 {{- end }}

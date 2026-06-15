@@ -57,7 +57,13 @@ appConfig:
       start_block: "LATEST-10"
       enabled: true
 
+# The test image is built from this branch, which predates the dedicated
+# /api/v1/healthz and /api/v1/readyz endpoints (added by a sibling app PR).
+# Point the probes at the always-present /api/v1/status so ct install can reach
+# readiness. Production installs use the dedicated endpoints from values.yaml.
 healthCheck:
   path: /api/v1/status
+  livenessPath: /api/v1/status
+  readinessPath: /api/v1/status
   initialDelaySeconds: 15
   periodSeconds: 5

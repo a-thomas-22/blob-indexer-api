@@ -137,6 +137,7 @@ KIND_CLUSTER_NAME ?= blob-indexer-test
 
 chart-template-test:
 	bash charts/blob-indexer/tests/database-secret-template-test.sh
+	bash charts/blob-indexer/tests/rpc-secret-template-test.sh
 
 chart-lint:
 	ct lint --config charts/ct.yaml

@@ -48,6 +48,9 @@ spec:
         {{- if .Values.databaseSecret.create }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
+        {{- if include "blob-indexer.createRpcSecret" . }}
+        checksum/rpc-secret: {{ include (print $.Template.BasePath "/rpc-secret.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -73,13 +76,52 @@ spec:
                 secretKeyRef:
                   name: {{ include "blob-indexer.applicationDatabaseSecretName" . }}
                   key: {{ include "blob-indexer.applicationDatabaseSecretKey" . }}
+            {{- include "blob-indexer.rpcEnv" . | nindent 12 }}
           volumeMounts:
             - name: config-volume
               mountPath: /etc/config
+            {{- if .Values.indexer.livenessProbe.enabled }}
+            - name: indexer-heartbeat
+              mountPath: /var/run/indexer
+            {{- end }}
+          {{- with .Values.indexer.livenessProbe }}
+          {{- if .enabled }}
+          livenessProbe:
+            {{- /*
+              Deliberately RPC-independent: a liveness probe that pinged the
+              upstream provider would trigger restart storms during provider
+              outages. The default exec probe checks a heartbeat file the
+              process is expected to refresh. The indexer binary does not yet
+              write this file, so the probe is disabled by default.
+              TODO(indexer-liveness): enable once the indexer writes
+              `indexer.heartbeatPath` (or exposes a local health port) and flip
+              indexer.livenessProbe.enabled to true.
+            */}}
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - >-
+                  test -f {{ .heartbeatPath | quote }} &&
+                  test "$(( $(date +%s) - $(stat -c %Y {{ .heartbeatPath | quote }}) ))"
+                  -lt {{ .maxStaleSeconds | int }}
+            initialDelaySeconds: {{ .initialDelaySeconds }}
+            periodSeconds: {{ .periodSeconds }}
+            timeoutSeconds: {{ .timeoutSeconds }}
+            failureThreshold: {{ .failureThreshold }}
+          {{- end }}
+          {{- end }}
           resources:
             {{- toYaml (.Values.indexer.resources | default .Values.resources) | nindent 12 }}
       volumes:
         - name: config-volume
           configMap:
             name: {{ include "blob-indexer.fullname" . }}-config
+        {{- if .Values.indexer.livenessProbe.enabled }}
+        # Writable scratch volume for the liveness heartbeat file. Required
+        # because the pod runs with readOnlyRootFilesystem: true, so the
+        # heartbeat path must live on a mounted writable volume.
+        - name: indexer-heartbeat
+          emptyDir: {}
+        {{- end }}
 {{- end }}

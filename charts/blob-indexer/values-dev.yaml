@@ -57,6 +57,12 @@ appConfig:
       start_block: "LATEST-300"
       enabled: true
 
+# Local dev images are built from the working tree, which may predate the
+# dedicated /api/v1/healthz and /api/v1/readyz endpoints. Keep probes on the
+# always-present /api/v1/status until those land.
 healthCheck:
+  path: /api/v1/status
+  livenessPath: /api/v1/status
+  readinessPath: /api/v1/status
   initialDelaySeconds: 10
   periodSeconds: 5

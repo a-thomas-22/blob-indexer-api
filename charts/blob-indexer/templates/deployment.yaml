@@ -23,6 +23,9 @@ spec:
         {{- if .Values.databaseSecret.create }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
+        {{- if include "blob-indexer.createRpcSecret" . }}
+        checksum/rpc-secret: {{ include (print $.Template.BasePath "/rpc-secret.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -57,18 +60,23 @@ spec:
                 secretKeyRef:
                   name: {{ include "blob-indexer.applicationDatabaseSecretName" . }}
                   key: {{ include "blob-indexer.applicationDatabaseSecretKey" . }}
+            {{- include "blob-indexer.rpcEnv" . | nindent 12 }}
           volumeMounts:
             - name: config-volume
               mountPath: /etc/config
           livenessProbe:
             httpGet:
-              path: {{ .Values.healthCheck.path }}
+              {{- /* Liveness must not depend on the database: /api/v1/healthz is a
+                     pure-process check so DB blips don't trigger restart storms. */}}
+              path: {{ .Values.healthCheck.livenessPath | default .Values.healthCheck.path }}
               port: http
             initialDelaySeconds: {{ .Values.healthCheck.initialDelaySeconds }}
             periodSeconds: {{ .Values.healthCheck.periodSeconds }}
           readinessProbe:
             httpGet:
-              path: {{ .Values.healthCheck.path }}
+              {{- /* Readiness pings the DB (/api/v1/readyz) so traffic only
+                     reaches pods that can actually serve queries. */}}
+              path: {{ .Values.healthCheck.readinessPath | default .Values.healthCheck.path }}
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5

@@ -24,6 +24,25 @@ indexer:
   image:
     repository: blob-indexer-api-indexer
   resources: {}
+  # Indexer liveness probe. Deliberately RPC-independent so that an upstream
+  # provider outage does not trigger a restart storm. The probe checks a
+  # heartbeat file that the indexer process is expected to refresh.
+  #
+  # The indexer binary does not yet write this heartbeat file, so the probe is
+  # DISABLED by default. Enable it only once the process refreshes heartbeatPath
+  # (or a local health endpoint is wired up). See statefulset.yaml TODO.
+  livenessProbe:
+    enabled: false
+    # Must live on a writable mounted volume: the pod runs with a read-only root
+    # filesystem, so when this probe is enabled the chart mounts an emptyDir at
+    # /var/run/indexer to hold the heartbeat file.
+    heartbeatPath: /var/run/indexer/heartbeat
+    # Restart only if the heartbeat is older than this many seconds.
+    maxStaleSeconds: 300
+    initialDelaySeconds: 120
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 6
 
 service:
   type: ClusterIP
@@ -96,6 +115,36 @@ migrations:
     name: ""
     key: ""  # Defaults to databaseSecret.key.
 
+# Per-network RPC URL Secret. RPC URLs embed a provider API key (Alchemy,
+# Infura, ...) and MUST be treated as credentials — never put them in the
+# credential-free ConfigMap.
+#
+# The chart injects each network's RPC URL as an env var
+# NETWORK_<NAME>_RPC_URL (uppercased network name) sourced from a Kubernetes
+# Secret via secretKeyRef. The application reads these overrides
+# (see internal/config/config.go).
+#
+# Two ways to supply the Secret:
+#   1. existingSecret (RECOMMENDED for prod): provision the Secret out-of-band
+#      (sealed-secrets / external-secrets / vault) with one key per network,
+#      named exactly NETWORK_<UPPER(name)>_RPC_URL, then set:
+#        rpcSecret.existingSecret: my-rpc-secret
+#      Do NOT set appConfig.networks[].rpc_url in this case.
+#   2. Chart-managed (local/dev only): set appConfig.networks[].rpc_url and the
+#      chart renders a Secret for you. WARNING: this stores the credential in
+#      Helm release history and any values file — acceptable for local dev,
+#      NOT for shared/non-local installs.
+#
+# The env var / Secret key is "NETWORK_<UPPER(name)>_RPC_URL", matching the app's
+# lookup byte-for-byte (no character substitution). Network names must use only
+# characters valid in an env var name / Secret key ([A-Za-z0-9_.-]).
+rpcSecret:
+  # Name of a pre-provisioned Secret holding NETWORK_<NAME>_RPC_URL keys. When
+  # set, the chart renders no Secret and ignores appConfig.networks[].rpc_url.
+  existingSecret: ""
+  # Override the chart-managed Secret name (defaults to "<fullname>-rpc").
+  name: ""
+
 # Application configuration -- rendered into a ConfigMap as YAML.
 # Maps directly to the Config struct in internal/config/config.go.
 appConfig:
@@ -154,7 +203,12 @@ appConfig:
   networks:
     - name: "mainnet"
       chain_id: 1
-      rpc_url: ""  # Set via --set appConfig.networks[0].rpc_url=...
+      # SECURITY: rpc_url is a credential (it embeds a provider API key). For
+      # non-local installs leave it empty and provide it via
+      # rpcSecret.existingSecret instead — setting it here renders a
+      # chart-managed Secret and persists the key in Helm release history. It is
+      # NEVER written to the ConfigMap.
+      rpc_url: ""
       start_block: "LATEST-1000"
       enabled: true
 
@@ -162,9 +216,23 @@ appConfig:
 externalDatabase:
   url: ""
 
-# Health check configuration
+# API health check configuration.
+#   path          — endpoint used by both probes when livenessPath/readinessPath
+#                   are unset (the default).
+#   livenessPath  — should NOT touch the database (a DB blip must not restart the
+#                   pod). Once the app image exposes /api/v1/healthz (no DB), set
+#                   this to /api/v1/healthz.
+#   readinessPath — should ping the database so traffic only reaches pods that
+#                   can serve queries. Once the app image exposes /api/v1/readyz
+#                   (DB ping), set this to /api/v1/readyz.
+# Defaults are intentionally empty so both probes fall back to `path`
+# (/api/v1/status), keeping the chart compatible with app images that predate
+# the dedicated health endpoints. Flip them in a release coordinated with the
+# app version that adds /healthz + /readyz.
 healthCheck:
   path: /api/v1/status
+  livenessPath: ""
+  readinessPath: ""
   initialDelaySeconds: 60
   periodSeconds: 15
 
