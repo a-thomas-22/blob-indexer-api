@@ -48,6 +48,18 @@ const (
 	// failedBlockSafetyRetryInterval keeps failed blocks recoverable without retrying them every scan forever.
 	failedBlockSafetyRetryInterval = time.Hour
 
+	// reindexRequestPollInterval controls how often the indexer checks for
+	// operator-requested reindex ranges in block_reindex_requests.
+	reindexRequestPollInterval = 30 * time.Second
+
+	// reindexRequestCompletionPollInterval controls how often a queued reindex
+	// request is checked for completion in indexed_blocks.
+	reindexRequestCompletionPollInterval = 5 * time.Second
+
+	// reindexRequestStaleAfter allows a new pod to reclaim a request that was
+	// left processing by a crashed or force-deleted indexer.
+	reindexRequestStaleAfter = 15 * time.Minute
+
 	// bytesPerBlob is the on-wire blob size in bytes (EIP-4844 fixes blobs at
 	// 4096 field elements of 32 bytes each = 131072 bytes). It is numerically
 	// equal to params.BlobTxBlobGasPerBlob but expresses a byte quantity, not
@@ -74,6 +86,15 @@ type backfillCursorState struct {
 	activeSet    bool
 	currentBlock *uint64
 	targetBlock  *uint64
+}
+
+type blockReindexRequest struct {
+	ID         int64  `db:"id"`
+	NetworkID  int    `db:"network_id"`
+	StartBlock uint64 `db:"start_block"`
+	EndBlock   uint64 `db:"end_block"`
+	Attempts   int    `db:"attempts"`
+	ClaimedBy  string `db:"claimed_by"`
 }
 
 type blobMetrics struct {
@@ -312,6 +333,13 @@ func (i *Indexer) Start() error {
 	go func() {
 		defer i.wg.Done()
 		i.runGapScanner()
+	}()
+
+	// Start the manual reindex request scanner.
+	i.wg.Add(1)
+	go func() {
+		defer i.wg.Done()
+		i.runReindexRequestScanner()
 	}()
 
 	// If websocket is available, subscribe to new blocks and pending transactions
@@ -1707,6 +1735,272 @@ func (i *Indexer) deleteReindexRange(startBlock, endBlock uint64) error {
 	}
 
 	return nil
+}
+
+func (i *Indexer) runReindexRequestScanner() {
+	logger.Info("Reindex request scanner starting", zap.String("network", i.network.Name))
+
+	ticker := time.NewTicker(reindexRequestPollInterval)
+	defer ticker.Stop()
+
+	for {
+		if !i.processNextReindexRequest() {
+			select {
+			case <-i.ctx.Done():
+				logger.Info("Reindex request scanner stopped", zap.String("network", i.network.Name))
+				return
+			case <-ticker.C:
+			}
+		}
+	}
+}
+
+func (i *Indexer) processNextReindexRequest() bool {
+	request, err := i.claimNextReindexRequest()
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false
+		}
+		logger.Error("Failed to claim reindex request",
+			zap.String("network", i.network.Name),
+			zap.Error(err))
+		return false
+	}
+
+	logger.Info("Processing reindex request",
+		zap.String("network", i.network.Name),
+		zap.Int64("request_id", request.ID),
+		zap.Uint64("start_block", request.StartBlock),
+		zap.Uint64("end_block", request.EndBlock),
+		zap.Int("attempts", request.Attempts))
+
+	stopHeartbeat := i.startReindexRequestHeartbeat(request)
+	if err := i.Reindex(request.StartBlock, request.EndBlock); err != nil {
+		stopHeartbeat()
+		i.failReindexRequest(request, err)
+		return true
+	}
+	stopHeartbeat()
+
+	if err := i.waitForReindexRequestCompletion(request); err != nil {
+		i.failReindexRequest(request, err)
+		return true
+	}
+
+	if err := i.completeReindexRequest(request); err != nil {
+		logger.Error("Failed to complete reindex request",
+			zap.String("network", i.network.Name),
+			zap.Int64("request_id", request.ID),
+			zap.Error(err))
+		return true
+	}
+
+	logger.Info("Reindex request completed",
+		zap.String("network", i.network.Name),
+		zap.Int64("request_id", request.ID),
+		zap.Uint64("start_block", request.StartBlock),
+		zap.Uint64("end_block", request.EndBlock))
+
+	return true
+}
+
+func (i *Indexer) claimNextReindexRequest() (blockReindexRequest, error) {
+	var request blockReindexRequest
+	query := `
+		WITH next_request AS (
+			SELECT id
+			FROM block_reindex_requests
+			WHERE network_id = $1
+				AND (
+					status = 'pending'
+					OR (
+						status = 'processing'
+						AND updated_at < NOW() - ($3 * INTERVAL '1 second')
+					)
+				)
+			ORDER BY requested_at, id
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE block_reindex_requests r
+		SET
+			status = 'processing',
+			attempts = attempts + 1,
+			claimed_by = $2,
+			started_at = COALESCE(started_at, NOW()),
+			completed_at = NULL,
+			last_error = NULL,
+			updated_at = NOW()
+		FROM next_request
+		WHERE r.id = next_request.id
+		RETURNING r.id, r.network_id, r.start_block, r.end_block, r.attempts, r.claimed_by
+	`
+	err := i.db.GetContext(
+		i.ctx,
+		&request,
+		query,
+		i.network.ChainID,
+		i.reindexRequestClaimer(),
+		int(reindexRequestStaleAfter.Seconds()),
+	)
+	if err != nil {
+		return blockReindexRequest{}, err
+	}
+	return request, nil
+}
+
+func (i *Indexer) waitForReindexRequestCompletion(request blockReindexRequest) error {
+	ticker := time.NewTicker(reindexRequestCompletionPollInterval)
+	defer ticker.Stop()
+
+	for {
+		missing, err := i.countMissingIndexedBlocks(request.StartBlock, request.EndBlock)
+		if err != nil {
+			return err
+		}
+		if missing == 0 {
+			return nil
+		}
+
+		if err := i.heartbeatReindexRequest(request); err != nil {
+			return err
+		}
+
+		select {
+		case <-i.ctx.Done():
+			return i.ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (i *Indexer) startReindexRequestHeartbeat(request blockReindexRequest) func() {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+
+	go func() {
+		defer close(stopped)
+
+		ticker := time.NewTicker(reindexRequestCompletionPollInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-i.ctx.Done():
+				return
+			case <-ticker.C:
+				if err := i.heartbeatReindexRequest(request); err != nil {
+					logger.Error("Failed to heartbeat reindex request",
+						zap.String("network", i.network.Name),
+						zap.Int64("request_id", request.ID),
+						zap.Error(err))
+					return
+				}
+			}
+		}
+	}()
+
+	return func() {
+		close(done)
+		<-stopped
+	}
+}
+
+func (i *Indexer) countMissingIndexedBlocks(startBlock, endBlock uint64) (int64, error) {
+	var missing int64
+	query := `
+		SELECT ($3::bigint - $2::bigint + 1) - COUNT(*)
+		FROM indexed_blocks
+		WHERE network_id = $1
+			AND block_number >= $2
+			AND block_number <= $3
+	`
+	if err := i.db.GetContext(i.ctx, &missing, query, i.network.ChainID, startBlock, endBlock); err != nil {
+		return 0, fmt.Errorf("failed to count missing reindex blocks: %w", err)
+	}
+	return missing, nil
+}
+
+func (i *Indexer) completeReindexRequest(request blockReindexRequest) error {
+	query := `
+		UPDATE block_reindex_requests
+		SET status = 'completed',
+			completed_at = NOW(),
+			updated_at = NOW()
+		WHERE id = $1
+			AND network_id = $2
+			AND claimed_by = $3
+			AND status = 'processing'
+	`
+	res, err := i.db.ExecContext(i.ctx, query, request.ID, i.network.ChainID, request.ClaimedBy)
+	if err != nil {
+		return fmt.Errorf("failed to mark reindex request complete: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to inspect completed reindex request update: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("failed to mark reindex request %d complete: request is no longer claimed by %q", request.ID, request.ClaimedBy)
+	}
+	return nil
+}
+
+func (i *Indexer) failReindexRequest(request blockReindexRequest, requestErr error) {
+	query := `
+		UPDATE block_reindex_requests
+		SET status = 'failed',
+			last_error = $3,
+			completed_at = NOW(),
+			updated_at = NOW()
+		WHERE id = $1
+			AND network_id = $2
+			AND claimed_by = $4
+			AND status = 'processing'
+	`
+	res, err := i.db.ExecContext(i.ctx, query, request.ID, i.network.ChainID, requestErr.Error(), request.ClaimedBy)
+	if err != nil {
+		logger.Error("Failed to mark reindex request failed",
+			zap.String("network", i.network.Name),
+			zap.Int64("request_id", request.ID),
+			zap.Error(err))
+		return
+	}
+	if rows, err := res.RowsAffected(); err == nil && rows == 0 {
+		logger.Warn("Reindex request failure ignored because claim was lost",
+			zap.String("network", i.network.Name),
+			zap.Int64("request_id", request.ID),
+			zap.String("claimed_by", request.ClaimedBy))
+	}
+}
+
+func (i *Indexer) heartbeatReindexRequest(request blockReindexRequest) error {
+	query := `
+		UPDATE block_reindex_requests
+		SET updated_at = NOW()
+		WHERE id = $1
+			AND network_id = $2
+			AND claimed_by = $3
+			AND status = 'processing'
+	`
+	res, err := i.db.ExecContext(i.ctx, query, request.ID, i.network.ChainID, request.ClaimedBy)
+	if err != nil {
+		return fmt.Errorf("failed to heartbeat reindex request: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to inspect reindex request heartbeat: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("reindex request %d is no longer claimed by %q", request.ID, request.ClaimedBy)
+	}
+	return nil
+}
+
+func (i *Indexer) reindexRequestClaimer() string {
+	return fmt.Sprintf("blob-indexer/%s/%s", i.network.Name, i.indexerVersion)
 }
 
 // runGapScanner periodically retries blocks that failed processing

@@ -188,6 +188,7 @@ var allowedTables = map[string]bool{
 	"blob_attribution_claims": true,
 	"indexer_metadata":        true,
 	"indexed_blocks":          true,
+	"block_reindex_requests":  true,
 }
 
 // isAllowedTable checks whether a table name is in the whitelist of allowed tables.
@@ -209,7 +210,7 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting database statistics")
 
 	// Get table statistics
-	tables := []string{"blobs", "blob_users", "blob_attribution_claims", "networks", "indexer_metadata"}
+	tables := []string{"blobs", "blob_users", "blob_attribution_claims", "networks", "indexer_metadata", "block_reindex_requests"}
 	tableStats := make([]TableStat, 0, len(tables))
 	for _, table := range tables {
 		// Validate the table name against the whitelist to prevent SQL injection
