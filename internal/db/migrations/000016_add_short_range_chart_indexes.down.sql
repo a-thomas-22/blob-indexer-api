@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_blob_users_network_lower_address;
+DROP INDEX IF EXISTS idx_blobs_network_confirmed_timestamp_chart_cover;

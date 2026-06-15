@@ -1349,43 +1349,50 @@ const queryCostComparisonTimeChart = `
 		) AS g(bucket_start)
 		WHERE b.range_end > b.range_start
 	),
-	bucket_costs AS (
+	range_blobs AS MATERIALIZED (
 		SELECT
-			b.bucket_start,
-			COUNT(bl.id)::int AS blob_count,
-			COALESCE(SUM(bl.blob_size_bytes), 0)::bigint AS blob_bytes,
-			COALESCE(SUM(bl.total_cost_eth::numeric), 0)::text AS blob_cost_wei,
-			COALESCE(SUM(bl.blob_size_bytes::numeric * $7::numeric * bl.base_fee_per_blob_gas::numeric), 0)::text AS calldata_equivalent_cost_wei
-		FROM buckets b
-		LEFT JOIN blobs bl
-			ON bl.network_id = $1
-			AND bl.confirmed = true
-			AND bl.timestamp >= b.bucket_start
-			AND bl.timestamp < b.bucket_start + ($5::bigint * INTERVAL '1 second')
-		GROUP BY b.bucket_start
-	),
-	summary_costs AS (
-		SELECT
-			COALESCE(SUM(bl.total_cost_eth::numeric), 0) AS blob_cost_wei,
-			COALESCE(SUM(bl.blob_size_bytes::numeric * $7::numeric * bl.base_fee_per_blob_gas::numeric), 0) AS calldata_equivalent_cost_wei
+			TIMESTAMP 'epoch' + (
+				FLOOR(EXTRACT(EPOCH FROM bl.timestamp) / $5::numeric)::bigint
+				* $5::bigint
+				* INTERVAL '1 second'
+			) AS bucket_start,
+			bl.blob_size_bytes,
+			bl.total_cost_eth,
+			bl.base_fee_per_blob_gas
 		FROM bounds b
-		LEFT JOIN blobs bl
+		JOIN blobs bl
 			ON bl.network_id = $1
 			AND bl.confirmed = true
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
+	),
+	bucket_costs AS (
+		SELECT
+			rb.bucket_start,
+			COUNT(*)::int AS blob_count,
+			COALESCE(SUM(rb.blob_size_bytes), 0)::bigint AS blob_bytes,
+			COALESCE(SUM(rb.total_cost_eth::numeric), 0)::text AS blob_cost_wei,
+			COALESCE(SUM(rb.blob_size_bytes::numeric * $7::numeric * rb.base_fee_per_blob_gas::numeric), 0)::text AS calldata_equivalent_cost_wei
+		FROM range_blobs rb
+		GROUP BY rb.bucket_start
+	),
+	summary_costs AS (
+		SELECT
+			COALESCE(SUM(rb.total_cost_eth::numeric), 0) AS blob_cost_wei,
+			COALESCE(SUM(rb.blob_size_bytes::numeric * $7::numeric * rb.base_fee_per_blob_gas::numeric), 0) AS calldata_equivalent_cost_wei
+		FROM range_blobs rb
 	)
 	SELECT
 		b.bucket_start AS timestamp,
 		b.range_start,
 		b.range_end,
-		bc.blob_count,
-		bc.blob_bytes,
-		bc.blob_cost_wei,
-		bc.calldata_equivalent_cost_wei,
-		(bc.calldata_equivalent_cost_wei::numeric - bc.blob_cost_wei::numeric)::text AS savings_wei,
+		COALESCE(bc.blob_count, 0) AS blob_count,
+		COALESCE(bc.blob_bytes, 0) AS blob_bytes,
+		COALESCE(bc.blob_cost_wei, '0') AS blob_cost_wei,
+		COALESCE(bc.calldata_equivalent_cost_wei, '0') AS calldata_equivalent_cost_wei,
+		(COALESCE(bc.calldata_equivalent_cost_wei, '0')::numeric - COALESCE(bc.blob_cost_wei, '0')::numeric)::text AS savings_wei,
 		CASE
-			WHEN bc.calldata_equivalent_cost_wei::numeric > 0
+			WHEN COALESCE(bc.calldata_equivalent_cost_wei, '0')::numeric > 0
 				THEN ROUND(((bc.calldata_equivalent_cost_wei::numeric - bc.blob_cost_wei::numeric) / bc.calldata_equivalent_cost_wei::numeric) * 100, 6)::float8
 			ELSE 0
 		END AS savings_percent,
@@ -1399,7 +1406,7 @@ const queryCostComparisonTimeChart = `
 			ELSE 0
 		END AS summary_savings_percent
 	FROM buckets b
-	JOIN bucket_costs bc ON bc.bucket_start = b.bucket_start
+	LEFT JOIN bucket_costs bc ON bc.bucket_start = b.bucket_start
 	CROSS JOIN summary_costs sc
 	ORDER BY b.bucket_start ASC
 `
@@ -1476,7 +1483,7 @@ const queryCostComparisonBlockChart = `
 // the aggregated count for rollup rows) so both sources weight identically.
 func attributionEntityBaseSQL(limitPlaceholder string) string {
 	return `
-	entity_base AS (
+	entity_base AS MATERIALIZED (
 		SELECT
 			src.bucket_start,
 			src.from_address,
@@ -1590,21 +1597,25 @@ var queryAttributionUsageTimeChart = `
 		) AS g(bucket_start)
 		WHERE b.range_end > b.range_start
 	),
-	attribution_source AS (
+	attribution_source AS MATERIALIZED (
 		SELECT
-			bu.bucket_start,
+			TIMESTAMP 'epoch' + (
+				FLOOR(EXTRACT(EPOCH FROM bl.timestamp) / $5::numeric)::bigint
+				* $5::bigint
+				* INTERVAL '1 second'
+			) AS bucket_start,
 			bl.from_address,
 			1::bigint AS blob_count,
 			bl.total_cost_eth::numeric AS total_cost_wei,
 			COALESCE(bl.blob_gas_used, 0)::bigint AS blob_gas_used,
 			COALESCE(NULLIF(BTRIM(bl.user_attribution), ''), NULLIF(BTRIM(known.name), ''), '') AS raw_name,
 			COALESCE(NULLIF(BTRIM(known.category), ''), '') AS raw_category
-		FROM buckets bu
+		FROM bounds b
 		JOIN blobs bl
 			ON bl.network_id = $1
 			AND bl.confirmed = true
-			AND bl.timestamp >= bu.bucket_start
-			AND bl.timestamp < bu.bucket_start + ($5::bigint * INTERVAL '1 second')
+			AND bl.timestamp >= b.range_start
+			AND bl.timestamp < b.range_end
 		LEFT JOIN blob_users known
 			ON known.network_id = bl.network_id
 			AND LOWER(known.address) = LOWER(bl.from_address)
@@ -1643,7 +1654,7 @@ var queryAttributionUsageBlockChart = `
 			AND bm.block_timestamp >= b.range_start
 			AND bm.block_timestamp < b.range_end
 	),
-	attribution_source AS (
+	attribution_source AS MATERIALIZED (
 		SELECT
 			bu.bucket_start,
 			bl.from_address,
@@ -1933,7 +1944,7 @@ var queryAttributionUsageTimeChartRollup = `
 		) AS g(bucket_start)
 		WHERE b.range_end > b.range_start
 	),
-	attribution_source AS (
+	attribution_source AS MATERIALIZED (
 		SELECT
 			r.bucket_start,
 			r.from_address,

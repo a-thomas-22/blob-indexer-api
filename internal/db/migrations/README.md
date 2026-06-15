@@ -7,28 +7,7 @@ mid-flight. These rules exist because migration 12's multi-minute backfill was
 killed by an Argo CD sync retry on 2026-06-11, which left the schema dirty and
 wedged all deploys until manual recovery.
 
-## 1. Keep schema migrations fast
-
-A migration file should contain DDL (tables, indexes, triggers, functions) and
-only trivial DML. Target seconds, not minutes. Anything that scans or rewrites
-a large table (the `blobs` table is ~48M rows and growing) does **not** belong
-in a migration file.
-
-Heavy backfills instead run **outside** the schema migration, chunked and
-idempotently:
-
-- The migration creates the destination table/columns and any triggers that
-  keep *new* data consistent, plus (if needed) a progress-tracking table.
-- The backfill recomputes in bounded chunks (per address range, per block
-  range, per bucket), records progress as it goes, and uses
-  `ON CONFLICT ... DO UPDATE` / recompute-from-source semantics so re-running
-  a chunk is harmless.
-- Run the backfill either from the migrate binary after `m.Up()` returns, or
-  as a separate post-install Job — never inside the `.up.sql`.
-
-A kill mid-backfill then costs one chunk of progress, not the schema state.
-
-## 2. No explicit transaction control
+## 1. No explicit transaction control
 
 The postgres driver executes each `.sql` file as a single multi-statement
 `Exec`, which PostgreSQL wraps in one implicit transaction. That guarantee is
@@ -42,7 +21,7 @@ Therefore migration files must not contain top-level `BEGIN`, `COMMIT`,
 cannot run inside a transaction, such as `CREATE INDEX CONCURRENTLY`.
 `TestBundledMigrationsAreTransactionSafe` enforces this in CI.
 
-## 3. Write idempotent migrations
+## 2. Write idempotent migrations
 
 Use `IF NOT EXISTS` / `IF EXISTS` / `CREATE OR REPLACE` /
 `ON CONFLICT ... DO UPDATE` everywhere they apply. The dirty-flag recovery
@@ -54,7 +33,7 @@ an error. The same applies if an operator manually forces versions around.
 
 If a migration run dies between writing the dirty flag and clearing it,
 `db.RunMigrations` detects `Dirty database version N`, verifies that
-migration N is bundled and transaction-safe (rule 2), logs loudly, forces the
+migration N is bundled and transaction-safe (rule 1), logs loudly, forces the
 version back to N-1, and re-runs. Manual recovery
 (`migrate ... force <N-1>` + re-run, see the runbook in ops memory) is only
 needed if the migration file violates these rules.
