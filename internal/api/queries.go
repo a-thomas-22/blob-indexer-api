@@ -4,7 +4,7 @@ import "github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 
 const blobSelectColumns = `
 	id,
-	network_id,
+	chain_id,
 	block_number,
 	blob_index,
 	tx_hash,
@@ -13,16 +13,15 @@ const blobSelectColumns = `
 	blob_size_bytes,
 	base_fee_per_blob_gas,
 	tip_per_blob_gas,
-	total_cost_eth,
+	total_cost_wei,
 	timestamp,
 	confirmed,
-	indexer_version,
 	max_fee_per_blob_gas,
 	blob_gas_used
 `
 
 const blockMetricsSelectColumns = `
-	network_id,
+	chain_id,
 	block_number,
 	block_timestamp,
 	blob_count,
@@ -42,7 +41,7 @@ const (
 	// queryLatestBlobs retrieves confirmed blobs ordered by block number descending.
 	queryLatestBlobs = `
 		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = true AND network_id = $1
+		WHERE confirmed = true AND chain_id = $1
 		ORDER BY block_number DESC, blob_index ASC
 		LIMIT $2 OFFSET $3
 	`
@@ -50,7 +49,7 @@ const (
 	// queryMempoolBlobs retrieves unconfirmed (pending) blobs ordered by timestamp descending.
 	queryMempoolBlobs = `
 		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = false AND network_id = $1
+		WHERE confirmed = false AND chain_id = $1
 		ORDER BY timestamp DESC
 		LIMIT $2 OFFSET $3
 	`
@@ -64,7 +63,7 @@ const (
 				max_fee_per_blob_gas,
 				COALESCE(blob_gas_used, blob_size_bytes / 128, 0) AS blob_gas_used
 			FROM blobs
-			WHERE confirmed = false AND network_id = $1
+			WHERE confirmed = false AND chain_id = $1
 			ORDER BY timestamp DESC
 			LIMIT $2
 		),
@@ -108,13 +107,13 @@ const (
 	// queryLatestBlobBaseFee retrieves the newest indexed blob base fee for includability estimates.
 	queryLatestBlobBaseFee = `
 		SELECT blob_base_fee FROM block_metrics
-		WHERE network_id = $1
+		WHERE chain_id = $1
 		ORDER BY block_number DESC
 		LIMIT 1
 	`
 
 	// queryBlobByTxHash retrieves a single blob by transaction hash and network.
-	queryBlobByTxHash = "SELECT " + blobSelectColumns + " FROM blobs WHERE tx_hash = $1 AND network_id = $2"
+	queryBlobByTxHash = "SELECT " + blobSelectColumns + " FROM blobs WHERE tx_hash = $1 AND chain_id = $2"
 
 	// queryTopBlobUsersWithOptions aggregates windowed sender usage ($4 is '24h'
 	// or '7d'; all-history reads use queryTopBlobUsersAll) from hourly chart
@@ -134,14 +133,14 @@ const (
 				COALESCE(NULLIF(MAX(BTRIM(r.user_attribution)), ''), NULLIF(MAX(BTRIM(bu.name)), ''), '') AS user_attribution,
 				COALESCE(NULLIF(MAX(BTRIM(bu.category)), ''), 'unknown') AS category,
 				COALESCE(SUM(r.blob_count), 0)::bigint AS blob_count,
-				COALESCE(SUM(r.total_cost_eth), 0) AS total_cost_eth,
+				COALESCE(SUM(r.total_cost_wei), 0) AS total_cost_wei,
 				MAX(r.bucket_start) AS last_bucket_start
 			FROM blob_chart_rollups r
 			CROSS JOIN window_bounds wb
 			LEFT JOIN blob_users bu
-				ON bu.network_id = r.network_id
+				ON bu.chain_id = r.chain_id
 				AND LOWER(bu.address) = LOWER(r.from_address)
-			WHERE r.network_id = $1
+			WHERE r.chain_id = $1
 				AND r.bucket_seconds = 3600
 				AND r.bucket_start >= wb.start_time
 			GROUP BY r.from_address
@@ -149,7 +148,7 @@ const (
 		totals AS (
 			SELECT
 				COALESCE(SUM(blob_count), 0) AS total_blobs,
-				COALESCE(SUM(total_cost_eth), 0) AS total_spend
+				COALESCE(SUM(total_cost_wei), 0) AS total_spend
 			FROM user_totals
 		)
 		SELECT
@@ -157,26 +156,26 @@ const (
 			user_totals.user_attribution,
 			user_totals.category,
 			user_totals.blob_count,
-			user_totals.total_cost_eth::text AS total_cost_eth,
+			user_totals.total_cost_wei::text AS total_cost_wei,
 			COALESCE(s.last_timestamp, user_totals.last_bucket_start) AS last_timestamp,
 			CASE
 				WHEN totals.total_blobs > 0 THEN ROUND((user_totals.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
 				ELSE 0
 			END AS blob_share_percent,
 			CASE
-				WHEN totals.total_spend > 0 THEN ROUND((user_totals.total_cost_eth / totals.total_spend) * 100, 6)::float8
+				WHEN totals.total_spend > 0 THEN ROUND((user_totals.total_cost_wei / totals.total_spend) * 100, 6)::float8
 				ELSE 0
 			END AS spend_share_percent
 		FROM user_totals
 		LEFT JOIN blob_user_stats s
-			ON s.network_id = $1
+			ON s.chain_id = $1
 			AND s.from_address = user_totals.from_address
 		CROSS JOIN totals
 		ORDER BY
 			CASE WHEN $5 = 'count' THEN user_totals.blob_count END DESC,
-			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_eth END DESC,
+			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_wei END DESC,
 			user_totals.blob_count DESC,
-			user_totals.total_cost_eth DESC,
+			user_totals.total_cost_wei DESC,
 			COALESCE(s.last_timestamp, user_totals.last_bucket_start) DESC
 		LIMIT $2 OFFSET $3
 	`
@@ -189,51 +188,51 @@ const (
 				COALESCE(NULLIF(BTRIM(s.user_attribution), ''), NULLIF(BTRIM(bu.name), ''), '') AS user_attribution,
 				COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown') AS category,
 				s.blob_count,
-				s.total_cost_eth,
+				s.total_cost_wei,
 				s.last_timestamp
 			FROM blob_user_stats s
 			LEFT JOIN blob_users bu
-				ON bu.network_id = s.network_id
+				ON bu.chain_id = s.chain_id
 				AND LOWER(bu.address) = LOWER(s.from_address)
-			WHERE s.network_id = $1
+			WHERE s.chain_id = $1
 				AND $4::text = 'all'
 		),
 		pending AS (
 			SELECT
 				COUNT(*)::bigint AS total_pending_blobs,
-				COALESCE(SUM(total_cost_eth::numeric), 0) AS pending_total_cost
+				COALESCE(SUM(total_cost_wei::numeric), 0) AS pending_total_cost
 			FROM blobs
-			WHERE network_id = $1 AND confirmed = false
+			WHERE chain_id = $1 AND confirmed = false
 		),
 		totals AS (
 			SELECT
 				(COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs) AS total_blobs,
 				(COALESCE(s.sum_total_cost, 0) + p.pending_total_cost) AS total_spend
 			FROM pending p
-			LEFT JOIN network_blob_stats s ON s.network_id = $1
+			LEFT JOIN network_blob_stats s ON s.chain_id = $1
 		)
 		SELECT
 			user_totals.from_address,
 			user_totals.user_attribution,
 			user_totals.category,
 			user_totals.blob_count,
-			user_totals.total_cost_eth::text AS total_cost_eth,
+			user_totals.total_cost_wei::text AS total_cost_wei,
 			user_totals.last_timestamp,
 			CASE
 				WHEN totals.total_blobs > 0 THEN ROUND((user_totals.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
 				ELSE 0
 			END AS blob_share_percent,
 			CASE
-				WHEN totals.total_spend > 0 THEN ROUND((user_totals.total_cost_eth / totals.total_spend) * 100, 6)::float8
+				WHEN totals.total_spend > 0 THEN ROUND((user_totals.total_cost_wei / totals.total_spend) * 100, 6)::float8
 				ELSE 0
 			END AS spend_share_percent
 		FROM user_totals
 		CROSS JOIN totals
 		ORDER BY
 			CASE WHEN $5 = 'count' THEN user_totals.blob_count END DESC,
-			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_eth END DESC,
+			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_wei END DESC,
 			user_totals.blob_count DESC,
-			user_totals.total_cost_eth DESC,
+			user_totals.total_cost_wei DESC,
 			user_totals.last_timestamp DESC
 		LIMIT $2 OFFSET $3
 	`
@@ -254,14 +253,14 @@ const (
 				'' AS user_attribution,
 				'unknown' AS category,
 				COALESCE(SUM(r.blob_count), 0)::bigint AS blob_count,
-				COALESCE(SUM(r.total_cost_eth), 0) AS total_cost_eth,
+				COALESCE(SUM(r.total_cost_wei), 0) AS total_cost_wei,
 				MAX(r.bucket_start) AS last_bucket_start
 			FROM blob_chart_rollups r
 			CROSS JOIN window_bounds wb
 			LEFT JOIN blob_users bu
-				ON bu.network_id = r.network_id
+				ON bu.chain_id = r.chain_id
 				AND LOWER(bu.address) = LOWER(r.from_address)
-			WHERE r.network_id = $1
+			WHERE r.chain_id = $1
 				AND r.bucket_seconds = 3600
 				AND r.bucket_start >= wb.start_time
 			GROUP BY r.from_address
@@ -271,7 +270,7 @@ const (
 		totals AS (
 			SELECT
 				COALESCE(SUM(blob_count), 0) AS total_blobs,
-				COALESCE(SUM(total_cost_eth), 0) AS total_spend
+				COALESCE(SUM(total_cost_wei), 0) AS total_spend
 			FROM user_totals
 		)
 		SELECT
@@ -279,26 +278,26 @@ const (
 			user_totals.user_attribution,
 			user_totals.category,
 			user_totals.blob_count,
-			user_totals.total_cost_eth::text AS total_cost_eth,
+			user_totals.total_cost_wei::text AS total_cost_wei,
 			COALESCE(s.last_timestamp, user_totals.last_bucket_start) AS last_timestamp,
 			CASE
 				WHEN totals.total_blobs > 0 THEN ROUND((user_totals.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
 				ELSE 0
 			END AS blob_share_percent,
 			CASE
-				WHEN totals.total_spend > 0 THEN ROUND((user_totals.total_cost_eth / totals.total_spend) * 100, 6)::float8
+				WHEN totals.total_spend > 0 THEN ROUND((user_totals.total_cost_wei / totals.total_spend) * 100, 6)::float8
 				ELSE 0
 			END AS spend_share_percent
 		FROM user_totals
 		LEFT JOIN blob_user_stats s
-			ON s.network_id = $1
+			ON s.chain_id = $1
 			AND s.from_address = user_totals.from_address
 		CROSS JOIN totals
 		ORDER BY
 			CASE WHEN $5 = 'count' THEN user_totals.blob_count END DESC,
-			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_eth END DESC,
+			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_wei END DESC,
 			user_totals.blob_count DESC,
-			user_totals.total_cost_eth DESC,
+			user_totals.total_cost_wei DESC,
 			COALESCE(s.last_timestamp, user_totals.last_bucket_start) DESC
 		LIMIT $2 OFFSET $3
 	`
@@ -312,13 +311,13 @@ const (
 				'' AS user_attribution,
 				'unknown' AS category,
 				s.blob_count,
-				s.total_cost_eth,
+				s.total_cost_wei,
 				s.last_timestamp
 			FROM blob_user_stats s
 			LEFT JOIN blob_users bu
-				ON bu.network_id = s.network_id
+				ON bu.chain_id = s.chain_id
 				AND LOWER(bu.address) = LOWER(s.from_address)
-			WHERE s.network_id = $1
+			WHERE s.chain_id = $1
 				AND $4::text = 'all'
 				AND NULLIF(BTRIM(s.user_attribution), '') IS NULL
 				AND bu.id IS NULL
@@ -326,7 +325,7 @@ const (
 		totals AS (
 			SELECT
 				COALESCE(SUM(blob_count), 0) AS total_blobs,
-				COALESCE(SUM(total_cost_eth), 0) AS total_spend
+				COALESCE(SUM(total_cost_wei), 0) AS total_spend
 			FROM user_totals
 		)
 		SELECT
@@ -334,23 +333,23 @@ const (
 			user_totals.user_attribution,
 			user_totals.category,
 			user_totals.blob_count,
-			user_totals.total_cost_eth::text AS total_cost_eth,
+			user_totals.total_cost_wei::text AS total_cost_wei,
 			user_totals.last_timestamp,
 			CASE
 				WHEN totals.total_blobs > 0 THEN ROUND((user_totals.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
 				ELSE 0
 			END AS blob_share_percent,
 			CASE
-				WHEN totals.total_spend > 0 THEN ROUND((user_totals.total_cost_eth / totals.total_spend) * 100, 6)::float8
+				WHEN totals.total_spend > 0 THEN ROUND((user_totals.total_cost_wei / totals.total_spend) * 100, 6)::float8
 				ELSE 0
 			END AS spend_share_percent
 		FROM user_totals
 		CROSS JOIN totals
 		ORDER BY
 			CASE WHEN $5 = 'count' THEN user_totals.blob_count END DESC,
-			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_eth END DESC,
+			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_wei END DESC,
 			user_totals.blob_count DESC,
-			user_totals.total_cost_eth DESC,
+			user_totals.total_cost_wei DESC,
 			user_totals.last_timestamp DESC
 		LIMIT $2 OFFSET $3
 	`
@@ -370,13 +369,13 @@ const (
 			SELECT
 				COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown') AS category,
 				COALESCE(SUM(r.blob_count), 0)::bigint AS blob_count,
-				COALESCE(SUM(r.total_cost_eth), 0) AS total_cost_eth
+				COALESCE(SUM(r.total_cost_wei), 0) AS total_cost_wei
 			FROM blob_chart_rollups r
 			CROSS JOIN window_bounds wb
 			LEFT JOIN blob_users bu
-				ON bu.network_id = r.network_id
+				ON bu.chain_id = r.chain_id
 				AND LOWER(bu.address) = LOWER(r.from_address)
-			WHERE r.network_id = $1
+			WHERE r.chain_id = $1
 				AND r.bucket_seconds = 3600
 				AND r.bucket_start >= wb.start_time
 			GROUP BY COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown')
@@ -384,24 +383,24 @@ const (
 		totals AS (
 			SELECT
 				COALESCE(SUM(blob_count), 0) AS total_blobs,
-				COALESCE(SUM(total_cost_eth), 0) AS total_spend
+				COALESCE(SUM(total_cost_wei), 0) AS total_spend
 			FROM category_totals
 		)
 		SELECT
 			category_totals.category,
 			category_totals.blob_count,
-			category_totals.total_cost_eth::text AS total_cost_eth,
+			category_totals.total_cost_wei::text AS total_cost_wei,
 			CASE
 				WHEN totals.total_blobs > 0 THEN ROUND((category_totals.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
 				ELSE 0
 			END AS blob_share_percent,
 			CASE
-				WHEN totals.total_spend > 0 THEN ROUND((category_totals.total_cost_eth / totals.total_spend) * 100, 6)::float8
+				WHEN totals.total_spend > 0 THEN ROUND((category_totals.total_cost_wei / totals.total_spend) * 100, 6)::float8
 				ELSE 0
 			END AS spend_share_percent
 		FROM category_totals
 		CROSS JOIN totals
-		ORDER BY category_totals.blob_count DESC, category_totals.total_cost_eth DESC, category_totals.category ASC
+		ORDER BY category_totals.blob_count DESC, category_totals.total_cost_wei DESC, category_totals.category ASC
 	`
 
 	// queryBlobUserCategoryBreakdownAll reads all-history category share from
@@ -411,44 +410,44 @@ const (
 			SELECT
 				COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown') AS category,
 				COALESCE(SUM(s.blob_count), 0) AS blob_count,
-				COALESCE(SUM(s.total_cost_eth), 0) AS total_cost_eth
+				COALESCE(SUM(s.total_cost_wei), 0) AS total_cost_wei
 			FROM blob_user_stats s
 			LEFT JOIN blob_users bu
-				ON bu.network_id = s.network_id
+				ON bu.chain_id = s.chain_id
 				AND LOWER(bu.address) = LOWER(s.from_address)
-			WHERE s.network_id = $1
+			WHERE s.chain_id = $1
 				AND $2::text = 'all'
 			GROUP BY COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown')
 		),
 		pending AS (
 			SELECT
 				COUNT(*)::bigint AS total_pending_blobs,
-				COALESCE(SUM(total_cost_eth::numeric), 0) AS pending_total_cost
+				COALESCE(SUM(total_cost_wei::numeric), 0) AS pending_total_cost
 			FROM blobs
-			WHERE network_id = $1 AND confirmed = false
+			WHERE chain_id = $1 AND confirmed = false
 		),
 		totals AS (
 			SELECT
 				(COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs) AS total_blobs,
 				(COALESCE(s.sum_total_cost, 0) + p.pending_total_cost) AS total_spend
 			FROM pending p
-			LEFT JOIN network_blob_stats s ON s.network_id = $1
+			LEFT JOIN network_blob_stats s ON s.chain_id = $1
 		)
 		SELECT
 			category_totals.category,
 			category_totals.blob_count,
-			category_totals.total_cost_eth::text AS total_cost_eth,
+			category_totals.total_cost_wei::text AS total_cost_wei,
 			CASE
 				WHEN totals.total_blobs > 0 THEN ROUND((category_totals.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
 				ELSE 0
 			END AS blob_share_percent,
 			CASE
-				WHEN totals.total_spend > 0 THEN ROUND((category_totals.total_cost_eth / totals.total_spend) * 100, 6)::float8
+				WHEN totals.total_spend > 0 THEN ROUND((category_totals.total_cost_wei / totals.total_spend) * 100, 6)::float8
 				ELSE 0
 			END AS spend_share_percent
 		FROM category_totals
 		CROSS JOIN totals
-		ORDER BY category_totals.blob_count DESC, category_totals.total_cost_eth DESC, category_totals.category ASC
+		ORDER BY category_totals.blob_count DESC, category_totals.total_cost_wei DESC, category_totals.category ASC
 	`
 
 	// queryBlobStats reads whole-history statistics from the maintained network summary.
@@ -459,9 +458,9 @@ const (
 				COUNT(*)::bigint AS total_pending_blobs,
 				COALESCE(SUM(base_fee_per_blob_gas::numeric), 0) AS pending_base_fee,
 				COALESCE(SUM(tip_per_blob_gas::numeric), 0) AS pending_tip,
-				COALESCE(SUM(total_cost_eth::numeric), 0) AS pending_total_cost
+				COALESCE(SUM(total_cost_wei::numeric), 0) AS pending_total_cost
 			FROM blobs
-			WHERE network_id = $1 AND confirmed = false
+			WHERE chain_id = $1 AND confirmed = false
 		)
 		SELECT
 			(COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs) AS total_blobs,
@@ -494,7 +493,7 @@ const (
 			COALESCE(s.last_indexed_block, 0) AS last_indexed_block,
 			COALESCE(s.last_indexed_time, '1970-01-01'::timestamp) AS last_indexed_time
 		FROM pending p
-		LEFT JOIN network_blob_stats s ON s.network_id = $1
+		LEFT JOIN network_blob_stats s ON s.chain_id = $1
 	`
 
 	// queryRollingStatsWindows computes time-windowed blob market statistics
@@ -518,10 +517,10 @@ const (
 				b.timestamp,
 				b.from_address,
 				b.base_fee_per_blob_gas::numeric AS base_fee_per_blob_gas,
-				b.total_cost_eth::numeric AS total_cost_eth,
+				b.total_cost_wei::numeric AS total_cost_wei,
 				COALESCE(b.blob_gas_used, 0)::bigint AS blob_gas_used
 			FROM blobs b
-			WHERE b.network_id = $1
+			WHERE b.chain_id = $1
 				AND b.confirmed = true
 				AND b.timestamp >= (SELECT MIN(start_time) FROM window_bounds)
 				AND b.timestamp < $4::timestamp
@@ -531,7 +530,7 @@ const (
 				wb.ord,
 				COUNT(bs.timestamp) AS total_blobs,
 				COALESCE(SUM(bs.blob_gas_used), 0) AS total_blob_gas_used,
-				COALESCE(SUM(bs.total_cost_eth), 0) AS total_cost_eth,
+				COALESCE(SUM(bs.total_cost_wei), 0) AS total_cost_wei,
 				COUNT(DISTINCT bs.from_address) AS unique_senders,
 				COALESCE(AVG(bs.base_fee_per_blob_gas), 0) AS average_blob_base_fee,
 				COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY bs.base_fee_per_blob_gas), 0) AS median_blob_base_fee,
@@ -561,7 +560,7 @@ const (
 					ELSE 0
 				END::bigint AS max_blob_gas
 			FROM block_metrics bm
-			WHERE bm.network_id = $1
+			WHERE bm.chain_id = $1
 				AND bm.block_timestamp >= (SELECT MIN(start_time) FROM window_bounds)
 				AND bm.block_timestamp < $4::timestamp
 		),
@@ -592,7 +591,7 @@ const (
 			bs.p95_blob_base_fee,
 			bs.total_blobs,
 			bs.total_blob_gas_used,
-			bs.total_cost_eth,
+			bs.total_cost_wei,
 			bs.unique_senders,
 			bms.average_utilization,
 			bms.total_blocks,
@@ -634,7 +633,7 @@ const (
 				wb.ord,
 				COALESCE(SUM(r.blob_count), 0)::bigint AS total_blobs,
 				COALESCE(SUM(r.blob_gas_used), 0)::bigint AS total_blob_gas_used,
-				COALESCE(SUM(r.total_cost_eth), 0) AS total_cost_eth,
+				COALESCE(SUM(r.total_cost_wei), 0) AS total_cost_wei,
 				COUNT(DISTINCT r.from_address) AS unique_senders,
 				CASE
 					WHEN COALESCE(SUM(r.blob_bytes), 0) > 0 THEN SUM(r.sum_size_base_fee) / SUM(r.blob_bytes)
@@ -642,7 +641,7 @@ const (
 				END AS average_blob_base_fee
 			FROM window_bounds wb
 			LEFT JOIN blob_chart_rollups r
-				ON r.network_id = $1
+				ON r.chain_id = $1
 				AND r.bucket_seconds = 3600
 				AND r.bucket_start >= wb.start_time
 				AND r.bucket_start < wb.end_time
@@ -662,7 +661,7 @@ const (
 				COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY r.p95_blob_base_fee), 0) AS p95_blob_base_fee
 			FROM window_bounds wb
 			LEFT JOIN block_metrics_rollups r
-				ON r.network_id = $1
+				ON r.chain_id = $1
 				AND r.bucket_seconds = 3600
 				AND r.bucket_start >= wb.start_time
 				AND r.bucket_start < wb.end_time
@@ -678,7 +677,7 @@ const (
 			COALESCE(bms.p95_blob_base_fee, 0) AS p95_blob_base_fee,
 			COALESCE(bs.total_blobs, 0) AS total_blobs,
 			COALESCE(bs.total_blob_gas_used, 0) AS total_blob_gas_used,
-			COALESCE(bs.total_cost_eth, 0) AS total_cost_eth,
+			COALESCE(bs.total_cost_wei, 0) AS total_cost_wei,
 			COALESCE(bs.unique_senders, 0) AS unique_senders,
 			COALESCE(bms.average_utilization, 0) AS average_utilization,
 			COALESCE(bms.total_blocks, 0) AS total_blocks,
@@ -693,7 +692,7 @@ const (
 	// queryBlockMetrics retrieves recent block metrics for pricing data.
 	queryBlockMetrics = `
 		SELECT ` + blockMetricsSelectColumns + ` FROM block_metrics
-		WHERE network_id = $1
+		WHERE chain_id = $1
 		ORDER BY block_number DESC
 		LIMIT $2
 	`
@@ -701,13 +700,13 @@ const (
 	// queryBlockMetricsByNumber retrieves block metrics for specific block numbers.
 	queryBlockMetricsByNumber = `
 		SELECT ` + blockMetricsSelectColumns + ` FROM block_metrics
-		WHERE network_id = $1 AND block_number = ANY($2::bigint[])
+		WHERE chain_id = $1 AND block_number = ANY($2::bigint[])
 	`
 
 	// queryLatestBlobsByAddress retrieves confirmed blobs for a specific sender address.
 	queryLatestBlobsByAddress = `
 		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = true AND network_id = $1 AND from_address = $2
+		WHERE confirmed = true AND chain_id = $1 AND from_address = $2
 		ORDER BY block_number DESC, blob_index ASC
 		LIMIT $3 OFFSET $4
 	`
@@ -715,7 +714,7 @@ const (
 	// queryMempoolBlobsByAddress retrieves unconfirmed blobs for a specific sender address.
 	queryMempoolBlobsByAddress = `
 		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = false AND network_id = $1 AND from_address = $2
+		WHERE confirmed = false AND chain_id = $1 AND from_address = $2
 		ORDER BY timestamp DESC
 		LIMIT $3 OFFSET $4
 	`
@@ -728,41 +727,41 @@ const (
 				COALESCE(NULLIF(BTRIM(s.user_attribution), ''), NULLIF(BTRIM(bu.name), ''), '') AS user_attribution,
 				COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown') AS category,
 				s.blob_count,
-				s.total_cost_eth,
+				s.total_cost_wei,
 				s.last_timestamp
 			FROM blob_user_stats s
 			LEFT JOIN blob_users bu
-				ON bu.network_id = s.network_id
+				ON bu.chain_id = s.chain_id
 				AND LOWER(bu.address) = LOWER(s.from_address)
-			WHERE s.network_id = $1 AND s.from_address = $2
+			WHERE s.chain_id = $1 AND s.from_address = $2
 		),
 		pending AS (
 			SELECT
 				COUNT(*)::bigint AS total_pending_blobs,
-				COALESCE(SUM(total_cost_eth::numeric), 0) AS pending_total_cost
+				COALESCE(SUM(total_cost_wei::numeric), 0) AS pending_total_cost
 			FROM blobs
-			WHERE network_id = $1 AND confirmed = false
+			WHERE chain_id = $1 AND confirmed = false
 		),
 		totals AS (
 			SELECT
 				(COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs) AS total_blobs,
 				(COALESCE(s.sum_total_cost, 0) + p.pending_total_cost) AS total_spend
 			FROM pending p
-			LEFT JOIN network_blob_stats s ON s.network_id = $1
+			LEFT JOIN network_blob_stats s ON s.chain_id = $1
 		)
 		SELECT
 			selected_user.from_address,
 			selected_user.user_attribution,
 			selected_user.category,
 			selected_user.blob_count,
-			selected_user.total_cost_eth::text AS total_cost_eth,
+			selected_user.total_cost_wei::text AS total_cost_wei,
 			selected_user.last_timestamp,
 			CASE
 				WHEN totals.total_blobs > 0 THEN ROUND((selected_user.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
 				ELSE 0
 			END AS blob_share_percent,
 			CASE
-				WHEN totals.total_spend > 0 THEN ROUND((selected_user.total_cost_eth / totals.total_spend) * 100, 6)::float8
+				WHEN totals.total_spend > 0 THEN ROUND((selected_user.total_cost_wei / totals.total_spend) * 100, 6)::float8
 				ELSE 0
 			END AS spend_share_percent
 		FROM selected_user
@@ -771,7 +770,7 @@ const (
 
 	// queryLastIndexedTimeCoalesce retrieves the most recent confirmed blob timestamp,
 	// defaulting to epoch if no blobs exist.
-	queryLastIndexedTimeCoalesce = "SELECT COALESCE(MAX(timestamp), '1970-01-01'::timestamp) FROM blobs WHERE confirmed = true AND network_id = $1"
+	queryLastIndexedTimeCoalesce = "SELECT COALESCE(MAX(timestamp), '1970-01-01'::timestamp) FROM blobs WHERE confirmed = true AND chain_id = $1"
 
 	// queryTableSize retrieves the total size of a table in bytes.
 	queryTableSize = `
@@ -791,13 +790,13 @@ const (
 	`
 
 	// queryLastIndexedBlock retrieves the last indexed block number from indexer metadata.
-	queryLastIndexedBlock = "SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = '" + models.MetadataLastIndexedBlock + "'"
+	queryLastIndexedBlock = "SELECT value FROM indexer_metadata WHERE chain_id = $1 AND key = '" + models.MetadataLastIndexedBlock + "'"
 
 	// queryNetworkFreshnessMetadata retrieves frontend freshness metadata for a network.
 	queryNetworkFreshnessMetadata = `
 		SELECT key, value
 		FROM indexer_metadata
-		WHERE network_id = $1
+		WHERE chain_id = $1
 			AND key IN (
 				'` + models.MetadataLastIndexedBlock + `',
 					'` + models.MetadataCurrentChainHead + `',
@@ -816,7 +815,7 @@ const (
 	// queryNewBlobsSinceBlock retrieves confirmed blobs after a given block number.
 	queryNewBlobsSinceBlock = `
 		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = true AND network_id = $1 AND block_number > $2
+		WHERE confirmed = true AND chain_id = $1 AND block_number > $2
 		ORDER BY block_number ASC, blob_index ASC
 		LIMIT $3
 	`

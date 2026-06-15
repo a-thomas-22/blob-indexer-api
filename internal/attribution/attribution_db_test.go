@@ -115,10 +115,10 @@ func TestAddKnownUser_ErrorPaths(t *testing.T) {
 
 func TestGetKnownUsers_ReturnsRows(t *testing.T) {
 	svc, mock := newMockService(t)
-	rows := sqlmock.NewRows([]string{"id", "network_id", "address", "name", "description", "category", "first_seen", "last_seen"}).
+	rows := sqlmock.NewRows([]string{"id", "chain_id", "address", "name", "description", "category", "first_seen", "last_seen"}).
 		AddRow(1, 1, "0xabc", "Alice", "", "", time.Now(), time.Now())
 
-	mock.ExpectQuery("SELECT \\* FROM blob_users WHERE network_id = \\$1 ORDER BY name").
+	mock.ExpectQuery("SELECT \\* FROM blob_users WHERE chain_id = \\$1 ORDER BY name").
 		WithArgs(1).
 		WillReturnRows(rows)
 
@@ -138,7 +138,7 @@ func TestGetKnownUsers_ReturnsRows(t *testing.T) {
 func TestGetTopBlobUsers_ReturnsRows(t *testing.T) {
 	svc, mock := newMockService(t)
 	now := time.Now()
-	rows := sqlmock.NewRows([]string{"from_address", "user_attribution", "blob_count", "total_cost_eth", "last_timestamp"}).
+	rows := sqlmock.NewRows([]string{"from_address", "user_attribution", "blob_count", "total_cost_wei", "last_timestamp"}).
 		AddRow("0xabc", "Alice", 3, "1.5", now)
 
 	mock.ExpectQuery("SELECT").WithArgs(1, 5, 0).WillReturnRows(rows)
@@ -173,7 +173,7 @@ func TestUpdateUserLastSeen_KnownUser(t *testing.T) {
 		svc, mock := newMockService(t)
 		svc.knownUsers["0xabc"] = "Alice"
 
-		mock.ExpectExec("UPDATE blob_users SET last_seen = \\$1 WHERE address = \\$2 AND network_id = \\$3").
+		mock.ExpectExec("UPDATE blob_users SET last_seen = \\$1 WHERE address = \\$2 AND chain_id = \\$3").
 			WithArgs(sqlmock.AnyArg(), "0xabc", 1).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -190,7 +190,7 @@ func TestUpdateUserLastSeen_KnownUser(t *testing.T) {
 		svc, mock := newMockService(t)
 		svc.knownUsers["0xabc"] = "Alice"
 
-		mock.ExpectExec("UPDATE blob_users SET last_seen = \\$1 WHERE address = \\$2 AND network_id = \\$3").
+		mock.ExpectExec("UPDATE blob_users SET last_seen = \\$1 WHERE address = \\$2 AND chain_id = \\$3").
 			WithArgs(sqlmock.AnyArg(), "0xabc", 1).
 			WillReturnError(assertiveError("update failed"))
 
@@ -234,7 +234,7 @@ func TestBatchUpdateUserLastSeen(t *testing.T) {
 		svc.knownUsers["0xabc"] = "Alice"
 		svc.knownUsers["0xdef"] = "Bob"
 
-		mock.ExpectExec("UPDATE blob_users SET last_seen = \\$1 WHERE address = ANY\\(\\$2\\) AND network_id = \\$3").
+		mock.ExpectExec("UPDATE blob_users SET last_seen = \\$1 WHERE address = ANY\\(\\$2\\) AND chain_id = \\$3").
 			WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), 1).
 			WillReturnResult(sqlmock.NewResult(0, 2))
 
@@ -251,7 +251,7 @@ func TestBatchUpdateUserLastSeen(t *testing.T) {
 		svc, mock := newMockService(t)
 		svc.knownUsers["0xabc"] = "Alice"
 
-		mock.ExpectExec("UPDATE blob_users SET last_seen = \\$1 WHERE address = ANY\\(\\$2\\) AND network_id = \\$3").
+		mock.ExpectExec("UPDATE blob_users SET last_seen = \\$1 WHERE address = ANY\\(\\$2\\) AND chain_id = \\$3").
 			WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), 1).
 			WillReturnError(assertiveError("batch update failed"))
 

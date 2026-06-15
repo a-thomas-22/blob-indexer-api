@@ -129,7 +129,7 @@ func TestGetBlobPricingIncludesOccupancyFields(t *testing.T) {
 			metrics := dest.(*[]models.BlockMetrics)
 			*metrics = []models.BlockMetrics{
 				{
-					NetworkID:        42,
+					ChainID:          42,
 					BlockNumber:      100,
 					BlockTimestamp:   blockTime,
 					BlobCount:        4,

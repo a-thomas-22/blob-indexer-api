@@ -9,7 +9,7 @@ func TestBlobModel(t *testing.T) {
 	now := time.Now()
 	blob := Blob{
 		ID:                1,
-		NetworkID:         1,
+		ChainID:           1,
 		BlockNumber:       12345,
 		BlobIndex:         0,
 		TxHash:            "0xabc123",
@@ -18,7 +18,7 @@ func TestBlobModel(t *testing.T) {
 		BlobSizeBytes:     131072,
 		BaseFeePerBlobGas: "1000000000",
 		TipPerBlobGas:     "100000000",
-		TotalCostETH:      "0.001",
+		TotalCostWei:      "0.001",
 		Timestamp:         now,
 		Confirmed:         true,
 		IndexerVersion:    "v1.0.0",
@@ -27,8 +27,8 @@ func TestBlobModel(t *testing.T) {
 	if blob.ID != 1 {
 		t.Errorf("expected ID 1, got %d", blob.ID)
 	}
-	if blob.NetworkID != 1 {
-		t.Errorf("expected NetworkID 1, got %d", blob.NetworkID)
+	if blob.ChainID != 1 {
+		t.Errorf("expected ChainID 1, got %d", blob.ChainID)
 	}
 	if blob.BlockNumber != 12345 {
 		t.Errorf("expected BlockNumber 12345, got %d", blob.BlockNumber)
@@ -45,7 +45,7 @@ func TestBlobUserModel(t *testing.T) {
 	now := time.Now()
 	user := BlobUser{
 		ID:          1,
-		NetworkID:   1,
+		ChainID:     1,
 		Address:     "0xabc",
 		Name:        "Optimism",
 		Description: "Optimism rollup",
@@ -81,10 +81,10 @@ func TestNetworkModel(t *testing.T) {
 
 func TestIndexerMetadataModel(t *testing.T) {
 	meta := IndexerMetadata{
-		ID:        1,
-		NetworkID: 1,
-		Key:       MetadataLastIndexedBlock,
-		Value:     "12345",
+		ID:      1,
+		ChainID: 1,
+		Key:     MetadataLastIndexedBlock,
+		Value:   "12345",
 	}
 
 	if meta.Key != "last_indexed_block" {
@@ -95,7 +95,7 @@ func TestIndexerMetadataModel(t *testing.T) {
 func TestIndexedBlockModel(t *testing.T) {
 	now := time.Now()
 	block := IndexedBlock{
-		NetworkID:   1,
+		ChainID:     1,
 		BlockNumber: 12345,
 		BlockHash:   "0xhash",
 		ParentHash:  "0xparent",
@@ -168,7 +168,7 @@ func TestMetadataTimestampRoundTrip(t *testing.T) {
 
 func TestBlobPendingTransaction(t *testing.T) {
 	blob := Blob{
-		NetworkID:   1,
+		ChainID:     1,
 		BlockNumber: -1, // Pending transaction marker
 		Confirmed:   false,
 	}

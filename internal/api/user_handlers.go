@@ -34,16 +34,14 @@ const (
 
 // UserResponse is a response containing user data
 type UserResponse struct {
-	NetworkID   int    `json:"network_id"`
+	ChainID     int    `json:"chain_id"`
 	NetworkName string `json:"network_name,omitempty"`
 	Address     string `json:"address"`
 	Name        string `json:"name,omitempty"`
 	Category    string `json:"category,omitempty"`
 	BlobCount   int    `json:"blob_count"`
 	// Total realized blob base-fee cost in wei, serialized as a decimal string.
-	TotalCostWei string `json:"total_cost_wei" example:"4718548746240"`
-	// Deprecated alias: use total_cost_wei. This legacy field contains wei, not ETH.
-	TotalCostETH      string    `json:"total_cost_eth" extensions:"x-deprecated,x-replacement=total_cost_wei" example:"4718548746240"`
+	TotalCostWei      string    `json:"total_cost_wei" example:"4718548746240"`
 	LastTimestamp     time.Time `json:"last_timestamp"`
 	BlobSharePercent  float64   `json:"blob_share_percent,omitempty"`
 	SpendSharePercent float64   `json:"spend_share_percent,omitempty"`
@@ -54,16 +52,14 @@ type CategoryShareResponse struct {
 	Category  string `json:"category"`
 	BlobCount int    `json:"blob_count"`
 	// Total realized blob base-fee cost in wei, serialized as a decimal string.
-	TotalCostWei string `json:"total_cost_wei" example:"4718548746240"`
-	// Deprecated alias: use total_cost_wei. This legacy field contains wei, not ETH.
-	TotalCostETH      string  `json:"total_cost_eth" extensions:"x-deprecated,x-replacement=total_cost_wei" example:"4718548746240"`
+	TotalCostWei      string  `json:"total_cost_wei" example:"4718548746240"`
 	BlobSharePercent  float64 `json:"blob_share_percent"`
 	SpendSharePercent float64 `json:"spend_share_percent"`
 }
 
 // UserBreakdownResponse is a response containing category market share data.
 type UserBreakdownResponse struct {
-	NetworkID      int                     `json:"network_id"`
+	ChainID        int                     `json:"chain_id"`
 	NetworkName    string                  `json:"network_name,omitempty"`
 	Window         string                  `json:"window"`
 	CategoryShares []CategoryShareResponse `json:"category_shares"`
@@ -71,14 +67,13 @@ type UserBreakdownResponse struct {
 
 func toUserResponse(user models.BlobUserStats, networkID int, networkName string) UserResponse {
 	return UserResponse{
-		NetworkID:         networkID,
+		ChainID:           networkID,
 		NetworkName:       networkName,
 		Address:           user.Address,
 		Name:              user.Name,
 		Category:          user.Category,
 		BlobCount:         user.BlobCount,
-		TotalCostWei:      user.TotalCostETH,
-		TotalCostETH:      user.TotalCostETH,
+		TotalCostWei:      user.TotalCostWei,
 		LastTimestamp:     user.LastTimestamp,
 		BlobSharePercent:  user.BlobSharePercent,
 		SpendSharePercent: user.SpendSharePercent,
@@ -331,15 +326,14 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 			categoryShares = append(categoryShares, CategoryShareResponse{
 				Category:          category.Category,
 				BlobCount:         category.BlobCount,
-				TotalCostWei:      category.TotalCostETH,
-				TotalCostETH:      category.TotalCostETH,
+				TotalCostWei:      category.TotalCostWei,
 				BlobSharePercent:  category.BlobSharePercent,
 				SpendSharePercent: category.SpendSharePercent,
 			})
 		}
 
 		response := UserBreakdownResponse{
-			NetworkID:      network.ChainID,
+			ChainID:        network.ChainID,
 			NetworkName:    network.Name,
 			Window:         string(window),
 			CategoryShares: categoryShares,

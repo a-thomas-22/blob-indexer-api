@@ -112,7 +112,7 @@ func TestGetNetworkMetadata(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		db, mock := newMockDB(t)
 		rows := sqlmock.NewRows([]string{"value"}).AddRow("456")
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = $2")).
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM indexer_metadata WHERE chain_id = $1 AND key = $2")).
 			WithArgs(1, "k").
 			WillReturnRows(rows)
 
@@ -127,7 +127,7 @@ func TestGetNetworkMetadata(t *testing.T) {
 
 	t.Run("error", func(t *testing.T) {
 		db, mock := newMockDB(t)
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = $2")).
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM indexer_metadata WHERE chain_id = $1 AND key = $2")).
 			WithArgs(1, "k").
 			WillReturnError(sql.ErrNoRows)
 
@@ -244,7 +244,7 @@ func TestGetIndexedBlockHash(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		db, mock := newMockDB(t)
 		rows := sqlmock.NewRows([]string{"block_hash"}).AddRow("0xabc")
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2")).
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE chain_id = $1 AND block_number = $2")).
 			WithArgs(1, uint64(10)).
 			WillReturnRows(rows)
 
@@ -259,7 +259,7 @@ func TestGetIndexedBlockHash(t *testing.T) {
 
 	t.Run("error passes through", func(t *testing.T) {
 		db, mock := newMockDB(t)
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2")).
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE chain_id = $1 AND block_number = $2")).
 			WithArgs(1, uint64(10)).
 			WillReturnError(sql.ErrNoRows)
 
@@ -320,21 +320,21 @@ func TestGetFirstUnindexedBlock(t *testing.T) {
 func TestDeleteFromBlockMethods(t *testing.T) {
 	db, mock := newMockDB(t)
 
-	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2")).
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2")).
 		WithArgs(1, int64(100)).
 		WillReturnResult(sqlmock.NewResult(0, 2))
 	if err := db.DeleteBlobsFromBlock(context.Background(), 1, 100); err != nil {
 		t.Fatalf("DeleteBlobsFromBlock() error = %v", err)
 	}
 
-	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2")).
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2")).
 		WithArgs(1, uint64(100)).
 		WillReturnResult(sqlmock.NewResult(0, 2))
 	if err := db.DeleteIndexedBlocksFromBlock(context.Background(), 1, 100); err != nil {
 		t.Fatalf("DeleteIndexedBlocksFromBlock() error = %v", err)
 	}
 
-	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2")).
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM block_metrics WHERE chain_id = $1 AND block_number >= $2")).
 		WithArgs(1, int64(100)).
 		WillReturnResult(sqlmock.NewResult(0, 2))
 	if err := db.DeleteBlockMetricsFromBlock(context.Background(), 1, 100); err != nil {
@@ -350,7 +350,7 @@ func TestDeleteStalePendingBlobs(t *testing.T) {
 	db, mock := newMockDB(t)
 	cutoff := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE network_id = $1 AND block_number < 0 AND timestamp < $2")).
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number < 0 AND timestamp < $2")).
 		WithArgs(1, cutoff).
 		WillReturnResult(sqlmock.NewResult(0, 5))
 

@@ -75,12 +75,12 @@ func TestPoller_DetectsNewBlock(t *testing.T) {
 				if strings.Contains(query, "block_number >") {
 					*out = []models.Blob{
 						{
-							NetworkID:         11155111,
+							ChainID:           11155111,
 							BlockNumber:       int64(blockNumber),
 							TxHash:            "0xabc",
 							BaseFeePerBlobGas: "1000",
 							TipPerBlobGas:     "100",
-							TotalCostETH:      "0.001",
+							TotalCostWei:      "0.001",
 							Timestamp:         time.Now(),
 							Confirmed:         true,
 						},
@@ -194,12 +194,12 @@ func TestPoller_UsersThrottle(t *testing.T) {
 			case *[]models.Blob:
 				if strings.Contains(query, "block_number >") {
 					*out = []models.Blob{{
-						NetworkID:         11155111,
+						ChainID:           11155111,
 						BlockNumber:       101,
 						TxHash:            "0xdef",
 						BaseFeePerBlobGas: "1000",
 						TipPerBlobGas:     "100",
-						TotalCostETH:      "0.001",
+						TotalCostWei:      "0.001",
 						Timestamp:         time.Now(),
 						Confirmed:         true,
 					}}
@@ -290,16 +290,16 @@ func TestPoller_MempoolDiff_AddAndRemove(t *testing.T) {
 				case pollCycle <= 1:
 					// First poll: one pending tx (baseline, no broadcast).
 					*blobs = []models.Blob{
-						{NetworkID: 11155111, TxHash: "0x111", BaseFeePerBlobGas: "0", TipPerBlobGas: "0", TotalCostETH: "0"},
+						{ChainID: 11155111, TxHash: "0x111", BaseFeePerBlobGas: "0", TipPerBlobGas: "0", TotalCostWei: "0"},
 					}
 				case pollCycle == 2:
 					// Second poll: 0x111 gone (removed), 0x222 appeared (added).
 					*blobs = []models.Blob{
-						{NetworkID: 11155111, TxHash: "0x222", BaseFeePerBlobGas: "0", TipPerBlobGas: "0", TotalCostETH: "0"},
+						{ChainID: 11155111, TxHash: "0x222", BaseFeePerBlobGas: "0", TipPerBlobGas: "0", TotalCostWei: "0"},
 					}
 				default:
 					*blobs = []models.Blob{
-						{NetworkID: 11155111, TxHash: "0x222", BaseFeePerBlobGas: "0", TipPerBlobGas: "0", TotalCostETH: "0"},
+						{ChainID: 11155111, TxHash: "0x222", BaseFeePerBlobGas: "0", TipPerBlobGas: "0", TotalCostWei: "0"},
 					}
 				}
 			}
@@ -428,7 +428,7 @@ func TestPoller_BroadcastUsersUpdate_Success(t *testing.T) {
 						Name:              "Test",
 						Category:          "rollup",
 						BlobCount:         5,
-						TotalCostETH:      "0.01",
+						TotalCostWei:      "0.01",
 						LastTimestamp:     time.Now(),
 						BlobSharePercent:  25,
 						SpendSharePercent: 40,
@@ -585,25 +585,25 @@ func TestPoller_BroadcastNewBlocks_IncludesPricing(t *testing.T) {
 				blobGasUsed := int64(131072)
 				*blobs = []models.Blob{
 					{
-						NetworkID:         11155111,
+						ChainID:           11155111,
 						BlockNumber:       100,
 						BlobIndex:         0,
 						TxHash:            "0xabc",
 						BaseFeePerBlobGas: "4200000",
 						TipPerBlobGas:     "100",
-						TotalCostETH:      "550502400000",
+						TotalCostWei:      "550502400000",
 						Timestamp:         blockTime,
 						Confirmed:         true,
 						BlobGasUsed:       &blobGasUsed,
 					},
 					{
-						NetworkID:         11155111,
+						ChainID:           11155111,
 						BlockNumber:       100,
 						BlobIndex:         1,
 						TxHash:            "0xdef",
 						BaseFeePerBlobGas: "4200000",
 						TipPerBlobGas:     "100",
-						TotalCostETH:      "550502400000",
+						TotalCostWei:      "550502400000",
 						Timestamp:         blockTime,
 						Confirmed:         true,
 						BlobGasUsed:       &blobGasUsed,
@@ -613,7 +613,7 @@ func TestPoller_BroadcastNewBlocks_IncludesPricing(t *testing.T) {
 				metrics := dest.(*[]models.BlockMetrics)
 				*metrics = []models.BlockMetrics{
 					{
-						NetworkID:        11155111,
+						ChainID:          11155111,
 						BlockNumber:      100,
 						BlockTimestamp:   blockTime,
 						BlobCount:        2,

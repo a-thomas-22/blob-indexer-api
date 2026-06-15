@@ -34,7 +34,7 @@ func buildMarketPressure(metrics []models.BlockMetrics, cfg *params.ChainConfig)
 
 	latest := metrics[0]
 	if cfg == nil {
-		cfg = blobparams.ChainConfigForID(latest.NetworkID)
+		cfg = blobparams.ChainConfigForID(latest.ChainID)
 	}
 
 	maxedBlocks := 0
@@ -63,7 +63,7 @@ func buildMarketPressure(metrics []models.BlockMetrics, cfg *params.ChainConfig)
 
 func blobparamsForMetric(metric models.BlockMetrics, cfg *params.ChainConfig) blobparams.BlobParams {
 	if cfg == nil {
-		cfg = blobparams.ChainConfigForID(metric.NetworkID)
+		cfg = blobparams.ChainConfigForID(metric.ChainID)
 	}
 	return blobparams.GetBlobParams(cfg, uint64(metric.BlockTimestamp.Unix()))
 }
@@ -152,7 +152,7 @@ func nextBlockFeeEstimateRange(metrics []models.BlockMetrics, cfg *params.ChainC
 
 func predictNextBlockBlobFee(cfg *params.ChainConfig, metric models.BlockMetrics, targetGas uint64) *big.Int {
 	if cfg == nil {
-		cfg = blobparams.ChainConfigForID(metric.NetworkID)
+		cfg = blobparams.ChainConfigForID(metric.ChainID)
 	}
 	if targetGas == 0 && metric.BlobGasTarget > 0 {
 		targetGas = uint64(metric.BlobGasTarget)

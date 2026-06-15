@@ -25,7 +25,7 @@ const mempoolPressureSampleLimit = 10000
 
 // BlobResponse is a response containing blob data
 type BlobResponse struct {
-	NetworkID             int    `json:"network_id"`
+	ChainID               int    `json:"chain_id"`
 	NetworkName           string `json:"network_name,omitempty"`
 	BlockNumber           int64  `json:"block_number"`
 	BlobIndex             int    `json:"blob_index"`
@@ -41,9 +41,7 @@ type BlobResponse struct {
 	TipPerBlobGas         string `json:"tip_per_blob_gas"`
 	TipPerBlobGasGwei     string `json:"tip_per_blob_gas_gwei,omitempty"`
 	// Realized blob base-fee cost in wei, serialized as a decimal string.
-	TotalCostWei string `json:"total_cost_wei" example:"4718548746240"`
-	// Deprecated alias: use total_cost_wei. This legacy field contains wei, not ETH.
-	TotalCostETH         string    `json:"total_cost_eth" extensions:"x-deprecated,x-replacement=total_cost_wei" example:"4718548746240"`
+	TotalCostWei         string    `json:"total_cost_wei" example:"4718548746240"`
 	Timestamp            time.Time `json:"timestamp"`
 	Confirmed            bool      `json:"confirmed"`
 	MaxFeePerBlobGas     *string   `json:"max_fee_per_blob_gas,omitempty"`
@@ -104,7 +102,7 @@ type MarketPressureResponse struct {
 
 // PricingResponse is the top-level pricing API response
 type PricingResponse struct {
-	NetworkID            int                    `json:"network_id"`
+	ChainID              int                    `json:"chain_id"`
 	NetworkName          string                 `json:"network_name"`
 	CurrentBaseFee       string                 `json:"current_base_fee"`
 	CurrentBaseFeeGwei   string                 `json:"current_base_fee_gwei,omitempty"`
@@ -147,7 +145,7 @@ type MempoolIncludabilityResponse struct {
 
 // MempoolPressureResponse is the top-level mempool pressure API response.
 type MempoolPressureResponse struct {
-	NetworkID            int                            `json:"network_id"`
+	ChainID              int                            `json:"chain_id"`
 	NetworkName          string                         `json:"network_name"`
 	PendingBlobCount     int                            `json:"pending_blob_count"`
 	PendingBlobGas       int64                          `json:"pending_blob_gas"`
@@ -182,10 +180,10 @@ type mempoolPressureAggregate struct {
 
 // toBlobResponse converts a models.Blob to a BlobResponse.
 func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
-	explorerURLs := explorerURLsForBlob(blob.NetworkID, blob.TxHash, blob.FromAddress, blob.BlockNumber, blob.Confirmed)
+	explorerURLs := explorerURLsForBlob(blob.ChainID, blob.TxHash, blob.FromAddress, blob.BlockNumber, blob.Confirmed)
 
 	response := BlobResponse{
-		NetworkID:             blob.NetworkID,
+		ChainID:               blob.ChainID,
 		NetworkName:           networkName,
 		BlockNumber:           blob.BlockNumber,
 		BlobIndex:             blob.BlobIndex,
@@ -200,8 +198,7 @@ func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
 		BaseFeePerBlobGasGwei: formatWeiAsGwei(blob.BaseFeePerBlobGas),
 		TipPerBlobGas:         blob.TipPerBlobGas,
 		TipPerBlobGasGwei:     formatWeiAsGwei(blob.TipPerBlobGas),
-		TotalCostWei:          blob.TotalCostETH,
-		TotalCostETH:          blob.TotalCostETH,
+		TotalCostWei:          blob.TotalCostWei,
 		Timestamp:             blob.Timestamp,
 		Confirmed:             blob.Confirmed,
 		MaxFeePerBlobGas:      blob.MaxFeePerBlobGas,
@@ -559,7 +556,7 @@ func (a *API) queryMempoolPressure(ctx context.Context, networkID int, networkNa
 	}
 
 	response := MempoolPressureResponse{
-		NetworkID:            networkID,
+		ChainID:              networkID,
 		NetworkName:          networkName,
 		PendingBlobCount:     pressure.PendingBlobCount,
 		PendingBlobGas:       pressure.PendingBlobGas,
@@ -711,7 +708,7 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 
 	// Use the most recent block for current state
 	resp := PricingResponse{
-		NetworkID:      network.ChainID,
+		ChainID:        network.ChainID,
 		NetworkName:    network.Name,
 		MarketPressure: buildMarketPressure(metrics, cfg),
 		RecentBlocks:   recentBlocks,

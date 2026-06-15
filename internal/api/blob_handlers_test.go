@@ -24,7 +24,7 @@ func TestGetLatestBlobs_Success(t *testing.T) {
 			blobs := dest.(*[]models.Blob)
 			*blobs = []models.Blob{
 				{
-					NetworkID:         42,
+					ChainID:           42,
 					BlockNumber:       100,
 					BlobIndex:         0,
 					TxHash:            "0xabc",
@@ -32,7 +32,7 @@ func TestGetLatestBlobs_Success(t *testing.T) {
 					BlobSizeBytes:     131072,
 					BaseFeePerBlobGas: "1000",
 					TipPerBlobGas:     "100",
-					TotalCostETH:      "0.001",
+					TotalCostWei:      "0.001",
 					Timestamp:         time.Now(),
 					Confirmed:         true,
 				},
@@ -303,7 +303,7 @@ func TestGetMempoolPressure_CacheHit(t *testing.T) {
 	a := newTestAPIWithDB(db)
 	a.mempoolCache[42] = mempoolPressureCacheEntry{
 		response: MempoolPressureResponse{
-			NetworkID:        42,
+			ChainID:          42,
 			PendingBlobCount: 5,
 		},
 		expiresAt: time.Now().Add(time.Minute),
@@ -378,14 +378,14 @@ func TestGetBlobByTxHash_Success(t *testing.T) {
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
 			blob := dest.(*models.Blob)
 			*blob = models.Blob{
-				NetworkID:         42,
+				ChainID:           42,
 				BlockNumber:       100,
 				TxHash:            validTestTxHash,
 				FromAddress:       "0x123",
 				BlobSizeBytes:     131072,
 				BaseFeePerBlobGas: "1000",
 				TipPerBlobGas:     "100",
-				TotalCostETH:      "0.001",
+				TotalCostWei:      "0.001",
 				Timestamp:         time.Now(),
 				Confirmed:         true,
 			}
@@ -537,7 +537,7 @@ func TestGetBlobByTxHash_WithBlobData(t *testing.T) {
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
 			setStructResult(dest, &models.Blob{
-				NetworkID:         42,
+				ChainID:           42,
 				BlockNumber:       100,
 				BlobIndex:         0,
 				TxHash:            validTestTxHash,
@@ -545,7 +545,7 @@ func TestGetBlobByTxHash_WithBlobData(t *testing.T) {
 				BlobSizeBytes:     131072,
 				BaseFeePerBlobGas: "1000000",
 				TipPerBlobGas:     "500",
-				TotalCostETH:      "0.001",
+				TotalCostWei:      "0.001",
 				Timestamp:         time.Now(),
 				Confirmed:         true,
 			})
@@ -626,7 +626,7 @@ func TestGetBlobPricing_Success(t *testing.T) {
 			metrics := dest.(*[]models.BlockMetrics)
 			*metrics = []models.BlockMetrics{
 				{
-					NetworkID:        42,
+					ChainID:          42,
 					BlockNumber:      100,
 					BlockTimestamp:   time.Now(),
 					BlobCount:        3,
@@ -745,14 +745,14 @@ func TestGetMempoolBlobs_WithData(t *testing.T) {
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
 			setSliceResult(dest, []models.Blob{
 				{
-					NetworkID:         42,
+					ChainID:           42,
 					BlockNumber:       -1,
 					TxHash:            "0xpending",
 					FromAddress:       "0xsender",
 					BlobSizeBytes:     131072,
 					BaseFeePerBlobGas: "1000000",
 					TipPerBlobGas:     "500",
-					TotalCostETH:      "0.001",
+					TotalCostWei:      "0.001",
 					Timestamp:         time.Now(),
 					Confirmed:         false,
 				},
@@ -811,7 +811,7 @@ func TestGetLatestBlobs_WithAddressFilter(t *testing.T) {
 			blobs := dest.(*[]models.Blob)
 			*blobs = []models.Blob{
 				{
-					NetworkID:         42,
+					ChainID:           42,
 					BlockNumber:       100,
 					BlobIndex:         0,
 					TxHash:            "0xabc",
@@ -819,7 +819,7 @@ func TestGetLatestBlobs_WithAddressFilter(t *testing.T) {
 					BlobSizeBytes:     131072,
 					BaseFeePerBlobGas: "1000",
 					TipPerBlobGas:     "100",
-					TotalCostETH:      "0.001",
+					TotalCostWei:      "0.001",
 					Timestamp:         time.Now(),
 					Confirmed:         true,
 				},

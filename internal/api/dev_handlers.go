@@ -18,7 +18,7 @@ const (
 			SELECT
 				COALESCE(SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END), 0) as confirmed_count,
 				COALESCE(SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END), 0) as pending_count
-			FROM blobs WHERE network_id = $1
+			FROM blobs WHERE chain_id = $1
 		`
 )
 
@@ -39,7 +39,7 @@ type SystemMetrics struct {
 
 // IndexerMetrics represents metrics for a single indexer
 type IndexerMetrics struct {
-	NetworkID           int       `json:"network_id"`
+	ChainID             int       `json:"chain_id"`
 	NetworkName         string    `json:"network_name"`
 	LastIndexedBlock    uint64    `json:"last_indexed_block"`
 	LastIndexedTime     time.Time `json:"last_indexed_time"`
@@ -166,7 +166,7 @@ func (a *API) DevIndexers(w http.ResponseWriter, r *http.Request) {
 		}
 
 		metrics = append(metrics, IndexerMetrics{
-			NetworkID:           network.ChainID,
+			ChainID:             network.ChainID,
 			NetworkName:         network.Name,
 			LastIndexedBlock:    lastIndexedBlock,
 			LastIndexedTime:     lastIndexedTime,

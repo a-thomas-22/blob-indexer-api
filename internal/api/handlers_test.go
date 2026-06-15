@@ -179,15 +179,15 @@ func TestToBlobResponse_DerivesBlobCostFields(t *testing.T) {
 	blobGasUsed := int64(10)
 
 	response := toBlobResponse(models.Blob{
-		NetworkID:         1,
+		ChainID:           1,
 		BaseFeePerBlobGas: "2",
-		TotalCostETH:      "legacy-value",
+		TotalCostWei:      "legacy-value",
 		MaxFeePerBlobGas:  &maxFeePerBlobGas,
 		BlobGasUsed:       &blobGasUsed,
 	}, "mainnet")
 
-	if response.TotalCostETH != "legacy-value" {
-		t.Fatalf("expected legacy total_cost_eth to be preserved, got %q", response.TotalCostETH)
+	if response.TotalCostWei != "legacy-value" {
+		t.Fatalf("expected legacy total_cost_wei to be preserved, got %q", response.TotalCostWei)
 	}
 	if response.TotalCostWei != "legacy-value" {
 		t.Fatalf("expected total_cost_wei=legacy-value, got %q", response.TotalCostWei)

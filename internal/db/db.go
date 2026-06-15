@@ -92,7 +92,7 @@ func RunMigrations(dbURL string) error {
 }
 
 // UpsertNetworks syncs configured networks into the networks table. The rest of
-// the schema uses chain_id as network_id, so this must run before indexed rows
+// the schema uses chain_id as chain_id, so this must run before indexed rows
 // are written when foreign keys are enabled.
 func (db *DB) UpsertNetworks(ctx context.Context, networks []config.NetworkConfig) error {
 	query := `
@@ -126,7 +126,7 @@ func (db *DB) GetMetadata(ctx context.Context, key string) (string, error) {
 // GetNetworkMetadata retrieves a metadata value by key and network ID
 func (db *DB) GetNetworkMetadata(ctx context.Context, networkID int, key string) (string, error) {
 	var value string
-	query := "SELECT value FROM indexer_metadata WHERE network_id = $1 AND key = $2"
+	query := "SELECT value FROM indexer_metadata WHERE chain_id = $1 AND key = $2"
 	err := db.GetContext(ctx, &value, query, networkID, key)
 	if err != nil {
 		return "", fmt.Errorf("failed to get metadata for key %s and network %d: %w", key, networkID, err)
@@ -139,7 +139,7 @@ func (db *DB) SetMetadata(ctx context.Context, key, value string) error {
 	query := `
 		INSERT INTO indexer_metadata (key, value)
 		VALUES ($1, $2)
-		ON CONFLICT (key) WHERE network_id IS NULL
+		ON CONFLICT (key) WHERE chain_id IS NULL
 		DO UPDATE SET value = EXCLUDED.value
 	`
 	_, err := db.ExecContext(ctx, query, key, value)
@@ -152,9 +152,9 @@ func (db *DB) SetMetadata(ctx context.Context, key, value string) error {
 // SetNetworkMetadata sets a metadata value for a specific network
 func (db *DB) SetNetworkMetadata(ctx context.Context, networkID int, key, value string) error {
 	query := `
-		INSERT INTO indexer_metadata (network_id, key, value)
+		INSERT INTO indexer_metadata (chain_id, key, value)
 		VALUES ($1, $2, $3)
-		ON CONFLICT (network_id, key) DO UPDATE SET value = $3
+		ON CONFLICT (chain_id, key) DO UPDATE SET value = $3
 	`
 	_, err := db.ExecContext(ctx, query, networkID, key, value)
 	if err != nil {
@@ -167,7 +167,7 @@ func (db *DB) SetNetworkMetadata(ctx context.Context, networkID int, key, value 
 // Returns sql.ErrNoRows if the block hasn't been indexed.
 func (db *DB) GetIndexedBlockHash(ctx context.Context, networkID int, blockNumber uint64) (string, error) {
 	var hash string
-	query := "SELECT block_hash FROM indexed_blocks WHERE network_id = $1 AND block_number = $2"
+	query := "SELECT block_hash FROM indexed_blocks WHERE chain_id = $1 AND block_number = $2"
 	err := db.GetContext(ctx, &hash, query, networkID, blockNumber)
 	if err != nil {
 		return "", fmt.Errorf("failed to get indexed block hash for network %d block %d: %w", networkID, blockNumber, err)
@@ -189,7 +189,7 @@ func (db *DB) GetFirstUnindexedBlock(ctx context.Context, networkID int, startBl
 				block_number,
 				LEAD(block_number) OVER (ORDER BY block_number) AS next_block
 			FROM indexed_blocks
-			WHERE network_id = $1
+			WHERE chain_id = $1
 				AND block_number >= $2
 				AND block_number <= $3
 		),
@@ -197,7 +197,7 @@ func (db *DB) GetFirstUnindexedBlock(ctx context.Context, networkID int, startBl
 			SELECT $2::bigint AS block_number
 			WHERE NOT EXISTS (
 				SELECT 1 FROM indexed_blocks
-				WHERE network_id = $1 AND block_number = $2
+				WHERE chain_id = $1 AND block_number = $2
 			)
 			UNION ALL
 			SELECT block_number + 1
@@ -221,28 +221,28 @@ func (db *DB) GetFirstUnindexedBlock(ctx context.Context, networkID int, startBl
 
 // DeleteBlobsFromBlock deletes all blobs at or above the given block number for a network.
 func (db *DB) DeleteBlobsFromBlock(ctx context.Context, networkID int, fromBlock int64) error {
-	query := "DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2"
+	query := "DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2"
 	_, err := db.ExecContext(ctx, query, networkID, fromBlock)
 	return err
 }
 
 // DeleteIndexedBlocksFromBlock deletes indexed block records at or above the given block number.
 func (db *DB) DeleteIndexedBlocksFromBlock(ctx context.Context, networkID int, fromBlock uint64) error {
-	query := "DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2"
+	query := "DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2"
 	_, err := db.ExecContext(ctx, query, networkID, fromBlock)
 	return err
 }
 
 // DeleteBlockMetricsFromBlock deletes block metrics at or above the given block number for a network.
 func (db *DB) DeleteBlockMetricsFromBlock(ctx context.Context, networkID int, fromBlock int64) error {
-	query := "DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2"
+	query := "DELETE FROM block_metrics WHERE chain_id = $1 AND block_number >= $2"
 	_, err := db.ExecContext(ctx, query, networkID, fromBlock)
 	return err
 }
 
 // DeleteStalePendingBlobs removes pending blobs older than the given cutoff time.
 func (db *DB) DeleteStalePendingBlobs(ctx context.Context, networkID int, cutoff time.Time) (int64, error) {
-	query := "DELETE FROM blobs WHERE network_id = $1 AND block_number < 0 AND timestamp < $2"
+	query := "DELETE FROM blobs WHERE chain_id = $1 AND block_number < 0 AND timestamp < $2"
 	res, err := db.ExecContext(ctx, query, networkID, cutoff)
 	if err != nil {
 		return 0, err

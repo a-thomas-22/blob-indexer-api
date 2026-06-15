@@ -154,8 +154,8 @@ func TestBackfillPerBlobRows(t *testing.T) {
 	for _, s := range seeds {
 		if _, err := db.Exec(`
 			INSERT INTO blobs (
-				network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
-				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
+				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
 				timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
 			) VALUES (
 				1, $1, $2, $3, '0xfrom', '',
@@ -166,7 +166,7 @@ func TestBackfillPerBlobRows(t *testing.T) {
 		`,
 			s.blockNumber, s.blobIndex, s.txHash,
 			gasPerBlob*s.blobCount,   // collapsed blob_size_bytes
-			7*gasPerBlob*s.blobCount, // collapsed total_cost_eth (baseFee * total gas)
+			7*gasPerBlob*s.blobCount, // collapsed total_cost_wei (baseFee * total gas)
 			gasPerBlob*s.blobCount,   // collapsed blob_gas_used
 		); err != nil {
 			t.Fatalf("seed blob: %v", err)
@@ -176,7 +176,7 @@ func TestBackfillPerBlobRows(t *testing.T) {
 	// Seed block_metrics rows with the legacy wrong blob_count (tx count, not blob count).
 	if _, err := db.Exec(`
 		INSERT INTO block_metrics (
-			network_id, block_number, block_timestamp, blob_count,
+			chain_id, block_number, block_timestamp, blob_count,
 			blob_gas_used, blob_gas_target, blob_gas_limit,
 			excess_blob_gas, blob_base_fee, utilization_ratio,
 			blob_params_target, blob_params_max, update_fraction
@@ -208,7 +208,7 @@ func TestBackfillPerBlobRows(t *testing.T) {
 		{102, 5, 5 * gasPerBlob},
 	} {
 		var got int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM blobs WHERE network_id = 1 AND block_number = $1`, c.blockNumber).Scan(&got); err != nil {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM blobs WHERE chain_id = 1 AND block_number = $1`, c.blockNumber).Scan(&got); err != nil {
 			t.Fatalf("count blobs for block %d: %v", c.blockNumber, err)
 		}
 		if got != c.wantRows {
@@ -217,7 +217,7 @@ func TestBackfillPerBlobRows(t *testing.T) {
 
 		// Every row in the block must have blob_gas_used == 131072.
 		var gasSum sql.NullInt64
-		if err := db.QueryRow(`SELECT COALESCE(SUM(blob_gas_used), 0) FROM blobs WHERE network_id = 1 AND block_number = $1`, c.blockNumber).Scan(&gasSum); err != nil {
+		if err := db.QueryRow(`SELECT COALESCE(SUM(blob_gas_used), 0) FROM blobs WHERE chain_id = 1 AND block_number = $1`, c.blockNumber).Scan(&gasSum); err != nil {
 			t.Fatalf("sum blob_gas_used for block %d: %v", c.blockNumber, err)
 		}
 		if gasSum.Int64 != c.wantGas {
@@ -225,7 +225,7 @@ func TestBackfillPerBlobRows(t *testing.T) {
 		}
 
 		var maxGas sql.NullInt64
-		if err := db.QueryRow(`SELECT MAX(blob_gas_used) FROM blobs WHERE network_id = 1 AND block_number = $1`, c.blockNumber).Scan(&maxGas); err != nil {
+		if err := db.QueryRow(`SELECT MAX(blob_gas_used) FROM blobs WHERE chain_id = 1 AND block_number = $1`, c.blockNumber).Scan(&maxGas); err != nil {
 			t.Fatalf("max blob_gas_used for block %d: %v", c.blockNumber, err)
 		}
 		if maxGas.Int64 != gasPerBlob {
@@ -240,7 +240,7 @@ func TestBackfillPerBlobRows(t *testing.T) {
 		if err := db.QueryRow(`
 			SELECT MIN(blob_index), MAX(blob_index), COUNT(DISTINCT blob_index), COUNT(*)
 			FROM blobs
-			WHERE network_id = 1 AND block_number = $1
+			WHERE chain_id = 1 AND block_number = $1
 		`, c.blockNumber).Scan(&minIdx, &maxIdx, &distinct, &total); err != nil {
 			t.Fatalf("blob_index shape for block %d: %v", c.blockNumber, err)
 		}
@@ -251,7 +251,7 @@ func TestBackfillPerBlobRows(t *testing.T) {
 
 		// block_metrics.blob_count must match the actual blob count.
 		var bmCount int
-		if err := db.QueryRow(`SELECT blob_count FROM block_metrics WHERE network_id = 1 AND block_number = $1`, c.blockNumber).Scan(&bmCount); err != nil {
+		if err := db.QueryRow(`SELECT blob_count FROM block_metrics WHERE chain_id = 1 AND block_number = $1`, c.blockNumber).Scan(&bmCount); err != nil {
 			t.Fatalf("block_metrics for block %d: %v", c.blockNumber, err)
 		}
 		if bmCount != c.wantRows {
@@ -259,17 +259,17 @@ func TestBackfillPerBlobRows(t *testing.T) {
 		}
 	}
 
-	// total_cost_eth on every blob row should equal base_fee_per_blob_gas * 131072.
+	// total_cost_wei on every blob row should equal base_fee_per_blob_gas * 131072.
 	var bad int
 	if err := db.QueryRow(`
 		SELECT COUNT(*) FROM blobs
 		WHERE confirmed = true
-		  AND total_cost_eth <> base_fee_per_blob_gas * 131072
+		  AND total_cost_wei <> base_fee_per_blob_gas * 131072
 	`).Scan(&bad); err != nil {
 		t.Fatalf("per-blob cost check: %v", err)
 	}
 	if bad != 0 {
-		t.Fatalf("%d blob rows have total_cost_eth != base_fee * 131072", bad)
+		t.Fatalf("%d blob rows have total_cost_wei != base_fee * 131072", bad)
 	}
 
 	// Per-tx blob count should match what we seeded.
@@ -296,7 +296,7 @@ func TestBackfillPerBlobRows(t *testing.T) {
 	}
 	rowsOrd, err := db.Query(`
 		SELECT blob_index, tx_hash FROM blobs
-		WHERE network_id = 1 AND block_number = 102
+		WHERE chain_id = 1 AND block_number = 102
 		ORDER BY blob_index ASC
 	`)
 	if err != nil {
@@ -414,7 +414,7 @@ func assertNetworkBlobStats(t *testing.T, db *sqlx.DB, want networkBlobStatsChec
 	var got networkBlobStatsCheck
 	if err := db.QueryRow(`
 		SELECT
-			network_id,
+			chain_id,
 			total_confirmed_blobs,
 			sum_base_fee_per_blob_gas::text,
 			sum_tip_per_blob_gas::text,
@@ -422,7 +422,7 @@ func assertNetworkBlobStats(t *testing.T, db *sqlx.DB, want networkBlobStatsChec
 			last_indexed_block,
 			last_indexed_time
 		FROM network_blob_stats
-		WHERE network_id = $1
+		WHERE chain_id = $1
 	`, want.networkID).Scan(
 		&got.networkID,
 		&got.confirmed,
@@ -478,8 +478,8 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 
 	if _, err := db.Exec(`
 		INSERT INTO blobs (
-			network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
-			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
 			timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
 		) VALUES
 			(1, 100, 0, '0xa', '0xfrom', '', 131072, 10, 2, 100, $1, true, 'test', 12, 131072),
@@ -491,7 +491,7 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 
 	if _, err := db.Exec(`
 		INSERT INTO block_metrics (
-			network_id, block_number, block_timestamp, blob_count,
+			chain_id, block_number, block_timestamp, blob_count,
 			blob_gas_used, blob_gas_target, blob_gas_limit,
 			excess_blob_gas, blob_base_fee, utilization_ratio,
 			blob_params_target, blob_params_max, update_fraction
@@ -518,8 +518,8 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 
 	if _, err := db.Exec(`
 		INSERT INTO blobs (
-			network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
-			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
 			timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
 		) VALUES
 			(1, 102, 0, '0xc', '0xfrom', '', 131072, 5, 1, 50, $1, true, 'test', 6, 131072)
@@ -528,7 +528,7 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 	}
 	if _, err := db.Exec(`
 		INSERT INTO block_metrics (
-			network_id, block_number, block_timestamp, blob_count,
+			chain_id, block_number, block_timestamp, blob_count,
 			blob_gas_used, blob_gas_target, blob_gas_limit,
 			excess_blob_gas, blob_base_fee, utilization_ratio,
 			blob_params_target, blob_params_max, update_fraction
@@ -547,17 +547,17 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 		lastIndexedTime: t102,
 	})
 
-	if _, err := db.Exec(`UPDATE blobs SET confirmed = true WHERE network_id = 1 AND tx_hash = '0xpending'`); err != nil {
+	if _, err := db.Exec(`UPDATE blobs SET confirmed = true WHERE chain_id = 1 AND tx_hash = '0xpending'`); err != nil {
 		t.Fatalf("promote pending blob: %v", err)
 	}
 	if _, err := db.Exec(`
 		UPDATE blobs
-		SET base_fee_per_blob_gas = 20, tip_per_blob_gas = 4, total_cost_eth = 200
-		WHERE network_id = 1 AND tx_hash = '0xa'
+		SET base_fee_per_blob_gas = 20, tip_per_blob_gas = 4, total_cost_wei = 200
+		WHERE chain_id = 1 AND tx_hash = '0xa'
 	`); err != nil {
 		t.Fatalf("update confirmed blob costs: %v", err)
 	}
-	if _, err := db.Exec(`UPDATE blobs SET user_attribution = 'alice' WHERE network_id = 1 AND tx_hash = '0xa'`); err != nil {
+	if _, err := db.Exec(`UPDATE blobs SET user_attribution = 'alice' WHERE chain_id = 1 AND tx_hash = '0xa'`); err != nil {
 		t.Fatalf("update non-summary blob field: %v", err)
 	}
 	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
@@ -570,10 +570,10 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 		lastIndexedTime: t102,
 	})
 
-	if _, err := db.Exec(`DELETE FROM blobs WHERE network_id = 1 AND tx_hash = '0xb'`); err != nil {
+	if _, err := db.Exec(`DELETE FROM blobs WHERE chain_id = 1 AND tx_hash = '0xb'`); err != nil {
 		t.Fatalf("delete confirmed blob: %v", err)
 	}
-	if _, err := db.Exec(`DELETE FROM block_metrics WHERE network_id = 1 AND block_number = 102`); err != nil {
+	if _, err := db.Exec(`DELETE FROM block_metrics WHERE chain_id = 1 AND block_number = 102`); err != nil {
 		t.Fatalf("delete latest block metrics: %v", err)
 	}
 	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
@@ -586,7 +586,7 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 		lastIndexedTime: t101,
 	})
 
-	if _, err := db.Exec(`UPDATE blobs SET confirmed = false WHERE network_id = 1 AND tx_hash = '0xpending'`); err != nil {
+	if _, err := db.Exec(`UPDATE blobs SET confirmed = false WHERE chain_id = 1 AND tx_hash = '0xpending'`); err != nil {
 		t.Fatalf("demote confirmed blob: %v", err)
 	}
 	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
@@ -653,7 +653,7 @@ func TestPublicAPIRollupsStayConsistent(t *testing.T) {
 
 	if _, err := db.Exec(`
 		INSERT INTO block_metrics (
-			network_id, block_number, block_timestamp, blob_count,
+			chain_id, block_number, block_timestamp, blob_count,
 			blob_gas_used, blob_gas_target, blob_gas_limit,
 			excess_blob_gas, blob_base_fee, utilization_ratio,
 			blob_params_target, blob_params_max, update_fraction
@@ -666,8 +666,8 @@ func TestPublicAPIRollupsStayConsistent(t *testing.T) {
 
 	if _, err := db.Exec(`
 		INSERT INTO blobs (
-			network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
-			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
 			timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
 		) VALUES
 			(1, 10, 0, '0xaa', '0x1111111111111111111111111111111111111111', 'Rollup A', 131072, 10, 1, 100, $1, true, 'test', 11, 131072),
@@ -692,7 +692,7 @@ func TestPublicAPIRollupsStayConsistent(t *testing.T) {
 	if _, err := db.Exec(`
 		UPDATE blobs
 		SET confirmed = true, block_number = 11, blob_index = 0
-		WHERE network_id = 1 AND tx_hash = '0xcc'
+		WHERE chain_id = 1 AND tx_hash = '0xcc'
 	`); err != nil {
 		t.Fatalf("promote pending blob: %v", err)
 	}
@@ -707,7 +707,7 @@ func TestPublicAPIRollupsStayConsistent(t *testing.T) {
 	})
 	assertBlobUserStats(t, db, "0x1111111111111111111111111111111111111111", 2, 400)
 
-	if _, err := db.Exec(`DELETE FROM block_metrics WHERE network_id = 1 AND block_number = 11`); err != nil {
+	if _, err := db.Exec(`DELETE FROM block_metrics WHERE chain_id = 1 AND block_number = 11`); err != nil {
 		t.Fatalf("delete latest block metric: %v", err)
 	}
 	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
@@ -720,7 +720,7 @@ func TestPublicAPIRollupsStayConsistent(t *testing.T) {
 		lastIndexedTime: t10,
 	})
 
-	if _, err := db.Exec(`DELETE FROM blobs WHERE network_id = 1 AND from_address = '0x1111111111111111111111111111111111111111'`); err != nil {
+	if _, err := db.Exec(`DELETE FROM blobs WHERE chain_id = 1 AND from_address = '0x1111111111111111111111111111111111111111'`); err != nil {
 		t.Fatalf("delete sender blobs: %v", err)
 	}
 	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
@@ -736,7 +736,7 @@ func TestPublicAPIRollupsStayConsistent(t *testing.T) {
 	var remaining int
 	if err := db.QueryRow(`
 		SELECT COUNT(*) FROM blob_user_stats
-		WHERE network_id = 1 AND from_address = '0x1111111111111111111111111111111111111111'
+		WHERE chain_id = 1 AND from_address = '0x1111111111111111111111111111111111111111'
 	`).Scan(&remaining); err != nil {
 		t.Fatalf("count removed sender stats: %v", err)
 	}
@@ -749,12 +749,12 @@ func assertBlobUserStats(t *testing.T, db *sqlx.DB, address string, wantCount, w
 	t.Helper()
 	var got struct {
 		BlobCount int64 `db:"blob_count"`
-		TotalCost int64 `db:"total_cost_eth"`
+		TotalCost int64 `db:"total_cost_wei"`
 	}
 	if err := db.Get(&got, `
-		SELECT blob_count, total_cost_eth::bigint
+		SELECT blob_count, total_cost_wei::bigint
 		FROM blob_user_stats
-		WHERE network_id = 1 AND from_address = $1
+		WHERE chain_id = 1 AND from_address = $1
 	`, address); err != nil {
 		t.Fatalf("get blob_user_stats for %s: %v", address, err)
 	}
@@ -800,7 +800,7 @@ func TestBlockMetricsRollupThresholdCounts(t *testing.T) {
 	//   104: unclassified (no gas columns, no params) — counts toward neither
 	if _, err := db.Exec(`
 		INSERT INTO block_metrics (
-			network_id, block_number, block_timestamp, blob_count,
+			chain_id, block_number, block_timestamp, blob_count,
 			blob_gas_used, blob_gas_target, blob_gas_limit,
 			excess_blob_gas, blob_base_fee, utilization_ratio,
 			blob_params_target, blob_params_max, update_fraction
@@ -827,7 +827,7 @@ func TestBlockMetricsRollupThresholdCounts(t *testing.T) {
 	// block_metrics triggers: one more above-target block...
 	if _, err := db.Exec(`
 		INSERT INTO block_metrics (
-			network_id, block_number, block_timestamp, blob_count,
+			chain_id, block_number, block_timestamp, blob_count,
 			blob_gas_used, blob_gas_target, blob_gas_limit,
 			excess_blob_gas, blob_base_fee, utilization_ratio,
 			blob_params_target, blob_params_max, update_fraction
@@ -840,7 +840,7 @@ func TestBlockMetricsRollupThresholdCounts(t *testing.T) {
 	}
 
 	// ...and removing an at-max block drops both counters.
-	if _, err := db.Exec(`DELETE FROM block_metrics WHERE network_id = 1 AND block_number = 101`); err != nil {
+	if _, err := db.Exec(`DELETE FROM block_metrics WHERE chain_id = 1 AND block_number = 101`); err != nil {
 		t.Fatalf("delete at-max block: %v", err)
 	}
 	for _, bucketSeconds := range []int{3600, 21600, 86400} {
@@ -858,7 +858,7 @@ func assertRollupThresholdCounts(t *testing.T, db *sqlx.DB, bucketSeconds int, w
 	if err := db.Get(&got, `
 		SELECT block_count, blocks_above_target, blocks_at_max
 		FROM block_metrics_rollups
-		WHERE network_id = 1 AND bucket_seconds = $1
+		WHERE chain_id = 1 AND bucket_seconds = $1
 	`, bucketSeconds); err != nil {
 		t.Fatalf("get rollup counts for bucket %d: %v", bucketSeconds, err)
 	}
