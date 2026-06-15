@@ -335,6 +335,9 @@ func TestSubscriptions_SuccessPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubscribeToPendingTransactions() error = %v", err)
 	}
+	if cap(pendingSub.Hashes) != pendingTxSubscriptionBuffer {
+		t.Fatalf("expected pending tx hash buffer %d, got %d", pendingTxSubscriptionBuffer, cap(pendingSub.Hashes))
+	}
 	select {
 	case <-pendingSub.Hashes:
 	case <-time.After(200 * time.Millisecond):
@@ -574,5 +577,23 @@ func TestClose_UnsubscribesAndClearsMaps(t *testing.T) {
 	}
 	if len(c.blockSubs) != 0 || len(c.pendingTxSubs) != 0 {
 		t.Fatal("expected subscription maps to be cleared")
+	}
+}
+
+func TestResubscribeToPendingTransactions_RemovesStaleSubscriptionOnFailure(t *testing.T) {
+	pendingSub := &testRPCSub{errCh: make(chan error)}
+	c := &Client{
+		isWebsocket:   false,
+		pendingTxSubs: map[string]*PendingTxSubscription{"pending": {Subscription: pendingSub}},
+	}
+
+	if _, err := c.ResubscribeToPendingTransactions(context.Background(), "pending"); err == nil {
+		t.Fatal("expected resubscribe to fail for non-websocket client")
+	}
+	if !pendingSub.unsubscribed {
+		t.Fatal("expected stale subscription to be unsubscribed")
+	}
+	if len(c.pendingTxSubs) != 0 {
+		t.Fatal("expected stale subscription to be removed")
 	}
 }
