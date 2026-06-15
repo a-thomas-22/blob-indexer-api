@@ -136,8 +136,10 @@ chart renders no Secret of its own. Otherwise the chart manages a Secret named
 
 {{/*
 Whether the chart should render its own RPC Secret. Only true when an
-existingSecret is not provided and at least one enabled network ships an
-rpc_url through values (chart-managed Secret path).
+existingSecret is not provided and at least one network ships an rpc_url through
+values (chart-managed Secret path). This does not filter on the network's
+`enabled` flag — a values-supplied rpc_url is sufficient to manage a Secret key
+for it.
 */}}
 {{- define "blob-indexer.createRpcSecret" -}}
 {{- if not .Values.rpcSecret.existingSecret -}}
@@ -152,16 +154,18 @@ true
 {{/*
 Environment variable name carrying a network's RPC URL.
 
-The application reads NETWORK_<UPPER(name)>_RPC_URL overrides (see
-internal/config/config.go). Kubernetes env var names and Secret keys must match
-[A-Za-z_][A-Za-z0-9_]*, so any character outside [A-Za-z0-9_] in the network
-name is normalised to "_". Network names should therefore use only
-alphanumerics and underscores; "-" and "." are tolerated by normalisation but
-two names that differ only by such characters would collide.
+The application reads overrides as exactly "NETWORK_" + strings.ToUpper(name) +
+"_RPC_URL" (internal/config/config.go) with NO character substitution, so this
+helper must match byte-for-byte: it only uppercases the name. Network names must
+therefore be limited to characters valid in a Kubernetes env var name / Secret
+key ([A-Za-z0-9_.-]); the built-in networks (mainnet, sepolia, holesky) already
+satisfy this. Normalising here would silently break the override lookup for any
+name containing "-" or "." (e.g. chart "NETWORK_OP_MAINNET_RPC_URL" vs app
+"NETWORK_OP-MAINNET_RPC_URL").
 */}}
 {{- define "blob-indexer.rpcEnvName" -}}
 {{- $name := required "appConfig.networks[].name is required" . | toString | upper -}}
-{{- printf "NETWORK_%s_RPC_URL" (regexReplaceAll "[^A-Z0-9_]" $name "_") -}}
+{{- printf "NETWORK_%s_RPC_URL" $name -}}
 {{- end }}
 
 {{/*

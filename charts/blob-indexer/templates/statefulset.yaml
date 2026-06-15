@@ -80,6 +80,10 @@ spec:
           volumeMounts:
             - name: config-volume
               mountPath: /etc/config
+            {{- if .Values.indexer.livenessProbe.enabled }}
+            - name: indexer-heartbeat
+              mountPath: /var/run/indexer
+            {{- end }}
           {{- with .Values.indexer.livenessProbe }}
           {{- if .enabled }}
           livenessProbe:
@@ -113,4 +117,11 @@ spec:
         - name: config-volume
           configMap:
             name: {{ include "blob-indexer.fullname" . }}-config
+        {{- if .Values.indexer.livenessProbe.enabled }}
+        # Writable scratch volume for the liveness heartbeat file. Required
+        # because the pod runs with readOnlyRootFilesystem: true, so the
+        # heartbeat path must live on a mounted writable volume.
+        - name: indexer-heartbeat
+          emptyDir: {}
+        {{- end }}
 {{- end }}

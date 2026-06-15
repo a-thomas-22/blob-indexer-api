@@ -33,7 +33,10 @@ indexer:
   # (or a local health endpoint is wired up). See statefulset.yaml TODO.
   livenessProbe:
     enabled: false
-    heartbeatPath: /tmp/indexer-heartbeat
+    # Must live on a writable mounted volume: the pod runs with a read-only root
+    # filesystem, so when this probe is enabled the chart mounts an emptyDir at
+    # /var/run/indexer to hold the heartbeat file.
+    heartbeatPath: /var/run/indexer/heartbeat
     # Restart only if the heartbeat is older than this many seconds.
     maxStaleSeconds: 300
     initialDelaySeconds: 120
@@ -132,8 +135,9 @@ migrations:
 #      Helm release history and any values file — acceptable for local dev,
 #      NOT for shared/non-local installs.
 #
-# Network names should use only [A-Za-z0-9_]; other characters are normalised
-# to "_" when building the env var / Secret key.
+# The env var / Secret key is "NETWORK_<UPPER(name)>_RPC_URL", matching the app's
+# lookup byte-for-byte (no character substitution). Network names must use only
+# characters valid in an env var name / Secret key ([A-Za-z0-9_.-]).
 rpcSecret:
   # Name of a pre-provisioned Secret holding NETWORK_<NAME>_RPC_URL keys. When
   # set, the chart renders no Secret and ignores appConfig.networks[].rpc_url.
@@ -213,15 +217,22 @@ externalDatabase:
   url: ""
 
 # API health check configuration.
-#   livenessPath  — must NOT touch the database (a DB blip should not restart
-#                   the pod). Defaults to /api/v1/healthz.
-#   readinessPath — pings the database so traffic only reaches pods that can
-#                   serve queries. Defaults to /api/v1/readyz.
-# `path` is the legacy fallback used when livenessPath/readinessPath are unset.
+#   path          — endpoint used by both probes when livenessPath/readinessPath
+#                   are unset (the default).
+#   livenessPath  — should NOT touch the database (a DB blip must not restart the
+#                   pod). Once the app image exposes /api/v1/healthz (no DB), set
+#                   this to /api/v1/healthz.
+#   readinessPath — should ping the database so traffic only reaches pods that
+#                   can serve queries. Once the app image exposes /api/v1/readyz
+#                   (DB ping), set this to /api/v1/readyz.
+# Defaults are intentionally empty so both probes fall back to `path`
+# (/api/v1/status), keeping the chart compatible with app images that predate
+# the dedicated health endpoints. Flip them in a release coordinated with the
+# app version that adds /healthz + /readyz.
 healthCheck:
   path: /api/v1/status
-  livenessPath: /api/v1/healthz
-  readinessPath: /api/v1/readyz
+  livenessPath: ""
+  readinessPath: ""
   initialDelaySeconds: 60
   periodSeconds: 15
 

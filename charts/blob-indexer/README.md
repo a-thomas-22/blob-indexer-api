@@ -51,10 +51,14 @@ Helm release history and any values file** — do not use it for shared installs
 
 ## Health probes
 
-- **API Deployment** — `livenessProbe` → `healthCheck.livenessPath`
-  (default `/api/v1/healthz`, DB-independent so a DB blip never restarts the
-  pod); `readinessProbe` → `healthCheck.readinessPath` (default
-  `/api/v1/readyz`, pings the DB). `healthCheck.path` is the legacy fallback.
+- **API Deployment** — `livenessProbe` → `healthCheck.livenessPath`,
+  `readinessProbe` → `healthCheck.readinessPath`. Both default to **empty**, so
+  they fall back to `healthCheck.path` (`/api/v1/status`) and stay compatible
+  with app images that predate the dedicated health endpoints. Once the app
+  image exposes `/api/v1/healthz` (DB-independent, so a DB blip never restarts
+  the pod) and `/api/v1/readyz` (pings the DB), set `livenessPath: /api/v1/healthz`
+  and `readinessPath: /api/v1/readyz` in a release coordinated with that app
+  version.
 - **Indexer StatefulSet** — `indexer.livenessProbe` is a deliberately
   RPC-independent exec probe on a heartbeat file (`heartbeatPath`), so an
   upstream provider outage does not cause a restart storm. It is **disabled by
