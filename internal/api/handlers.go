@@ -95,7 +95,9 @@ func (a *API) respondJSON(w http.ResponseWriter, status int, data interface{}) {
 		logger.Error("Failed to encode JSON response", zap.Error(err))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"internal server error"}`))
+		// Hand-written to match the standard error envelope (success, error,
+		// error_code) since the encoder just failed.
+		_, _ = w.Write([]byte(`{"success":false,"error":"internal server error","error_code":"` + errCodeInternal + `"}`))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
