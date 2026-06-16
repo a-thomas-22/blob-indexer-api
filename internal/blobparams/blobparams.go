@@ -8,6 +8,18 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
+// BytesPerBlob is the size of a single EIP-4844 blob in bytes: a blob holds
+// 4096 field elements of 32 bytes each (4096 * 32 = 131072). This is the
+// canonical Go-side source for the blob byte size.
+//
+// Note that 131072 is also EIP-4844's GAS_PER_BLOB
+// (go-ethereum params.BlobTxBlobGasPerBlob): the per-blob byte size and the
+// per-blob gas amount share the same numeric value by protocol definition. The
+// blob-gas SQL in the migrations and the api package multiplies blob counts by
+// this same literal, so the drift-guard test treats 131072 as a single shared
+// protocol constant.
+const BytesPerBlob = 4096 * 32
+
 const (
 	forkBPO5    = "BPO5"
 	forkBPO4    = "BPO4"
