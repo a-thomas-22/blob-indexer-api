@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -59,5 +60,36 @@ func TestMaxBytesError_IncludesErrorCode(t *testing.T) {
 	}
 	if got := decodeErrResp(t, w.Body.Bytes()).ErrorCode; got == "" {
 		t.Error("expected a non-empty error_code on the 413 response")
+	}
+}
+
+func TestDevModeDisabled404_IncludesErrorCode(t *testing.T) {
+	h := DevModeMiddleware(false)(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+	if got := decodeErrResp(t, w.Body.Bytes()).ErrorCode; got != errCodeNotFound {
+		t.Errorf("not-found error_code = %q, want %q", got, errCodeNotFound)
+	}
+}
+
+func TestContentTypeJSON415_IncludesErrorCode(t *testing.T) {
+	h := ContentTypeJSON(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("data"))
+	req.Header.Set("Content-Type", "text/plain")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected 415, got %d", w.Code)
+	}
+	if got := decodeErrResp(t, w.Body.Bytes()).ErrorCode; got == "" {
+		t.Error("expected a non-empty error_code on the 415 response")
 	}
 }
