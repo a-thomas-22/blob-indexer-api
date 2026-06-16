@@ -25,9 +25,13 @@ const mempoolPressureSampleLimit = 10000
 
 // BlobResponse is a response containing blob data
 type BlobResponse struct {
-	ChainID               int    `json:"chain_id"`
-	NetworkName           string `json:"network_name,omitempty"`
-	BlockNumber           int64  `json:"block_number"`
+	ChainID     int    `json:"chain_id"`
+	NetworkName string `json:"network_name,omitempty"`
+	// BlockNumber is the including block height, or null for pending (mempool)
+	// blobs that have not yet been included. The confirmed flag is the source of
+	// truth for inclusion; this field is null whenever the internal block_number
+	// sentinel (models.PendingBlockNumber) is stored.
+	BlockNumber           *int64 `json:"block_number" extensions:"x-nullable=true" example:"19000000"`
 	BlobIndex             int    `json:"blob_index"`
 	TxHash                string `json:"tx_hash"`
 	TransactionURL        string `json:"transaction_url,omitempty"`
@@ -182,10 +186,20 @@ type mempoolPressureAggregate struct {
 func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
 	explorerURLs := explorerURLsForBlob(blob.ChainID, blob.TxHash, blob.FromAddress, blob.BlockNumber, blob.Confirmed)
 
+	// Pending (mempool) rows carry the internal block_number sentinel
+	// (models.PendingBlockNumber); serialize them as JSON null rather than a
+	// negative number. The confirmed flag remains the source of truth for
+	// inclusion.
+	var blockNumber *int64
+	if blob.BlockNumber >= 0 {
+		bn := blob.BlockNumber
+		blockNumber = &bn
+	}
+
 	response := BlobResponse{
 		ChainID:               blob.ChainID,
 		NetworkName:           networkName,
-		BlockNumber:           blob.BlockNumber,
+		BlockNumber:           blockNumber,
 		BlobIndex:             blob.BlobIndex,
 		TxHash:                blob.TxHash,
 		TransactionURL:        explorerURLs.Transaction,

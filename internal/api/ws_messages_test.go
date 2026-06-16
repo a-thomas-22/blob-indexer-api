@@ -64,6 +64,7 @@ func TestWSEvent_MarshalJSON(t *testing.T) {
 }
 
 func TestWSEvent_WithData_MarshalJSON(t *testing.T) {
+	blobBlockNumber := int64(12345)
 	event := WSEvent{
 		Type: EventNewBlock,
 		Data: NewBlockData{
@@ -71,7 +72,7 @@ func TestWSEvent_WithData_MarshalJSON(t *testing.T) {
 			BlobCount:   3,
 			Timestamp:   time.Date(2026, 3, 9, 14, 0, 0, 0, time.UTC),
 			Blobs: []BlobResponse{
-				{TxHash: "0xabc", BlockNumber: 12345, NetworkName: "sepolia"},
+				{TxHash: "0xabc", BlockNumber: &blobBlockNumber, NetworkName: "sepolia"},
 			},
 			Pricing: &BlockPricingResponse{
 				BlockNumber:        12345,

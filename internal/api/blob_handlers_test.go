@@ -746,7 +746,7 @@ func TestGetMempoolBlobs_WithData(t *testing.T) {
 			setSliceResult(dest, []models.Blob{
 				{
 					ChainID:           42,
-					BlockNumber:       -1,
+					BlockNumber:       models.PendingBlockNumber,
 					TxHash:            "0xpending",
 					FromAddress:       "0xsender",
 					BlobSizeBytes:     131072,
@@ -916,5 +916,151 @@ func TestGetMempoolBlobs_AddressFilterDBError(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
+// firstBlobRawBlockNumber decodes the response envelope and returns the raw
+// JSON token for data[0].block_number, so tests can distinguish a literal null
+// from a number on the wire.
+func firstBlobRawBlockNumber(t *testing.T, body []byte) json.RawMessage {
+	t.Helper()
+	var envelope struct {
+		Data []map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(envelope.Data) == 0 {
+		t.Fatalf("expected at least one blob in response, got none")
+	}
+	raw, ok := envelope.Data[0]["block_number"]
+	if !ok {
+		t.Fatalf("block_number field missing from blob response")
+	}
+	return raw
+}
+
+func TestToBlobResponse_PendingBlockNumberSerializesNull(t *testing.T) {
+	resp := toBlobResponse(models.Blob{
+		ChainID:           42,
+		BlockNumber:       models.PendingBlockNumber,
+		TxHash:            "0xpending",
+		FromAddress:       "0xsender",
+		BaseFeePerBlobGas: "1000000",
+		TipPerBlobGas:     "500",
+		TotalCostWei:      "0",
+		Timestamp:         time.Now(),
+		Confirmed:         false,
+	}, "testnet")
+
+	if resp.BlockNumber != nil {
+		t.Fatalf("expected nil BlockNumber for pending blob, got %d", *resp.BlockNumber)
+	}
+
+	encoded, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal response: %v", err)
+	}
+	raw := firstBlobRawBlockNumber(t, []byte(`{"data":[`+string(encoded)+`]}`))
+	if string(raw) != "null" {
+		t.Fatalf("expected block_number null on the wire, got %s", raw)
+	}
+}
+
+func TestToBlobResponse_ConfirmedBlockNumberSerializesNumber(t *testing.T) {
+	resp := toBlobResponse(models.Blob{
+		ChainID:           42,
+		BlockNumber:       100,
+		TxHash:            "0xconfirmed",
+		FromAddress:       "0xsender",
+		BaseFeePerBlobGas: "1000000",
+		TipPerBlobGas:     "500",
+		TotalCostWei:      "0",
+		Timestamp:         time.Now(),
+		Confirmed:         true,
+	}, "testnet")
+
+	if resp.BlockNumber == nil {
+		t.Fatal("expected non-nil BlockNumber for confirmed blob")
+	}
+	if *resp.BlockNumber != 100 {
+		t.Fatalf("expected BlockNumber 100, got %d", *resp.BlockNumber)
+	}
+
+	encoded, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal response: %v", err)
+	}
+	raw := firstBlobRawBlockNumber(t, []byte(`{"data":[`+string(encoded)+`]}`))
+	if string(raw) != "100" {
+		t.Fatalf("expected block_number 100 on the wire, got %s", raw)
+	}
+}
+
+func TestGetMempoolBlobs_PendingBlockNumberNull(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setSliceResult(dest, []models.Blob{
+				{
+					ChainID:           42,
+					BlockNumber:       models.PendingBlockNumber,
+					TxHash:            "0xpending",
+					FromAddress:       "0xsender",
+					BlobSizeBytes:     131072,
+					BaseFeePerBlobGas: "1000000",
+					TipPerBlobGas:     "500",
+					TotalCostWei:      "0",
+					Timestamp:         time.Now(),
+					Confirmed:         false,
+				},
+			})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=10", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetMempoolBlobs(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	raw := firstBlobRawBlockNumber(t, w.Body.Bytes())
+	if string(raw) != "null" {
+		t.Fatalf("expected pending block_number null on the wire, got %s", raw)
+	}
+}
+
+func TestGetLatestBlobs_ConfirmedBlockNumberNumber(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setSliceResult(dest, []models.Blob{
+				{
+					ChainID:           42,
+					BlockNumber:       100,
+					TxHash:            "0xconfirmed",
+					FromAddress:       "0xsender",
+					BlobSizeBytes:     131072,
+					BaseFeePerBlobGas: "1000000",
+					TipPerBlobGas:     "500",
+					TotalCostWei:      "0",
+					Timestamp:         time.Now(),
+					Confirmed:         true,
+				},
+			})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?limit=10", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetLatestBlobs(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	raw := firstBlobRawBlockNumber(t, w.Body.Bytes())
+	if string(raw) != "100" {
+		t.Fatalf("expected confirmed block_number 100 on the wire, got %s", raw)
 	}
 }
