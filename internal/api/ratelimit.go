@@ -1,6 +1,7 @@
 package api
 
 import (
+	"container/list"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 type visitor struct {
 	tokens   float64
 	lastSeen time.Time
+	elem     *list.Element // position in the LRU list (Value is the IP string)
 }
 
 // maxVisitors caps the number of per-IP token buckets the rate limiter retains.
@@ -27,6 +29,7 @@ const maxVisitors = 100_000
 // RateLimiter implements a per-IP token bucket rate limiter.
 type RateLimiter struct {
 	visitors    map[string]*visitor
+	lru         *list.List // front = most recently used, back = least; values are IP strings
 	mu          sync.Mutex
 	rate        float64 // tokens per second
 	burst       float64 // max tokens
@@ -39,6 +42,7 @@ type RateLimiter struct {
 func NewRateLimiter(rate float64, burst int) *RateLimiter {
 	rl := &RateLimiter{
 		visitors:    make(map[string]*visitor),
+		lru:         list.New(),
 		rate:        rate,
 		burst:       float64(burst),
 		maxVisitors: maxVisitors,
@@ -55,6 +59,9 @@ func (rl *RateLimiter) cleanup() {
 		rl.mu.Lock()
 		for ip, v := range rl.visitors {
 			if time.Since(v.lastSeen) > 3*time.Minute {
+				if v.elem != nil {
+					rl.lru.Remove(v.elem)
+				}
 				delete(rl.visitors, ip)
 			}
 		}
@@ -70,13 +77,23 @@ func (rl *RateLimiter) allow(ip string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
+	// Defensive: NewRateLimiter always sets this, but direct struct construction
+	// (e.g. in tests) may not.
+	if rl.lru == nil {
+		rl.lru = list.New()
+	}
+
 	now := time.Now()
 	v, exists := rl.visitors[ip]
 	if !exists {
-		rl.evictIfFull(now)
-		rl.visitors[ip] = &visitor{tokens: rl.burst - 1, lastSeen: now}
+		rl.evictIfFull()
+		elem := rl.lru.PushFront(ip)
+		rl.visitors[ip] = &visitor{tokens: rl.burst - 1, lastSeen: now, elem: elem}
 		return true
 	}
+
+	// Existing visitor — mark most-recently-used.
+	rl.lru.MoveToFront(v.elem)
 
 	// Replenish tokens based on elapsed time
 	elapsed := now.Sub(v.lastSeen).Seconds()
@@ -94,26 +111,19 @@ func (rl *RateLimiter) allow(ip string) bool {
 	return true
 }
 
-// evictIfFull removes the least-recently-seen visitor when the map is at
-// capacity, bounding memory under a flood of distinct client IPs. Callers must
-// hold rl.mu. now is passed in so eviction shares the caller's clock reading.
-func (rl *RateLimiter) evictIfFull(now time.Time) {
+// evictIfFull removes the least-recently-used visitor when the map is at
+// capacity, bounding memory under a flood of distinct client IPs. O(1) via the
+// LRU list (the back element), so it stays cheap even during the flood it
+// guards against. Callers must hold rl.mu.
+func (rl *RateLimiter) evictIfFull() {
 	if rl.maxVisitors <= 0 || len(rl.visitors) < rl.maxVisitors {
 		return
 	}
-
-	var oldestIP string
-	oldestSeen := now
-	found := false
-	for ip, v := range rl.visitors {
-		if !found || v.lastSeen.Before(oldestSeen) {
-			oldestIP = ip
-			oldestSeen = v.lastSeen
-			found = true
-		}
-	}
-	if found {
-		delete(rl.visitors, oldestIP)
+	back := rl.lru.Back()
+	if back != nil {
+		ip, _ := back.Value.(string)
+		delete(rl.visitors, ip)
+		rl.lru.Remove(back)
 	}
 }
 
