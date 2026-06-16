@@ -55,6 +55,9 @@ func TestGetLatestBlobs_Success(t *testing.T) {
 	if !resp.Success {
 		t.Error("expected Success=true")
 	}
+	if got := w.Header().Get("Cache-Control"); got != "public, max-age=5" {
+		t.Errorf("Cache-Control = %q, want public, max-age=5", got)
+	}
 }
 
 func TestGetLatestBlobs_InvalidLimit(t *testing.T) {
@@ -403,6 +406,44 @@ func TestGetBlobByTxHash_Success(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "public, max-age=60" {
+		t.Errorf("confirmed blob Cache-Control = %q, want public, max-age=60", got)
+	}
+}
+
+func TestGetBlobByTxHash_PendingNotCached(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			blob := dest.(*models.Blob)
+			*blob = models.Blob{
+				ChainID:           42,
+				BlockNumber:       models.PendingBlockNumber,
+				TxHash:            validTestTxHash,
+				FromAddress:       "0x123",
+				BlobSizeBytes:     131072,
+				BaseFeePerBlobGas: "1000",
+				TipPerBlobGas:     "100",
+				TotalCostWei:      "1",
+				Timestamp:         time.Now(),
+				Confirmed:         false,
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	r := chi.NewRouter()
+	r.Get("/blob/{txHash}", a.GetBlobByTxHash)
+
+	req := httptest.NewRequest(http.MethodGet, "/blob/"+validTestTxHash, http.NoBody)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "" {
+		t.Errorf("pending blob must not be cached, got Cache-Control = %q", got)
 	}
 }
 
