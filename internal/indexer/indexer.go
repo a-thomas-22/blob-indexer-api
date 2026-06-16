@@ -1353,11 +1353,17 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 		}
 
 		storedHash, err := i.db.GetIndexedBlockHash(i.ctx, i.network.ChainID, forkBlock)
-		if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
 			// Past our indexed range — treat the earliest indexed block as the
 			// fork point. This is a benign exit, not a depth-cap exhaustion.
 			forkFound = true
 			break
+		}
+		if err != nil {
+			// A transient DB error or context cancellation must not be mistaken
+			// for the boundary condition above: abort and leave indexed data
+			// intact rather than rewinding to an unverified fork point.
+			return fmt.Errorf("failed to read stored hash for block %d during reorg scan: %w", forkBlock, err)
 		}
 
 		if storedHash == block.Hash().Hex() {

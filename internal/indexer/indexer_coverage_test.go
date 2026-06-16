@@ -1701,6 +1701,30 @@ func TestHandleReorg_DepthCapExhausted(t *testing.T) {
 	}
 }
 
+func TestHandleReorg_StoredHashDBErrorAborts(t *testing.T) {
+	idx := newTestIndexer()
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+	idx.ethClient, _ = newMockEthClient(t, 10)
+
+	// A transient DB error reading the stored hash must abort the reorg, NOT be
+	// treated as "past indexed range" and trigger a delete/rewind.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE chain_id = $1 AND block_number = $2")).
+		WithArgs(idx.network.ChainID, uint64(9)).
+		WillReturnError(errors.New("connection reset"))
+
+	err := idx.handleReorg(10)
+	if err == nil || errors.Is(err, errReorgDetected) {
+		t.Fatalf("expected a hard DB error (not errReorgDetected), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "stored hash") {
+		t.Fatalf("expected a stored-hash read error, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unexpected/unmet sqlmock expectations (no delete should occur): %v", err)
+	}
+}
+
 func TestBlockProcessingWorker_ProcessesTask(t *testing.T) {
 	idx := newTestIndexer()
 	idxDB, mock := newMockIndexerDB(t)
