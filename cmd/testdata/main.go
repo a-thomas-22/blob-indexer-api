@@ -93,6 +93,10 @@ func generateTestData(ctx context.Context, database *db.DB) error {
 	return nil
 }
 
+// seedChainID is the network the generated test data is attributed to
+// (mainnet, which the baseline migration seeds into the networks table).
+const seedChainID = 1
+
 func addKnownRollups(ctx context.Context, database *db.DB) error {
 	log.Println("Adding known rollups...")
 
@@ -100,16 +104,16 @@ func addKnownRollups(ctx context.Context, database *db.DB) error {
 	for _, rollup := range knownRollups {
 		now := time.Now()
 		query := `
-			INSERT INTO blob_users (address, name, description, category, first_seen, last_seen)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (address) DO UPDATE SET
-				name = $2,
-				description = $3,
-				category = $4,
-				last_seen = $6
+			INSERT INTO blob_users (chain_id, address, name, description, category, first_seen, last_seen)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			ON CONFLICT (chain_id, address) DO UPDATE SET
+				name = $3,
+				description = $4,
+				category = $5,
+				last_seen = $7
 		`
 		_, err := database.ExecContext(ctx, query,
-			rollup.Address, rollup.Name, rollup.Description, rollup.Category, now, now,
+			seedChainID, rollup.Address, rollup.Name, rollup.Description, rollup.Category, now, now,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert rollup %s: %w", rollup.Name, err)
@@ -134,6 +138,7 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 
 		// Create a blob
 		blob := models.Blob{
+			ChainID:           seedChainID,
 			BlockNumber:       startBlock + int64(i/2), // Two blobs per block
 			BlobIndex:         i % 2,                   // Alternate between 0 and 1
 			TxHash:            fmt.Sprintf("0x%064x", i),
@@ -150,25 +155,25 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 		// Insert the blob
 		query := `
 			INSERT INTO blobs (
-				block_number, blob_index, tx_hash, from_address, user_attribution,
+				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
 				timestamp, confirmed
 			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 			)
-			ON CONFLICT (block_number, blob_index) DO UPDATE SET
-				tx_hash = $3,
-				from_address = $4,
-				user_attribution = $5,
-				blob_size_bytes = $6,
-				base_fee_per_blob_gas = $7,
-				tip_per_blob_gas = $8,
-				total_cost_wei = $9,
-				timestamp = $10,
-				confirmed = $11
+			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
+				tx_hash = $4,
+				from_address = $5,
+				user_attribution = $6,
+				blob_size_bytes = $7,
+				base_fee_per_blob_gas = $8,
+				tip_per_blob_gas = $9,
+				total_cost_wei = $10,
+				timestamp = $11,
+				confirmed = $12
 		`
 		_, err := database.ExecContext(ctx, query,
-			blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
+			blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 			blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
 			blob.Timestamp, blob.Confirmed,
 		)
@@ -185,8 +190,9 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 
 		// Create a pending blob
 		blob := models.Blob{
-			BlockNumber:       -1, // Pending
-			BlobIndex:         0,
+			ChainID:           seedChainID,
+			BlockNumber:       -1, // Pending (internal sentinel)
+			BlobIndex:         i,  // distinct per pending row
 			TxHash:            fmt.Sprintf("0xpending%064x", i),
 			FromAddress:       rollup.Address,
 			UserAttribution:   rollup.Name,
@@ -201,24 +207,25 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 		// Insert the pending blob
 		query := `
 			INSERT INTO blobs (
-				block_number, blob_index, tx_hash, from_address, user_attribution,
+				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
 				timestamp, confirmed
 			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 			)
-			ON CONFLICT (tx_hash) DO UPDATE SET
-				from_address = $4,
-				user_attribution = $5,
-				blob_size_bytes = $6,
-				base_fee_per_blob_gas = $7,
-				tip_per_blob_gas = $8,
-				total_cost_wei = $9,
-				timestamp = $10,
-				confirmed = $11
+			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
+				tx_hash = $4,
+				from_address = $5,
+				user_attribution = $6,
+				blob_size_bytes = $7,
+				base_fee_per_blob_gas = $8,
+				tip_per_blob_gas = $9,
+				total_cost_wei = $10,
+				timestamp = $11,
+				confirmed = $12
 		`
 		_, err := database.ExecContext(ctx, query,
-			blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
+			blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 			blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
 			blob.Timestamp, blob.Confirmed,
 		)

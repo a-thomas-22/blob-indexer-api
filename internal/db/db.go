@@ -92,8 +92,8 @@ func RunMigrations(dbURL string) error {
 }
 
 // UpsertNetworks syncs configured networks into the networks table. The rest of
-// the schema uses chain_id as chain_id, so this must run before indexed rows
-// are written when foreign keys are enabled.
+// the schema references networks by chain_id (the canonical network key), so
+// this must run before indexed rows are written when foreign keys are enabled.
 func (db *DB) UpsertNetworks(ctx context.Context, networks []config.NetworkConfig) error {
 	query := `
 		INSERT INTO networks (chain_id, name, start_block, is_enabled, updated_at)

@@ -77,9 +77,9 @@ func (s *Service) Initialize(ctx context.Context) error {
 	return nil
 }
 
-// SetChainID sets the network ID for the service
-func (s *Service) SetChainID(networkID int) {
-	s.networkID = networkID
+// SetChainID sets the chain ID (canonical network key) for the service.
+func (s *Service) SetChainID(chainID int) {
+	s.networkID = chainID
 }
 
 // GetUserAttribution gets the current user attribution for an address.
