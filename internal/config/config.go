@@ -543,6 +543,9 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 	if err := validateServerPorts(cfg); err != nil {
 		return err
 	}
+	if err := validateDevAuth(cfg); err != nil {
+		return err
+	}
 	if err := validateCORSConfig(cfg); err != nil {
 		return err
 	}
@@ -607,6 +610,52 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 func validateCORSConfig(cfg *Config) error {
 	if cfg.CORS.MaxAgeSeconds < 0 {
 		return fmt.Errorf("cors.max_age_seconds must be greater than or equal to 0")
+	}
+
+	// Reflecting an arbitrary Origin while also sending
+	// Access-Control-Allow-Credentials: true lets any site read credentialed
+	// responses. The middleware reflects the request Origin for allow-all, so
+	// this combination is forbidden. A literal "*" in allowed_origins is treated
+	// as allow-all by the middleware, so it is rejected here too.
+	if cfg.CORS.AllowCredentials && corsAllowsAllOrigins(cfg.CORS) {
+		return fmt.Errorf("cors.allow_credentials cannot be combined with allow-all origins (cors.allow_all_origins, or \"*\" in cors.allowed_origins or cors.allowed_origin_patterns)")
+	}
+	return nil
+}
+
+// corsAllowsAllOrigins reports whether the CORS config grants every origin —
+// via the allow_all_origins flag, or a literal "*" entry in allowed_origins, or
+// a literal "*" in allowed_origin_patterns. The middleware promotes all three to
+// allow-all (wildcardMatch treats "*" as match-all).
+func corsAllowsAllOrigins(cfg CORSConfig) bool {
+	if cfg.AllowAllOrigins {
+		return true
+	}
+	for _, origin := range cfg.AllowedOrigins {
+		if strings.TrimSpace(origin) == "*" {
+			return true
+		}
+	}
+	for _, pattern := range cfg.AllowedOriginPatterns {
+		if strings.TrimSpace(pattern) == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+// validateDevAuth fails closed when development endpoints are enabled without
+// an API key. Otherwise dev_mode=true would expose /dev/* (metrics, logs,
+// arbitrary queries) to the world, since DevAPIKeyMiddleware passes requests
+// through unauthenticated when no key is configured.
+func validateDevAuth(cfg *Config) error {
+	// Require a key whenever dev mode is on. A dedicated dev_port does NOT make
+	// the dev routes private — cmd/api binds it on all interfaces — so isolating
+	// them on their own listener is not sufficient. Without a key,
+	// DevAPIKeyMiddleware passes requests through unauthenticated, leaving /dev/*
+	// (metrics, logs, arbitrary queries) world-readable.
+	if cfg.Server.DevMode && strings.TrimSpace(cfg.Server.DevAPIKey) == "" {
+		return fmt.Errorf("server.dev_api_key is required when server.dev_mode is true (otherwise /dev/* metrics, logs, and queries are world-readable)")
 	}
 	return nil
 }

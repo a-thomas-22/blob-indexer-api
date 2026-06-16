@@ -17,6 +17,7 @@ database:
 server:
   port: 9090
   dev_mode: true
+  dev_api_key: "test-dev-key"
 logging:
   level: debug
   format: json
@@ -339,6 +340,7 @@ networks:
 
 	t.Setenv("CONFIG_PATH", configFile)
 	t.Setenv("DEV_MODE", "true")
+	t.Setenv("DEV_API_KEY", "test-dev-key")
 
 	cfg, err := Load()
 	if err != nil {

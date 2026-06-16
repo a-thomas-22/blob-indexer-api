@@ -58,6 +58,17 @@ func TestGetNetworkFromRequest(t *testing.T) {
 				a.networks = map[int]config.NetworkConfig{}
 			},
 		},
+		{
+			name:    "multiple networks require explicit selector",
+			url:     "/",
+			wantErr: ErrNetworkParamRequired,
+			setup: func(a *API) {
+				a.networks = map[int]config.NetworkConfig{
+					1:        {Name: "mainnet", ChainID: 1, Enabled: true},
+					11155111: {Name: "sepolia", ChainID: 11155111, Enabled: true},
+				}
+			},
+		},
 	}
 
 	for _, tc := range tests {
