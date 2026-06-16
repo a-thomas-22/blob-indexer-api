@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lib/pq"
@@ -81,6 +82,10 @@ type Response struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
 	Error   string      `json:"error,omitempty"`
+	// ErrorCode is a stable, machine-readable identifier for the error
+	// (e.g. "not_found", "rate_limited"). It is derived from the HTTP status
+	// and the human-readable message, and is omitted on success responses.
+	ErrorCode string `json:"error_code,omitempty"`
 }
 
 // respondJSON responds with JSON
@@ -90,12 +95,65 @@ func (a *API) respondJSON(w http.ResponseWriter, status int, data interface{}) {
 		logger.Error("Failed to encode JSON response", zap.Error(err))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"internal server error"}`))
+		// Hand-written to match the standard error envelope (success, error,
+		// error_code) since the encoder just failed.
+		_, _ = w.Write([]byte(`{"success":false,"error":"internal server error","error_code":"` + errCodeInternal + `"}`))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(buf.Bytes())
+}
+
+// Stable, machine-readable error codes returned in Response.ErrorCode. These
+// are part of the API contract: clients branch on them, so existing values
+// must not change.
+const (
+	errCodeInvalidRequest     = "invalid_request"
+	errCodeUnauthorized       = "unauthorized"
+	errCodeForbidden          = "forbidden"
+	errCodeNotFound           = "not_found"
+	errCodeRateLimited        = "rate_limited"
+	errCodeServiceUnavailable = "service_unavailable"
+	errCodeInternal           = "internal_error"
+	errCodeNetworkNotFound    = "network_not_found"
+	errCodeGeneric            = "error"
+)
+
+// errorCodeFor derives a stable, machine-readable error code from the HTTP
+// status and the human-readable message. The status provides the baseline
+// code; a few message-keyed overrides surface common specifics that clients
+// branch on. The returned code is intended to be stable across releases so
+// callers can rely on it rather than parsing the human message.
+func errorCodeFor(status int, message string) string {
+	// Message-keyed overrides take precedence so specific errors keep a
+	// distinct code even when they share a status with the generic case.
+	lower := strings.ToLower(message)
+	switch {
+	case strings.Contains(lower, "network not found"):
+		return errCodeNetworkNotFound
+	case strings.Contains(lower, "rate limit"):
+		return errCodeRateLimited
+	}
+
+	switch status {
+	case http.StatusBadRequest:
+		return errCodeInvalidRequest
+	case http.StatusUnauthorized:
+		return errCodeUnauthorized
+	case http.StatusForbidden:
+		return errCodeForbidden
+	case http.StatusNotFound:
+		return errCodeNotFound
+	case http.StatusTooManyRequests:
+		return errCodeRateLimited
+	case http.StatusServiceUnavailable:
+		return errCodeServiceUnavailable
+	case http.StatusInternalServerError:
+		return errCodeInternal
+	default:
+		return errCodeGeneric
+	}
 }
 
 // respondError responds with an error
@@ -104,8 +162,9 @@ func (a *API) respondError(w http.ResponseWriter, status int, message string) {
 		zap.Int("status", status),
 		zap.String("message", message))
 	a.respondJSON(w, status, Response{
-		Success: false,
-		Error:   message,
+		Success:   false,
+		Error:     message,
+		ErrorCode: errorCodeFor(status, message),
 	})
 }
 

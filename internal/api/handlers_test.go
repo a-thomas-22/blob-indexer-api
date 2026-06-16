@@ -107,6 +107,70 @@ func TestRespondError(t *testing.T) {
 	if resp.Error != "bad input" {
 		t.Errorf("expected error 'bad input', got %q", resp.Error)
 	}
+	if resp.ErrorCode != errCodeInvalidRequest {
+		t.Errorf("expected error_code 'invalid_request', got %q", resp.ErrorCode)
+	}
+}
+
+func TestRespondError_MessageOverridesStatusCode(t *testing.T) {
+	api := &API{}
+	w := httptest.NewRecorder()
+
+	// A 400 status whose message names a missing network should map to the
+	// more specific network_not_found code rather than the generic 400 code.
+	api.respondError(w, http.StatusBadRequest, "Network not found: foo")
+
+	var resp Response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	if resp.ErrorCode != errCodeNetworkNotFound {
+		t.Errorf("expected error_code 'network_not_found', got %q", resp.ErrorCode)
+	}
+	if resp.Error != "Network not found: foo" {
+		t.Errorf("human message should be unchanged, got %q", resp.Error)
+	}
+}
+
+func TestRespondError_OmitsErrorCodeOnSuccess(t *testing.T) {
+	// A success response (built directly, not via respondError) must never
+	// carry an error_code, proving the omitempty tag holds.
+	api := &API{}
+	w := httptest.NewRecorder()
+	api.respondJSON(w, http.StatusOK, Response{Success: true, Data: "ok"})
+
+	if strings.Contains(w.Body.String(), "error_code") {
+		t.Errorf("success response should omit error_code, got %q", w.Body.String())
+	}
+}
+
+func TestErrorCodeFor(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		message string
+		want    string
+	}{
+		{"bad request", http.StatusBadRequest, "invalid limit parameter", errCodeInvalidRequest},
+		{"unauthorized", http.StatusUnauthorized, "missing api key", errCodeUnauthorized},
+		{"forbidden", http.StatusForbidden, "dev mode disabled", errCodeForbidden},
+		{"not found", http.StatusNotFound, "blob not found", errCodeNotFound},
+		{"too many requests", http.StatusTooManyRequests, "slow down", errCodeRateLimited},
+		{"service unavailable", http.StatusServiceUnavailable, "database busy", errCodeServiceUnavailable},
+		{"internal error", http.StatusInternalServerError, "boom", errCodeInternal},
+		{"unmapped status falls back", http.StatusTeapot, "short and stout", errCodeGeneric},
+		{"network not found overrides 400", http.StatusBadRequest, "Network not found: mainnet", errCodeNetworkNotFound},
+		{"network not found overrides 404", http.StatusNotFound, "network not found", errCodeNetworkNotFound},
+		{"rate limit message overrides 500", http.StatusInternalServerError, "rate limit exceeded", errCodeRateLimited},
+		{"case-insensitive message match", http.StatusBadRequest, "NETWORK NOT FOUND", errCodeNetworkNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := errorCodeFor(tt.status, tt.message); got != tt.want {
+				t.Errorf("errorCodeFor(%d, %q) = %q, want %q", tt.status, tt.message, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestAPIError(t *testing.T) {
