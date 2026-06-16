@@ -1657,6 +1657,50 @@ func TestHandleReorg_SuccessAndError(t *testing.T) {
 	})
 }
 
+func TestHandleReorg_DepthCapExhausted(t *testing.T) {
+	idx := newTestIndexer()
+	idx.maxReorgDepth = 2
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+	idx.ethClient, _ = newMockEthClient(t, 10)
+
+	fromBlock := uint64(10)
+	// Walk back over forkBlock 9 then 8; both stored hashes mismatch the
+	// canonical chain, so the scan never confirms a common ancestor and exhausts
+	// maxReorgDepth(2) — the dangerous "truncate at an unverified point" branch.
+	for _, fb := range []uint64{9, 8} {
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE chain_id = $1 AND block_number = $2")).
+			WithArgs(idx.network.ChainID, fb).
+			WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow("0xstalehashnevermatchingthechain"))
+	}
+	forkBlock := fromBlock - 1 - uint64(idx.maxReorgDepth) // 7
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, int64(forkBlock+1)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM block_metrics WHERE chain_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, int64(forkBlock+1)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, forkBlock+1).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(forkBlock, 10)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	err := idx.handleReorg(fromBlock)
+	if err == nil || !errors.Is(err, errReorgDetected) {
+		t.Fatalf("expected errReorgDetected, got %v", err)
+	}
+	if got := idx.GetLastIndexedBlock(); got != forkBlock {
+		t.Fatalf("expected lastIndexedBlock=%d after depth-cap truncation, got %d", forkBlock, got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
 func TestBlockProcessingWorker_ProcessesTask(t *testing.T) {
 	idx := newTestIndexer()
 	idxDB, mock := newMockIndexerDB(t)
