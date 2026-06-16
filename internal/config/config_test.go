@@ -107,7 +107,7 @@ func TestValidateDatabaseSSLMode_ProdRejectsDisable(t *testing.T) {
 func TestValidateDatabaseSSLMode_DevAllowsDisable(t *testing.T) {
 	cfg := &Config{
 		Database: DatabaseConfig{URL: "postgres://localhost:5432/test?sslmode=disable"},
-		Server:   ServerConfig{DevMode: true},
+		Server:   ServerConfig{DevMode: true, DevPort: 8081},
 		Networks: []NetworkConfig{
 			{Name: "test", ChainID: 1, Enabled: true},
 		},

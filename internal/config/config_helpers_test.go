@@ -185,6 +185,32 @@ func TestValidateConfig_Success(t *testing.T) {
 	}
 }
 
+func TestValidateConfig_CORSCredentialsWithAllowAllOrigins(t *testing.T) {
+	cfg := &Config{
+		Database: DatabaseConfig{URL: "postgres://localhost/test"},
+		Networks: []NetworkConfig{
+			{Name: "test", ChainID: 1, RpcURL: "http://localhost:8545", StartBlock: "0", Enabled: true},
+		},
+		CORS: CORSConfig{AllowAllOrigins: true, AllowCredentials: true},
+	}
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("expected error for allow_credentials combined with allow-all origins")
+	}
+}
+
+func TestValidateConfig_DevModeRequiresAPIKey(t *testing.T) {
+	cfg := &Config{
+		Database: DatabaseConfig{URL: "postgres://localhost/test"},
+		Networks: []NetworkConfig{
+			{Name: "test", ChainID: 1, RpcURL: "http://localhost:8545", StartBlock: "0", Enabled: true},
+		},
+		Server: ServerConfig{DevMode: true, DevAPIKey: ""},
+	}
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("expected error when dev_mode is true but dev_api_key is empty")
+	}
+}
+
 func TestMaskConnectionString(t *testing.T) {
 	result := maskConnectionString("postgres://user:pass@localhost:5432/db")
 	if result != "****" {

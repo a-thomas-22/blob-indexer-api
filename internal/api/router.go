@@ -322,8 +322,10 @@ func mountLegacyAPIRedirects(r chi.Router) {
 	})
 }
 
-// getNetworkFromRequest gets the network from the request query parameters.
-// If no network is specified, it returns the first enabled network.
+// getNetworkFromRequest resolves the target network from the request's
+// ?network= query parameter (chain ID or name). When the parameter is absent,
+// it defaults to the sole enabled network if exactly one is configured, and
+// otherwise returns ErrNetworkParamRequired so that callers must disambiguate.
 func (a *API) getNetworkFromRequest(r *http.Request) (config.NetworkConfig, error) {
 	networkParam := r.URL.Query().Get("network")
 	if networkParam != "" {
@@ -349,7 +351,14 @@ func (a *API) getNetworkFromRequest(r *http.Request) (config.NetworkConfig, erro
 		return config.NetworkConfig{}, ErrNoNetworksAvailable
 	}
 
-	// Return the first network
+	// When more than one network is enabled, an explicit ?network= selector is
+	// required: ranging a Go map yields a nondeterministic default, which would
+	// make the same request resolve to different networks across calls.
+	if len(a.networks) > 1 {
+		return config.NetworkConfig{}, ErrNetworkParamRequired
+	}
+
+	// Exactly one network is enabled, so it is an unambiguous default.
 	for _, n := range a.networks {
 		return n, nil
 	}
@@ -442,6 +451,9 @@ type NetworkStatusResponse struct {
 var (
 	ErrNetworkNotFound     = NewAPIError("Network not found", http.StatusNotFound)
 	ErrNoNetworksAvailable = NewAPIError("No networks available", http.StatusInternalServerError)
+	// ErrNetworkParamRequired is returned when multiple networks are enabled and
+	// the caller did not specify a ?network= selector to disambiguate.
+	ErrNetworkParamRequired = NewAPIError("network query parameter is required when multiple networks are enabled", http.StatusBadRequest)
 )
 
 // APIError represents an API error
