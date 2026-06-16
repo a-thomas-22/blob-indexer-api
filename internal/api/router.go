@@ -224,7 +224,14 @@ func (a *API) newRouter(opts routerOptions) http.Handler {
 		zap.Bool("dev_routes", opts.includeDevRoutes),
 		zap.Bool("dev_mode", cfg.Server.DevMode))
 
-	return r
+	// Serve Prometheus /metrics from a parent mux so it bypasses the chi
+	// middleware stack — scrapes are never rate-limited and don't increment the
+	// HTTP request counters. Non-sensitive operational metrics; scrape
+	// in-cluster and exclude /metrics from the public Cloudflare route.
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", a.metricsHandler())
+	mux.Handle("/", r)
+	return mux
 }
 
 func serveAsyncAPI(w http.ResponseWriter, _ *http.Request) {

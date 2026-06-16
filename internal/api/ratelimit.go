@@ -1,6 +1,7 @@
 package api
 
 import (
+	"container/list"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -15,25 +16,37 @@ import (
 type visitor struct {
 	tokens   float64
 	lastSeen time.Time
+	elem     *list.Element // position in the LRU list (Value is the IP string)
 }
+
+// maxVisitors caps the number of per-IP token buckets the rate limiter retains.
+// Because the service sits behind Cloudflare and keys on the resolved client IP,
+// a flood of distinct (or spoofed) source IPs could otherwise grow the visitor
+// map without bound. When the cap is reached, the least-recently-seen entry is
+// evicted to make room for a new visitor.
+const maxVisitors = 100_000
 
 // RateLimiter implements a per-IP token bucket rate limiter.
 type RateLimiter struct {
-	visitors map[string]*visitor
-	mu       sync.Mutex
-	rate     float64 // tokens per second
-	burst    float64 // max tokens
-	disabled bool
+	visitors    map[string]*visitor
+	lru         *list.List // front = most recently used, back = least; values are IP strings
+	mu          sync.Mutex
+	rate        float64 // tokens per second
+	burst       float64 // max tokens
+	maxVisitors int     // cap on retained visitor buckets; <=0 means unlimited
+	disabled    bool
 }
 
 // NewRateLimiter creates a rate limiter. rate is requests per second, burst is the max burst size.
 // A non-positive rate or burst disables limiting.
 func NewRateLimiter(rate float64, burst int) *RateLimiter {
 	rl := &RateLimiter{
-		visitors: make(map[string]*visitor),
-		rate:     rate,
-		burst:    float64(burst),
-		disabled: rate <= 0 || burst <= 0,
+		visitors:    make(map[string]*visitor),
+		lru:         list.New(),
+		rate:        rate,
+		burst:       float64(burst),
+		maxVisitors: maxVisitors,
+		disabled:    rate <= 0 || burst <= 0,
 	}
 	go rl.cleanup()
 	return rl
@@ -46,6 +59,9 @@ func (rl *RateLimiter) cleanup() {
 		rl.mu.Lock()
 		for ip, v := range rl.visitors {
 			if time.Since(v.lastSeen) > 3*time.Minute {
+				if v.elem != nil {
+					rl.lru.Remove(v.elem)
+				}
 				delete(rl.visitors, ip)
 			}
 		}
@@ -61,12 +77,23 @@ func (rl *RateLimiter) allow(ip string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
+	// Defensive: NewRateLimiter always sets this, but direct struct construction
+	// (e.g. in tests) may not.
+	if rl.lru == nil {
+		rl.lru = list.New()
+	}
+
 	now := time.Now()
 	v, exists := rl.visitors[ip]
 	if !exists {
-		rl.visitors[ip] = &visitor{tokens: rl.burst - 1, lastSeen: now}
+		rl.evictIfFull()
+		elem := rl.lru.PushFront(ip)
+		rl.visitors[ip] = &visitor{tokens: rl.burst - 1, lastSeen: now, elem: elem}
 		return true
 	}
+
+	// Existing visitor — mark most-recently-used.
+	rl.lru.MoveToFront(v.elem)
 
 	// Replenish tokens based on elapsed time
 	elapsed := now.Sub(v.lastSeen).Seconds()
@@ -84,6 +111,22 @@ func (rl *RateLimiter) allow(ip string) bool {
 	return true
 }
 
+// evictIfFull removes the least-recently-used visitor when the map is at
+// capacity, bounding memory under a flood of distinct client IPs. O(1) via the
+// LRU list (the back element), so it stays cheap even during the flood it
+// guards against. Callers must hold rl.mu.
+func (rl *RateLimiter) evictIfFull() {
+	if rl.maxVisitors <= 0 || len(rl.visitors) < rl.maxVisitors {
+		return
+	}
+	back := rl.lru.Back()
+	if back != nil {
+		ip, _ := back.Value.(string)
+		delete(rl.visitors, ip)
+		rl.lru.Remove(back)
+	}
+}
+
 // RateLimitMiddleware returns an HTTP middleware that enforces per-IP rate limits.
 func RateLimitMiddleware(rl *RateLimiter) func(http.Handler) http.Handler {
 	return RateLimitMiddlewareWithResolver(rl, newClientIPResolver(nil))
@@ -97,6 +140,7 @@ func RateLimitMiddlewareWithResolver(rl *RateLimiter, resolver clientIPResolver)
 			ip := resolver.IP(r)
 
 			if !rl.allow(ip) {
+				incRateLimitRejections()
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", "1")
 				w.WriteHeader(http.StatusTooManyRequests)
