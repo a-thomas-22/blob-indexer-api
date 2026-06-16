@@ -22,8 +22,15 @@ var litRe = regexp.MustCompile(`(^|\D)(131072)(\D|$)`)
 
 // TestBytesPerBlobMatchesSQLLiterals scans the bundled migration SQL files and
 // the API package's Go sources for the literal 131072 and asserts every
-// occurrence equals blobparams.BytesPerBlob. This keeps the centralized
-// constant and the hand-written SQL/Go literals from silently drifting apart.
+// occurrence equals blobparams.BytesPerBlob.
+//
+// 131072 is a shared EIP-4844 protocol constant: it is both the blob byte size
+// (4096 field elements * 32 bytes) and GAS_PER_BLOB
+// (params.BlobTxBlobGasPerBlob). In this repo the SQL occurrences are blob-gas
+// math (target_blob_gas / max_blob_gas), while Go-side blob_size_bytes usages
+// are the byte size; both equal 131072 by definition. This test guards that
+// single shared literal so it can't silently drift from the centralized
+// constant.
 //
 // The test only READS those files; it never modifies them.
 func TestBytesPerBlobMatchesSQLLiterals(t *testing.T) {
