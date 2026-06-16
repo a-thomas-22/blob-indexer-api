@@ -4,6 +4,13 @@ import (
 	"time"
 )
 
+// PendingBlockNumber is the internal sentinel stored in Blob.BlockNumber for
+// pending (mempool) blob rows that have not yet been included in a block. The
+// indexer writes this value; the API treats any block_number < 0 as pending and
+// serializes it as JSON null on the wire. The confirmed flag remains the source
+// of truth for whether a blob is included.
+const PendingBlockNumber int64 = -1
+
 // Blob represents a blob transaction in the database
 type Blob struct {
 	ID                int64     `db:"id"`
