@@ -25,9 +25,11 @@ func DevModeMiddleware(devMode bool) func(http.Handler) http.Handler {
 			if !devMode {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusNotFound)
+				msg := "Not found"
 				if err := json.NewEncoder(w).Encode(Response{
-					Success: false,
-					Error:   "Not found",
+					Success:   false,
+					Error:     msg,
+					ErrorCode: errorCodeFor(http.StatusNotFound, msg),
 				}); err != nil {
 					logger.Warn("failed to encode dev mode not-found response", zap.Error(err))
 				}
@@ -59,10 +61,14 @@ func DevAPIKeyMiddleware(requiredAPIKey string) func(http.Handler) http.Handler 
 			if subtle.ConstantTimeCompare([]byte(provided), []byte(requiredAPIKey)) != 1 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
-				_ = json.NewEncoder(w).Encode(Response{
-					Success: false,
-					Error:   "Unauthorized",
-				})
+				msg := "Unauthorized"
+				if err := json.NewEncoder(w).Encode(Response{
+					Success:   false,
+					Error:     msg,
+					ErrorCode: errorCodeFor(http.StatusUnauthorized, msg),
+				}); err != nil {
+					logger.Warn("failed to encode unauthorized response", zap.Error(err))
+				}
 				return
 			}
 
@@ -90,9 +96,11 @@ func MaxBytesMiddleware(next http.Handler) http.Handler {
 func RespondMaxBytesError(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusRequestEntityTooLarge)
+	msg := "Request body too large (limit: 1MB)"
 	if err := json.NewEncoder(w).Encode(Response{
-		Success: false,
-		Error:   "Request body too large (limit: 1MB)",
+		Success:   false,
+		Error:     msg,
+		ErrorCode: errorCodeFor(http.StatusRequestEntityTooLarge, msg),
 	}); err != nil {
 		logger.Warn("failed to encode max-bytes error response", zap.Error(err))
 	}
@@ -154,9 +162,11 @@ func ContentTypeJSON(next http.Handler) http.Handler {
 				if err != nil || mediaType != "application/json" {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusUnsupportedMediaType)
+					msg := "Content-Type must be application/json"
 					if err := json.NewEncoder(w).Encode(Response{
-						Success: false,
-						Error:   "Content-Type must be application/json",
+						Success:   false,
+						Error:     msg,
+						ErrorCode: errorCodeFor(http.StatusUnsupportedMediaType, msg),
 					}); err != nil {
 						logger.Error("Failed to encode unsupported media type response", zap.Error(err))
 					}
