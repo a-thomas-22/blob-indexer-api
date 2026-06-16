@@ -145,8 +145,9 @@ func RateLimitMiddlewareWithResolver(rl *RateLimiter, resolver clientIPResolver)
 				w.Header().Set("Retry-After", "1")
 				w.WriteHeader(http.StatusTooManyRequests)
 				_ = json.NewEncoder(w).Encode(Response{
-					Success: false,
-					Error:   "Rate limit exceeded",
+					Success:   false,
+					Error:     "Rate limit exceeded",
+					ErrorCode: errorCodeFor(http.StatusTooManyRequests, "Rate limit exceeded"),
 				})
 				return
 			}

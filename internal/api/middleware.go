@@ -26,8 +26,9 @@ func DevModeMiddleware(devMode bool) func(http.Handler) http.Handler {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusNotFound)
 				if err := json.NewEncoder(w).Encode(Response{
-					Success: false,
-					Error:   "Not found",
+					Success:   false,
+					Error:     "Not found",
+					ErrorCode: errorCodeFor(http.StatusNotFound, "Not found"),
 				}); err != nil {
 					logger.Warn("failed to encode dev mode not-found response", zap.Error(err))
 				}
@@ -60,8 +61,9 @@ func DevAPIKeyMiddleware(requiredAPIKey string) func(http.Handler) http.Handler 
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				_ = json.NewEncoder(w).Encode(Response{
-					Success: false,
-					Error:   "Unauthorized",
+					Success:   false,
+					Error:     "Unauthorized",
+					ErrorCode: errorCodeFor(http.StatusUnauthorized, "Unauthorized"),
 				})
 				return
 			}
@@ -91,8 +93,9 @@ func RespondMaxBytesError(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusRequestEntityTooLarge)
 	if err := json.NewEncoder(w).Encode(Response{
-		Success: false,
-		Error:   "Request body too large (limit: 1MB)",
+		Success:   false,
+		Error:     "Request body too large (limit: 1MB)",
+		ErrorCode: errorCodeFor(http.StatusRequestEntityTooLarge, "Request body too large (limit: 1MB)"),
 	}); err != nil {
 		logger.Warn("failed to encode max-bytes error response", zap.Error(err))
 	}
@@ -155,8 +158,9 @@ func ContentTypeJSON(next http.Handler) http.Handler {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusUnsupportedMediaType)
 					if err := json.NewEncoder(w).Encode(Response{
-						Success: false,
-						Error:   "Content-Type must be application/json",
+						Success:   false,
+						Error:     "Content-Type must be application/json",
+						ErrorCode: errorCodeFor(http.StatusUnsupportedMediaType, "Content-Type must be application/json"),
 					}); err != nil {
 						logger.Error("Failed to encode unsupported media type response", zap.Error(err))
 					}
