@@ -618,20 +618,26 @@ func validateCORSConfig(cfg *Config) error {
 	// this combination is forbidden. A literal "*" in allowed_origins is treated
 	// as allow-all by the middleware, so it is rejected here too.
 	if cfg.CORS.AllowCredentials && corsAllowsAllOrigins(cfg.CORS) {
-		return fmt.Errorf("cors.allow_credentials cannot be combined with allow-all origins (cors.allow_all_origins or \"*\" in cors.allowed_origins)")
+		return fmt.Errorf("cors.allow_credentials cannot be combined with allow-all origins (cors.allow_all_origins, or \"*\" in cors.allowed_origins or cors.allowed_origin_patterns)")
 	}
 	return nil
 }
 
-// corsAllowsAllOrigins reports whether the CORS config grants every origin,
-// either via the allow_all_origins flag or a literal "*" entry in
-// allowed_origins (which the middleware promotes to allow-all).
+// corsAllowsAllOrigins reports whether the CORS config grants every origin —
+// via the allow_all_origins flag, or a literal "*" entry in allowed_origins, or
+// a literal "*" in allowed_origin_patterns. The middleware promotes all three to
+// allow-all (wildcardMatch treats "*" as match-all).
 func corsAllowsAllOrigins(cfg CORSConfig) bool {
 	if cfg.AllowAllOrigins {
 		return true
 	}
 	for _, origin := range cfg.AllowedOrigins {
 		if strings.TrimSpace(origin) == "*" {
+			return true
+		}
+	}
+	for _, pattern := range cfg.AllowedOriginPatterns {
+		if strings.TrimSpace(pattern) == "*" {
 			return true
 		}
 	}
@@ -643,13 +649,13 @@ func corsAllowsAllOrigins(cfg CORSConfig) bool {
 // arbitrary queries) to the world, since DevAPIKeyMiddleware passes requests
 // through unauthenticated when no key is configured.
 func validateDevAuth(cfg *Config) error {
-	// The dev endpoints are only mounted on the public port when no dedicated
-	// dev_port is configured (router includeDevRoutes = DevPort == 0). In that
-	// case an empty dev_api_key leaves /dev/* (metrics, logs, queries)
-	// world-readable, so require a key. When dev_port isolates the dev routes on
-	// their own listener, no key is required (e.g. local dev with dev_port set).
-	if cfg.Server.DevMode && cfg.Server.DevPort == 0 && strings.TrimSpace(cfg.Server.DevAPIKey) == "" {
-		return fmt.Errorf("server.dev_api_key is required when server.dev_mode is true and dev endpoints are served on the public port (server.dev_port = 0)")
+	// Require a key whenever dev mode is on. A dedicated dev_port does NOT make
+	// the dev routes private — cmd/api binds it on all interfaces — so isolating
+	// them on their own listener is not sufficient. Without a key,
+	// DevAPIKeyMiddleware passes requests through unauthenticated, leaving /dev/*
+	// (metrics, logs, arbitrary queries) world-readable.
+	if cfg.Server.DevMode && strings.TrimSpace(cfg.Server.DevAPIKey) == "" {
+		return fmt.Errorf("server.dev_api_key is required when server.dev_mode is true (otherwise /dev/* metrics, logs, and queries are world-readable)")
 	}
 	return nil
 }

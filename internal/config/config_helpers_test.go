@@ -198,6 +198,32 @@ func TestValidateConfig_CORSCredentialsWithAllowAllOrigins(t *testing.T) {
 	}
 }
 
+func TestValidateConfig_CORSCredentialsWithWildcardOrigin(t *testing.T) {
+	cfg := &Config{
+		Database: DatabaseConfig{URL: "postgres://localhost/test"},
+		Networks: []NetworkConfig{
+			{Name: "test", ChainID: 1, RpcURL: "http://localhost:8545", StartBlock: "0", Enabled: true},
+		},
+		CORS: CORSConfig{AllowedOrigins: []string{"*"}, AllowCredentials: true},
+	}
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("expected error for allow_credentials with \"*\" in allowed_origins")
+	}
+}
+
+func TestValidateConfig_CORSCredentialsWithWildcardPattern(t *testing.T) {
+	cfg := &Config{
+		Database: DatabaseConfig{URL: "postgres://localhost/test"},
+		Networks: []NetworkConfig{
+			{Name: "test", ChainID: 1, RpcURL: "http://localhost:8545", StartBlock: "0", Enabled: true},
+		},
+		CORS: CORSConfig{AllowedOriginPatterns: []string{"*"}, AllowCredentials: true},
+	}
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("expected error for allow_credentials with \"*\" in allowed_origin_patterns")
+	}
+}
+
 func TestValidateConfig_DevModeRequiresAPIKey(t *testing.T) {
 	cfg := &Config{
 		Database: DatabaseConfig{URL: "postgres://localhost/test"},
