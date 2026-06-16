@@ -192,6 +192,11 @@ func (a *API) newRouter(opts routerOptions) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(a.requestCounterMiddleware)
 
+	// Prometheus operational metrics. Non-sensitive (request/WS counts, DB pool,
+	// rate-limit rejections); intended to be scraped in-cluster and excluded from
+	// the public Cloudflare route.
+	r.Handle("/metrics", a.metricsHandler())
+
 	if opts.includeSwagger {
 		// Swagger UI
 		r.Get("/swagger/*", httpSwagger.Handler(

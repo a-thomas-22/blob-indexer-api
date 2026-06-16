@@ -17,23 +17,32 @@ type visitor struct {
 	lastSeen time.Time
 }
 
+// maxVisitors caps the number of per-IP token buckets the rate limiter retains.
+// Because the service sits behind Cloudflare and keys on the resolved client IP,
+// a flood of distinct (or spoofed) source IPs could otherwise grow the visitor
+// map without bound. When the cap is reached, the least-recently-seen entry is
+// evicted to make room for a new visitor.
+const maxVisitors = 100_000
+
 // RateLimiter implements a per-IP token bucket rate limiter.
 type RateLimiter struct {
-	visitors map[string]*visitor
-	mu       sync.Mutex
-	rate     float64 // tokens per second
-	burst    float64 // max tokens
-	disabled bool
+	visitors    map[string]*visitor
+	mu          sync.Mutex
+	rate        float64 // tokens per second
+	burst       float64 // max tokens
+	maxVisitors int     // cap on retained visitor buckets; <=0 means unlimited
+	disabled    bool
 }
 
 // NewRateLimiter creates a rate limiter. rate is requests per second, burst is the max burst size.
 // A non-positive rate or burst disables limiting.
 func NewRateLimiter(rate float64, burst int) *RateLimiter {
 	rl := &RateLimiter{
-		visitors: make(map[string]*visitor),
-		rate:     rate,
-		burst:    float64(burst),
-		disabled: rate <= 0 || burst <= 0,
+		visitors:    make(map[string]*visitor),
+		rate:        rate,
+		burst:       float64(burst),
+		maxVisitors: maxVisitors,
+		disabled:    rate <= 0 || burst <= 0,
 	}
 	go rl.cleanup()
 	return rl
@@ -64,6 +73,7 @@ func (rl *RateLimiter) allow(ip string) bool {
 	now := time.Now()
 	v, exists := rl.visitors[ip]
 	if !exists {
+		rl.evictIfFull(now)
 		rl.visitors[ip] = &visitor{tokens: rl.burst - 1, lastSeen: now}
 		return true
 	}
@@ -84,6 +94,29 @@ func (rl *RateLimiter) allow(ip string) bool {
 	return true
 }
 
+// evictIfFull removes the least-recently-seen visitor when the map is at
+// capacity, bounding memory under a flood of distinct client IPs. Callers must
+// hold rl.mu. now is passed in so eviction shares the caller's clock reading.
+func (rl *RateLimiter) evictIfFull(now time.Time) {
+	if rl.maxVisitors <= 0 || len(rl.visitors) < rl.maxVisitors {
+		return
+	}
+
+	var oldestIP string
+	oldestSeen := now
+	found := false
+	for ip, v := range rl.visitors {
+		if !found || v.lastSeen.Before(oldestSeen) {
+			oldestIP = ip
+			oldestSeen = v.lastSeen
+			found = true
+		}
+	}
+	if found {
+		delete(rl.visitors, oldestIP)
+	}
+}
+
 // RateLimitMiddleware returns an HTTP middleware that enforces per-IP rate limits.
 func RateLimitMiddleware(rl *RateLimiter) func(http.Handler) http.Handler {
 	return RateLimitMiddlewareWithResolver(rl, newClientIPResolver(nil))
@@ -97,6 +130,7 @@ func RateLimitMiddlewareWithResolver(rl *RateLimiter, resolver clientIPResolver)
 			ip := resolver.IP(r)
 
 			if !rl.allow(ip) {
+				incRateLimitRejections()
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", "1")
 				w.WriteHeader(http.StatusTooManyRequests)
