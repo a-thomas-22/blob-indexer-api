@@ -404,6 +404,7 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Returning latest blobs",
 		zap.String("network", network.Name),
 		zap.Int("count", len(response)))
+	setCacheControl(w, latestBlobsCacheTTL)
 	a.respondSuccess(w, response)
 }
 
@@ -665,7 +666,11 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert to response format
+	// A confirmed blob at a tx hash is immutable, so it is safely cacheable.
+	// Pending rows stay uncached since they change as the tx confirms/drops.
+	if blob.Confirmed {
+		setCacheControl(w, confirmedBlobCacheTTL)
+	}
 	a.respondSuccess(w, toBlobResponse(blob, network.Name))
 }
 
