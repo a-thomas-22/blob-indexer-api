@@ -72,6 +72,21 @@ const (
 	// transactions; when processing falls behind, dropping hashes is preferable
 	// to letting the RPC subscription queue overflow and die.
 	pendingTxProcessingQueueSize = 8192
+
+	// pendingTxResubscribeMaxAttempts bounds how many times we retry the pending
+	// transaction websocket resubscribe before giving up and falling back to
+	// polling. A transient RPC blip should recover via retry; a persistent
+	// failure must not spin forever.
+	pendingTxResubscribeMaxAttempts = 5
+
+	// pendingTxResubscribeBaseBackoff is the initial delay between resubscribe
+	// attempts. Each subsequent attempt doubles the delay (capped at
+	// pendingTxResubscribeMaxBackoff) so we back off a struggling RPC endpoint.
+	pendingTxResubscribeBaseBackoff = 500 * time.Millisecond
+
+	// pendingTxResubscribeMaxBackoff caps the exponential backoff between
+	// resubscribe attempts.
+	pendingTxResubscribeMaxBackoff = 8 * time.Second
 )
 
 // errReorgDetected is returned when a chain reorganization is detected and handled
@@ -154,23 +169,26 @@ type Indexer struct {
 	maxBlockRetries        int
 	gapScanInterval        time.Duration
 	maxReorgDepth          int
-	ctx                    context.Context
-	cancel                 context.CancelFunc
-	wg                     sync.WaitGroup
-	lastIndexedBlock       uint64 // accessed with sync/atomic
-	indexerVersion         string
-	mu                     sync.Mutex // protects DB metadata writes
-	dbWriteMu              sync.Mutex // serializes same-network writes that fire summary rollup triggers
-	blockTaskCh            chan BlockTask
-	useWebsocket           bool
-	blockSub               *ethereum.BlockSubscription
-	pendingTxSub           *ethereum.PendingTxSubscription
-	mempoolPollingStarted  uint32
-	failedBlocks           map[uint64]int // block number -> cumulative failure count
-	failedBlockNextRetry   map[uint64]time.Time
-	failedBlocksMu         sync.Mutex
-	reorgDetected          uint32              // atomic flag: 1 = reorg detected, main loop should reset
-	chainConfig            *params.ChainConfig // go-ethereum chain config for fork-aware blob math
+	// pendingTxResubBaseBackoff is the initial resubscribe backoff; a field so
+	// tests can shrink it. Defaults to pendingTxResubscribeBaseBackoff.
+	pendingTxResubBaseBackoff time.Duration
+	ctx                       context.Context
+	cancel                    context.CancelFunc
+	wg                        sync.WaitGroup
+	lastIndexedBlock          uint64 // accessed with sync/atomic
+	indexerVersion            string
+	mu                        sync.Mutex // protects DB metadata writes
+	dbWriteMu                 sync.Mutex // serializes same-network writes that fire summary rollup triggers
+	blockTaskCh               chan BlockTask
+	useWebsocket              bool
+	blockSub                  *ethereum.BlockSubscription
+	pendingTxSub              *ethereum.PendingTxSubscription
+	mempoolPollingStarted     uint32
+	failedBlocks              map[uint64]int // block number -> cumulative failure count
+	failedBlockNextRetry      map[uint64]time.Time
+	failedBlocksMu            sync.Mutex
+	reorgDetected             uint32              // atomic flag: 1 = reorg detected, main loop should reset
+	chainConfig               *params.ChainConfig // go-ethereum chain config for fork-aware blob math
 }
 
 // New creates a new indexer
@@ -197,28 +215,29 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 	useWebsocket := ethClient.IsWebsocket()
 
 	return &Indexer{
-		db:                     database,
-		ethClient:              ethClient,
-		attribution:            attributionSvc,
-		config:                 cfg,
-		network:                network,
-		batchSize:              cfg.Indexer.BatchSize,
-		pollingInterval:        cfg.Indexer.PollingInterval,
-		mempoolPollingInterval: cfg.Indexer.MempoolPollingInterval,
-		mempoolTTL:             cfg.Indexer.MempoolTTL,
-		mempoolCleanupInterval: cfg.Indexer.MempoolCleanupInterval,
-		workerCount:            workerCount,
-		maxBlockRetries:        cfg.Indexer.MaxBlockRetries,
-		gapScanInterval:        cfg.Indexer.GapScanInterval,
-		maxReorgDepth:          cfg.Indexer.MaxReorgDepth,
-		ctx:                    indexerCtx,
-		cancel:                 cancel,
-		indexerVersion:         cfg.Indexer.Version,
-		blockTaskCh:            make(chan BlockTask, 1000), // Buffer for block tasks
-		useWebsocket:           useWebsocket,
-		failedBlocks:           make(map[uint64]int),
-		failedBlockNextRetry:   make(map[uint64]time.Time),
-		chainConfig:            blobparams.ChainConfigForID(network.ChainID),
+		db:                        database,
+		ethClient:                 ethClient,
+		attribution:               attributionSvc,
+		config:                    cfg,
+		network:                   network,
+		batchSize:                 cfg.Indexer.BatchSize,
+		pollingInterval:           cfg.Indexer.PollingInterval,
+		mempoolPollingInterval:    cfg.Indexer.MempoolPollingInterval,
+		mempoolTTL:                cfg.Indexer.MempoolTTL,
+		mempoolCleanupInterval:    cfg.Indexer.MempoolCleanupInterval,
+		workerCount:               workerCount,
+		maxBlockRetries:           cfg.Indexer.MaxBlockRetries,
+		gapScanInterval:           cfg.Indexer.GapScanInterval,
+		maxReorgDepth:             cfg.Indexer.MaxReorgDepth,
+		pendingTxResubBaseBackoff: pendingTxResubscribeBaseBackoff,
+		ctx:                       indexerCtx,
+		cancel:                    cancel,
+		indexerVersion:            cfg.Indexer.Version,
+		blockTaskCh:               make(chan BlockTask, 1000), // Buffer for block tasks
+		useWebsocket:              useWebsocket,
+		failedBlocks:              make(map[uint64]int),
+		failedBlockNextRetry:      make(map[uint64]time.Time),
+		chainConfig:               blobparams.ChainConfigForID(network.ChainID),
 	}
 }
 
@@ -415,6 +434,59 @@ func (i *Indexer) subscribeToPendingTransactions() (*ethereum.PendingTxSubscript
 
 func (i *Indexer) resubscribeToPendingTransactions() (*ethereum.PendingTxSubscription, error) {
 	return i.ethClient.ResubscribeToPendingTransactions(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+}
+
+// resubscribeToPendingTransactionsWithBackoff retries the pending-transaction
+// websocket resubscribe up to pendingTxResubscribeMaxAttempts times with
+// exponential backoff. It returns the live subscription on success, or the last
+// error once the attempt budget is exhausted (signaling the caller to fall
+// back to polling). A canceled context aborts immediately.
+func (i *Indexer) resubscribeToPendingTransactionsWithBackoff() (*ethereum.PendingTxSubscription, error) {
+	var lastErr error
+	backoff := i.pendingTxResubBaseBackoff
+	if backoff <= 0 {
+		backoff = pendingTxResubscribeBaseBackoff
+	}
+	for attempt := 1; attempt <= pendingTxResubscribeMaxAttempts; attempt++ {
+		if i.ctx.Err() != nil {
+			return nil, i.ctx.Err()
+		}
+
+		sub, err := i.resubscribeToPendingTransactions()
+		if err == nil {
+			if attempt > 1 {
+				logger.Info("Recovered pending transaction subscription after retry",
+					zap.String("event", "pending_tx_resubscribe_recovered"),
+					zap.String("network", i.network.Name),
+					zap.Int("attempt", attempt))
+			}
+			return sub, nil
+		}
+		lastErr = err
+
+		logger.Warn("Pending transaction resubscribe attempt failed",
+			zap.String("event", "pending_tx_resubscribe_retry"),
+			zap.String("network", i.network.Name),
+			zap.Int("attempt", attempt),
+			zap.Int("max_attempts", pendingTxResubscribeMaxAttempts),
+			zap.Error(err))
+
+		if attempt == pendingTxResubscribeMaxAttempts {
+			break
+		}
+
+		select {
+		case <-i.ctx.Done():
+			return nil, i.ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > pendingTxResubscribeMaxBackoff {
+			backoff = pendingTxResubscribeMaxBackoff
+		}
+	}
+
+	return nil, fmt.Errorf("pending transaction resubscribe exhausted %d attempts: %w", pendingTxResubscribeMaxAttempts, lastErr)
 }
 
 func (i *Indexer) unsubscribeFromPendingTransactions() {
@@ -945,8 +1017,9 @@ func (i *Indexer) handlePendingTransactionSubscription() {
 				zap.String("network", i.network.Name),
 				zap.Error(err))
 
-			// Try to resubscribe
-			pendingTxSub, err := i.resubscribeToPendingTransactions()
+			// Try to resubscribe with bounded exponential backoff before
+			// giving up and falling back to polling.
+			pendingTxSub, err := i.resubscribeToPendingTransactionsWithBackoff()
 			if err != nil {
 				logger.Error("Failed to resubscribe to pending transactions, falling back to polling",
 					zap.String("network", i.network.Name),
@@ -1226,8 +1299,23 @@ func (i *Indexer) checkForReorg(blockNumber uint64, block *types.Block) error {
 
 	storedHash, err := i.db.GetIndexedBlockHash(i.ctx, i.network.ChainID, blockNumber-1)
 	if err != nil {
-		// Previous block not in our index — can't check (initial sync, gap, or first block)
+		// Previous block not in our index — can't check (initial sync, gap, or first block).
 		if errors.Is(err, sql.ErrNoRows) {
+			// If the parent is at or below our committed high-water mark it should
+			// already be persisted. A missing row there means the worker pool
+			// processed this block before its parent committed (out-of-order race)
+			// or an earlier block silently failed — either way reorg detection is
+			// running blind for this block, so surface it instead of skipping
+			// quietly.
+			if parent := blockNumber - 1; parent <= atomic.LoadUint64(&i.lastIndexedBlock) {
+				logger.Warn("Skipping reorg check: parent block not committed yet",
+					zap.String("event", "reorg_check_skipped_parent_uncommitted"),
+					zap.String("network", i.network.Name),
+					zap.Int("chain_id", i.network.ChainID),
+					zap.Uint64("block", blockNumber),
+					zap.Uint64("missing_parent", parent),
+					zap.Uint64("last_indexed_block", atomic.LoadUint64(&i.lastIndexedBlock)))
+			}
 			return nil
 		}
 		return fmt.Errorf("failed to get indexed block hash for block %d: %w", blockNumber-1, err)
@@ -1249,26 +1337,55 @@ func (i *Indexer) checkForReorg(blockNumber uint64, block *types.Block) error {
 // handleReorg handles a chain reorganization by finding the fork point,
 // deleting invalidated data, and signaling the main loop to reset.
 func (i *Indexer) handleReorg(fromBlock uint64) error {
-	// Walk back to find the fork point
+	// Walk back to find the fork point. forkFound stays false if we never see a
+	// block whose stored hash still matches the canonical chain — i.e. we either
+	// walked off the start of our indexed range, off block 0, or exhausted the
+	// depth cap. Only an exhausted depth cap is dangerous: in that case forkBlock
+	// is an arbitrary truncation point, not a verified common ancestor, so the
+	// subsequent DELETE may keep blocks that are actually on the abandoned fork.
 	forkBlock := fromBlock - 1
-	for depth := 0; depth < i.maxReorgDepth && forkBlock > 0; depth++ {
+	forkFound := false
+	depth := 0
+	for ; depth < i.maxReorgDepth && forkBlock > 0; depth++ {
 		block, err := i.ethClient.GetBlockByNumber(i.ctx, forkBlock)
 		if err != nil {
 			return fmt.Errorf("failed to get block %d during reorg scan: %w", forkBlock, err)
 		}
 
 		storedHash, err := i.db.GetIndexedBlockHash(i.ctx, i.network.ChainID, forkBlock)
-		if err != nil {
-			// Past our indexed range
+		if errors.Is(err, sql.ErrNoRows) {
+			// Past our indexed range — treat the earliest indexed block as the
+			// fork point. This is a benign exit, not a depth-cap exhaustion.
+			forkFound = true
 			break
+		}
+		if err != nil {
+			// A transient DB error or context cancellation must not be mistaken
+			// for the boundary condition above: abort and leave indexed data
+			// intact rather than rewinding to an unverified fork point.
+			return fmt.Errorf("failed to read stored hash for block %d during reorg scan: %w", forkBlock, err)
 		}
 
 		if storedHash == block.Hash().Hex() {
 			// Found the fork point — this block is still valid
+			forkFound = true
 			break
 		}
 
 		forkBlock--
+	}
+
+	// The walk hit the depth cap without confirming a common ancestor. Surface
+	// this loudly: blocks below forkBlock may still belong to the orphaned fork,
+	// and an operator-driven reindex is the only safe recovery.
+	if !forkFound && depth >= i.maxReorgDepth {
+		logger.Error("Reorg scan exhausted max depth without finding fork point",
+			zap.String("event", "reorg_depth_cap_exhausted"),
+			zap.String("network", i.network.Name),
+			zap.Int("chain_id", i.network.ChainID),
+			zap.Uint64("from_block", fromBlock),
+			zap.Uint64("truncated_fork_point", forkBlock),
+			zap.Int("max_reorg_depth", i.maxReorgDepth))
 	}
 
 	logger.Warn("Handling chain reorganization",
