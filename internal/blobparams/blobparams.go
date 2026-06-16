@@ -8,6 +8,12 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
+// BytesPerBlob is the size of a single EIP-4844 blob in bytes: a blob holds
+// 4096 field elements of 32 bytes each (4096 * 32 = 131072). This value is the
+// canonical source for the blob byte size used throughout the codebase and in
+// the SQL that converts blob counts to byte totals.
+const BytesPerBlob = 4096 * 32
+
 const (
 	forkBPO5    = "BPO5"
 	forkBPO4    = "BPO4"
