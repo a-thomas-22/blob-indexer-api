@@ -161,7 +161,7 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 	if window.AverageBlobBaseFeeWei != "100" || window.MedianBlobBaseFeeWei != "90" || window.P95BlobBaseFeeWei != "150" {
 		t.Fatalf("unexpected explicit base fee stats: %+v", window)
 	}
-	if window.AverageUtilization != "0.750000" || window.TotalCostWei != "26494271031506069" || window.TotalCostWei != "26494271031506069" || window.UniqueSenders != 3 {
+	if window.AverageUtilization != "0.750000" || window.TotalCostWei != "26494271031506069" || window.UniqueSenders != 3 {
 		t.Fatalf("unexpected market stats: %+v", window)
 	}
 	if window.TotalBlocks != 300 || window.BlocksAboveTarget != 187 || window.BlocksAtMax != 42 {

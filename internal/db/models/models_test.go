@@ -21,7 +21,6 @@ func TestBlobModel(t *testing.T) {
 		TotalCostWei:      "0.001",
 		Timestamp:         now,
 		Confirmed:         true,
-		IndexerVersion:    "v1.0.0",
 	}
 
 	if blob.ID != 1 {
@@ -64,7 +63,6 @@ func TestBlobUserModel(t *testing.T) {
 
 func TestNetworkModel(t *testing.T) {
 	network := Network{
-		ID:         1,
 		ChainID:    1,
 		Name:       "mainnet",
 		StartBlock: "12345",

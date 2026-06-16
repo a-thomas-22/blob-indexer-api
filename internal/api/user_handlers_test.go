@@ -92,7 +92,7 @@ func TestGetTopBlobUsers_SortSpendWindow(t *testing.T) {
 	if resp.Data[0].Category != "rollup" || resp.Data[0].BlobSharePercent != 62.5 || resp.Data[0].SpendSharePercent != 75 {
 		t.Fatalf("unexpected user share fields: %+v", resp.Data[0])
 	}
-	if resp.Data[0].TotalCostWei != "47185487462400" || resp.Data[0].TotalCostWei != "47185487462400" {
+	if resp.Data[0].TotalCostWei != "47185487462400" {
 		t.Fatalf("unexpected user cost fields: %+v", resp.Data[0])
 	}
 }

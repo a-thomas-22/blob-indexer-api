@@ -294,18 +294,21 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_network_blob_stats_blobs_insert ON blobs;
 CREATE TRIGGER trg_network_blob_stats_blobs_insert
 AFTER INSERT ON blobs
 REFERENCING NEW TABLE AS new_rows
 FOR EACH STATEMENT
 EXECUTE FUNCTION network_blob_stats_blobs_insert_trigger();
 
+DROP TRIGGER IF EXISTS trg_network_blob_stats_blobs_update ON blobs;
 CREATE TRIGGER trg_network_blob_stats_blobs_update
 AFTER UPDATE ON blobs
 REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
 FOR EACH STATEMENT
 EXECUTE FUNCTION network_blob_stats_blobs_update_trigger();
 
+DROP TRIGGER IF EXISTS trg_network_blob_stats_blobs_delete ON blobs;
 CREATE TRIGGER trg_network_blob_stats_blobs_delete
 AFTER DELETE ON blobs
 REFERENCING OLD TABLE AS old_rows
@@ -384,18 +387,21 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_network_blob_stats_block_metrics_insert ON block_metrics;
 CREATE TRIGGER trg_network_blob_stats_block_metrics_insert
 AFTER INSERT ON block_metrics
 REFERENCING NEW TABLE AS new_rows
 FOR EACH STATEMENT
 EXECUTE FUNCTION network_blob_stats_block_metrics_insert_trigger();
 
+DROP TRIGGER IF EXISTS trg_network_blob_stats_block_metrics_update ON block_metrics;
 CREATE TRIGGER trg_network_blob_stats_block_metrics_update
 AFTER UPDATE ON block_metrics
 REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
 FOR EACH STATEMENT
 EXECUTE FUNCTION network_blob_stats_block_metrics_update_trigger();
 
+DROP TRIGGER IF EXISTS trg_network_blob_stats_block_metrics_delete ON block_metrics;
 CREATE TRIGGER trg_network_blob_stats_block_metrics_delete
 AFTER DELETE ON block_metrics
 REFERENCING OLD TABLE AS old_rows
@@ -541,18 +547,21 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_blob_user_stats_blobs ON blobs;
 CREATE TRIGGER trg_blob_user_stats_blobs
 AFTER INSERT ON blobs
 REFERENCING NEW TABLE AS new_blobs
 FOR EACH STATEMENT
 EXECUTE FUNCTION blob_user_stats_blobs_insert_statement_trigger();
 
+DROP TRIGGER IF EXISTS trg_blob_user_stats_blobs_delete ON blobs;
 CREATE TRIGGER trg_blob_user_stats_blobs_delete
 AFTER DELETE ON blobs
 REFERENCING OLD TABLE AS old_blobs
 FOR EACH STATEMENT
 EXECUTE FUNCTION blob_user_stats_blobs_delete_statement_trigger();
 
+DROP TRIGGER IF EXISTS trg_blob_user_stats_blobs_update ON blobs;
 CREATE TRIGGER trg_blob_user_stats_blobs_update
 AFTER UPDATE ON blobs
 REFERENCING OLD TABLE AS old_blobs NEW TABLE AS new_blobs
@@ -767,18 +776,21 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_block_metrics_rollups_insert ON block_metrics;
 CREATE TRIGGER trg_block_metrics_rollups_insert
 AFTER INSERT ON block_metrics
 REFERENCING NEW TABLE AS new_rows
 FOR EACH STATEMENT
 EXECUTE FUNCTION block_metrics_rollups_insert_statement_trigger();
 
+DROP TRIGGER IF EXISTS trg_block_metrics_rollups_update ON block_metrics;
 CREATE TRIGGER trg_block_metrics_rollups_update
 AFTER UPDATE ON block_metrics
 REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
 FOR EACH STATEMENT
 EXECUTE FUNCTION block_metrics_rollups_update_statement_trigger();
 
+DROP TRIGGER IF EXISTS trg_block_metrics_rollups_delete ON block_metrics;
 CREATE TRIGGER trg_block_metrics_rollups_delete
 AFTER DELETE ON block_metrics
 REFERENCING OLD TABLE AS old_rows
@@ -924,18 +936,21 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_blob_chart_rollups_insert ON blobs;
 CREATE TRIGGER trg_blob_chart_rollups_insert
 AFTER INSERT ON blobs
 REFERENCING NEW TABLE AS new_blobs
 FOR EACH STATEMENT
 EXECUTE FUNCTION blob_chart_rollups_insert_statement_trigger();
 
+DROP TRIGGER IF EXISTS trg_blob_chart_rollups_update ON blobs;
 CREATE TRIGGER trg_blob_chart_rollups_update
 AFTER UPDATE ON blobs
 REFERENCING OLD TABLE AS old_blobs NEW TABLE AS new_blobs
 FOR EACH STATEMENT
 EXECUTE FUNCTION blob_chart_rollups_update_statement_trigger();
 
+DROP TRIGGER IF EXISTS trg_blob_chart_rollups_delete ON blobs;
 CREATE TRIGGER trg_blob_chart_rollups_delete
 AFTER DELETE ON blobs
 REFERENCING OLD TABLE AS old_blobs

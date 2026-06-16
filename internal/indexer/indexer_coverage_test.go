@@ -204,7 +204,6 @@ func newBlobFixture() models.Blob {
 		TotalCostWei:      "12",
 		Timestamp:         time.Unix(1, 0),
 		Confirmed:         false,
-		IndexerVersion:    "test-v1",
 	}
 }
 
@@ -1108,7 +1107,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 		mock.ExpectExec("INSERT INTO blobs").
 			WithArgs(blob.ChainID, blob.BlockNumber, 0, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.Confirmed, blob.IndexerVersion, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
+				blob.Timestamp, blob.Confirmed, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
@@ -1142,7 +1141,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 			mock.ExpectExec("INSERT INTO blobs").
 				WithArgs(blob.ChainID, blob.BlockNumber, 5+offset, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 					blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-					blob.Timestamp, blob.Confirmed, blob.IndexerVersion, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
+					blob.Timestamp, blob.Confirmed, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
 				WillReturnResult(sqlmock.NewResult(int64(offset+1), 1))
 		}
 		mock.ExpectCommit()
@@ -1175,7 +1174,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 			mock.ExpectExec("UPDATE blobs SET").
 				WithArgs(blob.FromAddress, blob.UserAttribution, blob.BlobSizeBytes,
 					blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-					blob.Timestamp, blob.IndexerVersion, blob.MaxFeePerBlobGas, blob.BlobGasUsed,
+					blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed,
 					blob.ChainID, blob.BlockNumber, idxVal).
 				WillReturnResult(sqlmock.NewResult(0, 1))
 		}
@@ -1211,7 +1210,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 			mock.ExpectExec("INSERT INTO blobs").
 				WithArgs(blob.ChainID, blob.BlockNumber, 10+offset, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 					blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-					blob.Timestamp, blob.Confirmed, blob.IndexerVersion, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
+					blob.Timestamp, blob.Confirmed, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
 				WillReturnResult(sqlmock.NewResult(int64(offset+1), 1))
 		}
 		mock.ExpectCommit()
@@ -1286,7 +1285,7 @@ func TestInsertBlockData(t *testing.T) {
 		mock.ExpectExec("INSERT INTO blobs").
 			WithArgs(blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.Confirmed, blob.IndexerVersion, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
+				blob.Timestamp, blob.Confirmed, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectExec("INSERT INTO indexed_blocks").
 			WithArgs(indexedBlock.ChainID, indexedBlock.BlockNumber, indexedBlock.BlockHash, indexedBlock.ParentHash).
@@ -1478,7 +1477,6 @@ func TestProcessBlock_WithBlobTransaction(t *testing.T) {
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
 			true,
-			idx.indexerVersion,
 			sqlmock.AnyArg(), // max_fee_per_blob_gas
 			sqlmock.AnyArg(), // blob_gas_used
 		).
@@ -1905,7 +1903,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(nil))
 		mock.ExpectPrepare("INSERT INTO blobs")
 		mock.ExpectExec("INSERT INTO blobs").
-			WithArgs(idx.network.ChainID, int64(-1), 0, txHash, sqlmock.AnyArg(), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), false, idx.indexerVersion, sqlmock.AnyArg(), sqlmock.AnyArg()).
+			WithArgs(idx.network.ChainID, int64(-1), 0, txHash, sqlmock.AnyArg(), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), false, sqlmock.AnyArg(), sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
@@ -1953,7 +1951,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(nil))
 		mock.ExpectPrepare("INSERT INTO blobs")
 		mock.ExpectExec("INSERT INTO blobs").
-			WithArgs(idx.network.ChainID, int64(-1), 0, txHash, sqlmock.AnyArg(), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), false, idx.indexerVersion, sqlmock.AnyArg(), sqlmock.AnyArg()).
+			WithArgs(idx.network.ChainID, int64(-1), 0, txHash, sqlmock.AnyArg(), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), false, sqlmock.AnyArg(), sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 

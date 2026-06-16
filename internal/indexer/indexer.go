@@ -1035,7 +1035,7 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 	// Get the user attribution at the latest known head for the pending transaction.
 	userAttribution := i.attribution.GetUserAttributionForBlock(from, int64(latestBlockNum))
 
-	pendingBlobs := buildPendingBlobs(tx, blobBaseFee, i.network.ChainID, from, userAttribution, i.indexerVersion)
+	pendingBlobs := buildPendingBlobs(tx, blobBaseFee, i.network.ChainID, from, userAttribution)
 	if len(pendingBlobs) == 0 {
 		return
 	}
@@ -1051,7 +1051,7 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 // buildPendingBlobs constructs one Blob row per blob hash carried by tx. The
 // BlobIndex field is left at zero; insertPendingBlobs assigns final values
 // when it allocates indices from the pending pool.
-func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID int, from, userAttribution, indexerVersion string) []models.Blob {
+func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID int, from, userAttribution string) []models.Blob {
 	blobHashes := tx.BlobHashes()
 	if len(blobHashes) == 0 {
 		return nil
@@ -1577,7 +1577,7 @@ func (i *Indexer) processPendingTransactions() error {
 		// Get the user attribution at the latest known head for the pending transaction.
 		userAttribution := i.attribution.GetUserAttributionForBlock(from, int64(latestBlockNum))
 
-		pendingBlobs := buildPendingBlobs(tx, blobBaseFee, i.network.ChainID, from, userAttribution, i.indexerVersion)
+		pendingBlobs := buildPendingBlobs(tx, blobBaseFee, i.network.ChainID, from, userAttribution)
 		if len(pendingBlobs) == 0 {
 			continue
 		}
