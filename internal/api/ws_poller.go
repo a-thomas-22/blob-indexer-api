@@ -306,7 +306,7 @@ func (p *Poller) pollMempool(ctx context.Context, network config.NetworkConfig) 
 				Type: EventMempoolUpdate,
 				Data: MempoolUpdateData{
 					Action: MempoolActionRemove,
-					Blob:   BlobResponse{TxHash: hash, NetworkName: network.Name, NetworkID: chainID},
+					Blob:   BlobResponse{TxHash: hash, NetworkName: network.Name, ChainID: chainID},
 				},
 			})
 		}

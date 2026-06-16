@@ -36,16 +36,16 @@ func normalizeAddress(address string) string {
 
 // NewService creates a new attribution service. If networkID is omitted, mainnet (1) is used.
 func NewService(database *db.DB, networkID ...int) *Service {
-	effectiveNetworkID := 1
+	effectiveChainID := 1
 	if len(networkID) > 0 {
-		effectiveNetworkID = networkID[0]
+		effectiveChainID = networkID[0]
 	}
 
 	return &Service{
 		db:           database,
 		knownUsers:   make(map[string]string),
 		claimsByAddr: make(map[string][]Claim),
-		networkID:    effectiveNetworkID,
+		networkID:    effectiveChainID,
 	}
 }
 
@@ -56,12 +56,12 @@ func (s *Service) ConfigureBlobList(cfg BlobListConfig) {
 
 // Initialize loads attribution mappings and starts background refreshes.
 func (s *Service) Initialize(ctx context.Context) error {
-	logger.Info("Initializing attribution service", zap.Int("network_id", s.networkID))
+	logger.Info("Initializing attribution service", zap.Int("chain_id", s.networkID))
 
 	if s.blobList.Enabled {
 		if err := s.RefreshBlobList(ctx); err != nil {
 			logger.Error("Failed to refresh blob-list attributions",
-				zap.Int("network_id", s.networkID),
+				zap.Int("chain_id", s.networkID),
 				zap.Error(err))
 		}
 		s.startBlobListRefresh(ctx)
@@ -72,14 +72,14 @@ func (s *Service) Initialize(ctx context.Context) error {
 	s.knownUsersMu.Unlock()
 
 	logger.Info("Attribution service initialized",
-		zap.Int("network_id", s.networkID),
+		zap.Int("chain_id", s.networkID),
 		zap.Int("known_users", knownUsersCount))
 	return nil
 }
 
-// SetNetworkID sets the network ID for the service
-func (s *Service) SetNetworkID(networkID int) {
-	s.networkID = networkID
+// SetChainID sets the chain ID (canonical network key) for the service.
+func (s *Service) SetChainID(chainID int) {
+	s.networkID = chainID
 }
 
 // GetUserAttribution gets the current user attribution for an address.
@@ -128,11 +128,11 @@ func (s *Service) UpdateUserLastSeen(ctx context.Context, address string) error 
 	s.knownUsersMu.RUnlock()
 	if ok {
 		// Update the last seen timestamp
-		query := "UPDATE blob_users SET last_seen = $1 WHERE address = $2 AND network_id = $3"
+		query := "UPDATE blob_users SET last_seen = $1 WHERE address = $2 AND chain_id = $3"
 		_, err := s.db.ExecContext(ctx, query, time.Now(), normalizedAddress, s.networkID)
 		if err != nil {
 			logger.Error("Failed to update user last seen",
-				zap.Int("network_id", s.networkID),
+				zap.Int("chain_id", s.networkID),
 				zap.String("address", normalizedAddress),
 				zap.Error(err))
 		}
@@ -165,11 +165,11 @@ func (s *Service) BatchUpdateUserLastSeen(ctx context.Context, addresses []strin
 	}
 
 	// Update all known users in a single query
-	query := "UPDATE blob_users SET last_seen = $1 WHERE address = ANY($2) AND network_id = $3"
+	query := "UPDATE blob_users SET last_seen = $1 WHERE address = ANY($2) AND chain_id = $3"
 	_, err := s.db.ExecContext(ctx, query, time.Now(), pq.Array(knownAddresses), s.networkID)
 	if err != nil {
 		logger.Error("Failed to batch update user last seen",
-			zap.Int("network_id", s.networkID),
+			zap.Int("chain_id", s.networkID),
 			zap.Int("address_count", len(knownAddresses)),
 			zap.Error(err))
 	}
@@ -187,7 +187,7 @@ func (s *Service) AddKnownUser(ctx context.Context, address, name, description, 
 	s.knownUsersMu.RUnlock()
 	if exists {
 		logger.Info("Updating existing known user",
-			zap.Int("network_id", s.networkID),
+			zap.Int("chain_id", s.networkID),
 			zap.String("address", normalizedAddress),
 			zap.String("name", name))
 
@@ -195,12 +195,12 @@ func (s *Service) AddKnownUser(ctx context.Context, address, name, description, 
 		query := `
 			UPDATE blob_users 
 			SET name = $1, description = $2, category = $3, last_seen = $4
-			WHERE address = $5 AND network_id = $6
+			WHERE address = $5 AND chain_id = $6
 		`
 		_, err := s.db.ExecContext(ctx, query, name, description, category, time.Now(), normalizedAddress, s.networkID)
 		if err != nil {
 			logger.Error("Failed to update known user",
-				zap.Int("network_id", s.networkID),
+				zap.Int("chain_id", s.networkID),
 				zap.String("address", normalizedAddress),
 				zap.Error(err))
 		}
@@ -208,20 +208,20 @@ func (s *Service) AddKnownUser(ctx context.Context, address, name, description, 
 	}
 
 	logger.Info("Adding new known user",
-		zap.Int("network_id", s.networkID),
+		zap.Int("chain_id", s.networkID),
 		zap.String("address", normalizedAddress),
 		zap.String("name", name))
 
 	// Add a new user
 	now := time.Now()
 	query := `
-		INSERT INTO blob_users (network_id, address, name, description, category, first_seen, last_seen)
+		INSERT INTO blob_users (chain_id, address, name, description, category, first_seen, last_seen)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`
 	_, err := s.db.ExecContext(ctx, query, s.networkID, normalizedAddress, name, description, category, now, now)
 	if err != nil {
 		logger.Error("Failed to add known user",
-			zap.Int("network_id", s.networkID),
+			zap.Int("chain_id", s.networkID),
 			zap.String("address", normalizedAddress),
 			zap.Error(err))
 		return err
@@ -237,11 +237,11 @@ func (s *Service) AddKnownUser(ctx context.Context, address, name, description, 
 // GetKnownUsers gets all known users
 func (s *Service) GetKnownUsers(ctx context.Context) ([]models.BlobUser, error) {
 	var users []models.BlobUser
-	query := "SELECT * FROM blob_users WHERE network_id = $1 ORDER BY name"
+	query := "SELECT * FROM blob_users WHERE chain_id = $1 ORDER BY name"
 	err := s.db.SelectContext(ctx, &users, query, s.networkID)
 	if err != nil {
 		logger.Error("Failed to get known users",
-			zap.Int("network_id", s.networkID),
+			zap.Int("chain_id", s.networkID),
 			zap.Error(err))
 	}
 	return users, err
@@ -256,10 +256,10 @@ func (s *Service) GetTopBlobUsers(ctx context.Context, limit, offset int) ([]mod
 			from_address,
 			user_attribution,
 			COUNT(*) as blob_count,
-			SUM(total_cost_eth::numeric) as total_cost_eth,
+			SUM(total_cost_wei::numeric) as total_cost_wei,
 			MAX(timestamp) as last_timestamp
 		FROM blobs
-		WHERE network_id = $1
+		WHERE chain_id = $1
 		GROUP BY from_address, user_attribution
 		ORDER BY blob_count DESC
 		LIMIT $2 OFFSET $3
@@ -267,7 +267,7 @@ func (s *Service) GetTopBlobUsers(ctx context.Context, limit, offset int) ([]mod
 	err := s.db.SelectContext(ctx, &result, query, s.networkID, limit, offset)
 	if err != nil {
 		logger.Error("Failed to get top blob users",
-			zap.Int("network_id", s.networkID),
+			zap.Int("chain_id", s.networkID),
 			zap.Error(err))
 	}
 	return result, err

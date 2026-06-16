@@ -7,7 +7,7 @@ import (
 // Blob represents a blob transaction in the database
 type Blob struct {
 	ID                int64     `db:"id"`
-	NetworkID         int       `db:"network_id"`
+	ChainID           int       `db:"chain_id"`
 	BlockNumber       int64     `db:"block_number"`
 	BlobIndex         int       `db:"blob_index"`
 	TxHash            string    `db:"tx_hash"`
@@ -16,10 +16,9 @@ type Blob struct {
 	BlobSizeBytes     int64     `db:"blob_size_bytes"`
 	BaseFeePerBlobGas string    `db:"base_fee_per_blob_gas"` // Using string for numeric values to avoid precision issues
 	TipPerBlobGas     string    `db:"tip_per_blob_gas"`
-	TotalCostETH      string    `db:"total_cost_eth"`
+	TotalCostWei      string    `db:"total_cost_wei"`
 	Timestamp         time.Time `db:"timestamp"`
 	Confirmed         bool      `db:"confirmed"`
-	IndexerVersion    string    `db:"indexer_version"`
 	MaxFeePerBlobGas  *string   `db:"max_fee_per_blob_gas"` // Nullable for pre-migration rows
 	BlobGasUsed       *int64    `db:"blob_gas_used"`        // Nullable for pre-migration rows
 }
@@ -27,7 +26,7 @@ type Blob struct {
 // BlobUser represents a known blob transaction sender
 type BlobUser struct {
 	ID          int64     `db:"id"`
-	NetworkID   int       `db:"network_id"`
+	ChainID     int       `db:"chain_id"`
 	Address     string    `db:"address"`
 	Name        string    `db:"name"`
 	Description string    `db:"description"`
@@ -38,7 +37,6 @@ type BlobUser struct {
 
 // Network represents an Ethereum network
 type Network struct {
-	ID         int64     `db:"id"`
 	ChainID    int       `db:"chain_id"`
 	Name       string    `db:"name"`
 	StartBlock string    `db:"start_block"`
@@ -49,15 +47,15 @@ type Network struct {
 
 // IndexerMetadata represents metadata about the indexer state
 type IndexerMetadata struct {
-	ID        int64  `db:"id"`
-	NetworkID int    `db:"network_id"`
-	Key       string `db:"key"`
-	Value     string `db:"value"`
+	ID      int64  `db:"id"`
+	ChainID int    `db:"chain_id"`
+	Key     string `db:"key"`
+	Value   string `db:"value"`
 }
 
 // IndexedBlock records a processed block's hashes for chain reorganization detection
 type IndexedBlock struct {
-	NetworkID   int       `db:"network_id"`
+	ChainID     int       `db:"chain_id"`
 	BlockNumber int64     `db:"block_number"`
 	BlockHash   string    `db:"block_hash"`
 	ParentHash  string    `db:"parent_hash"`
@@ -67,7 +65,7 @@ type IndexedBlock struct {
 // BlockReindexRequest records an operator-requested block reindex range.
 type BlockReindexRequest struct {
 	ID          int64      `db:"id" json:"id"`
-	NetworkID   int        `db:"network_id" json:"network_id"`
+	ChainID     int        `db:"chain_id" json:"chain_id"`
 	StartBlock  int64      `db:"start_block" json:"start_block"`
 	EndBlock    int64      `db:"end_block" json:"end_block"`
 	Status      string     `db:"status" json:"status"`
@@ -88,7 +86,7 @@ type BlobUserStats struct {
 	Name              string    `db:"user_attribution" json:"name"`
 	Category          string    `db:"category" json:"category,omitempty"`
 	BlobCount         int       `db:"blob_count" json:"blob_count"`
-	TotalCostETH      string    `db:"total_cost_eth" json:"total_cost_eth"`
+	TotalCostWei      string    `db:"total_cost_wei" json:"total_cost_wei"`
 	LastTimestamp     time.Time `db:"last_timestamp" json:"last_timestamp"`
 	BlobSharePercent  float64   `db:"blob_share_percent" json:"blob_share_percent,omitempty"`
 	SpendSharePercent float64   `db:"spend_share_percent" json:"spend_share_percent,omitempty"`
@@ -98,14 +96,14 @@ type BlobUserStats struct {
 type BlobUserCategoryShare struct {
 	Category          string  `db:"category" json:"category"`
 	BlobCount         int     `db:"blob_count" json:"blob_count"`
-	TotalCostETH      string  `db:"total_cost_eth" json:"total_cost_eth"`
+	TotalCostWei      string  `db:"total_cost_wei" json:"total_cost_wei"`
 	BlobSharePercent  float64 `db:"blob_share_percent" json:"blob_share_percent"`
 	SpendSharePercent float64 `db:"spend_share_percent" json:"spend_share_percent"`
 }
 
 // BlockMetrics represents block-level blob pricing data.
 type BlockMetrics struct {
-	NetworkID        int       `db:"network_id"`
+	ChainID          int       `db:"chain_id"`
 	BlockNumber      int64     `db:"block_number"`
 	BlockTimestamp   time.Time `db:"block_timestamp"`
 	BlobCount        int       `db:"blob_count"`

@@ -96,7 +96,7 @@ type backfillCursorState struct {
 
 type blockReindexRequest struct {
 	ID         int64  `db:"id"`
-	NetworkID  int    `db:"network_id"`
+	ChainID    int    `db:"chain_id"`
 	StartBlock uint64 `db:"start_block"`
 	EndBlock   uint64 `db:"end_block"`
 	Attempts   int    `db:"attempts"`
@@ -600,7 +600,7 @@ func (i *Indexer) getBackfillCursorState() (backfillCursorState, error) {
 	query := `
 		SELECT key, value
 		FROM indexer_metadata
-		WHERE network_id = $1
+		WHERE chain_id = $1
 			AND key IN ($2, $3, $4)
 	`
 	if err := i.db.SelectContext(
@@ -1035,7 +1035,7 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 	// Get the user attribution at the latest known head for the pending transaction.
 	userAttribution := i.attribution.GetUserAttributionForBlock(from, int64(latestBlockNum))
 
-	pendingBlobs := buildPendingBlobs(tx, blobBaseFee, i.network.ChainID, from, userAttribution, i.indexerVersion)
+	pendingBlobs := buildPendingBlobs(tx, blobBaseFee, i.network.ChainID, from, userAttribution)
 	if len(pendingBlobs) == 0 {
 		return
 	}
@@ -1051,7 +1051,7 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 // buildPendingBlobs constructs one Blob row per blob hash carried by tx. The
 // BlobIndex field is left at zero; insertPendingBlobs assigns final values
 // when it allocates indices from the pending pool.
-func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID int, from, userAttribution, indexerVersion string) []models.Blob {
+func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID int, from, userAttribution string) []models.Blob {
 	blobHashes := tx.BlobHashes()
 	if len(blobHashes) == 0 {
 		return nil
@@ -1061,7 +1061,7 @@ func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID in
 	rows := make([]models.Blob, 0, len(blobHashes))
 	for range blobHashes {
 		rows = append(rows, models.Blob{
-			NetworkID:         networkID,
+			ChainID:           networkID,
 			BlockNumber:       -1,
 			TxHash:            tx.Hash().Hex(),
 			FromAddress:       from,
@@ -1069,10 +1069,9 @@ func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID in
 			BlobSizeBytes:     metrics.blobSizeBytes,
 			BaseFeePerBlobGas: metrics.baseFeePerBlobGas,
 			TipPerBlobGas:     metrics.tipPerBlobGas,
-			TotalCostETH:      metrics.totalCostETH,
+			TotalCostWei:      metrics.totalCostETH,
 			Timestamp:         now,
 			Confirmed:         false,
-			IndexerVersion:    indexerVersion,
 			MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
 			BlobGasUsed:       metrics.blobGasUsed,
 		})
@@ -1120,7 +1119,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 
 	// Collect all blob records for this block. Each EIP-4844 blob — not each
 	// blob transaction — is one row. blobIndex is the block-wide blob ordinal,
-	// shared by no other row in the same (network_id, block_number).
+	// shared by no other row in the same (chain_id, block_number).
 	blobs := make([]models.Blob, 0, len(block.Transactions()))
 	var attributedUsers []string
 	blobIndex := 0
@@ -1152,7 +1151,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 
 		for range blobHashes {
 			blobs = append(blobs, models.Blob{
-				NetworkID:         i.network.ChainID,
+				ChainID:           i.network.ChainID,
 				BlockNumber:       int64(blockNumber),
 				BlobIndex:         blobIndex,
 				TxHash:            tx.Hash().Hex(),
@@ -1161,10 +1160,9 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 				BlobSizeBytes:     metrics.blobSizeBytes,
 				BaseFeePerBlobGas: metrics.baseFeePerBlobGas,
 				TipPerBlobGas:     metrics.tipPerBlobGas,
-				TotalCostETH:      metrics.totalCostETH,
+				TotalCostWei:      metrics.totalCostETH,
 				Timestamp:         timestamp,
 				Confirmed:         true,
-				IndexerVersion:    i.indexerVersion,
 				MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
 				BlobGasUsed:       metrics.blobGasUsed,
 			})
@@ -1179,7 +1177,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 	// Build block-level metrics. BlobCount is the actual blob count, not the
 	// blob-tx count — a single EIP-4844 tx may carry multiple blobs.
 	blockMetrics := &models.BlockMetrics{
-		NetworkID:        i.network.ChainID,
+		ChainID:          i.network.ChainID,
 		BlockNumber:      int64(blockNumber),
 		BlockTimestamp:   timestamp,
 		BlobCount:        blobIndex,
@@ -1196,7 +1194,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 
 	// Insert all blobs, block metrics, and indexed block in a single transaction
 	indexedBlock := models.IndexedBlock{
-		NetworkID:   i.network.ChainID,
+		ChainID:     i.network.ChainID,
 		BlockNumber: int64(blockNumber),
 		BlockHash:   block.Hash().Hex(),
 		ParentHash:  block.ParentHash().Hex(),
@@ -1289,13 +1287,13 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 	defer func() { _ = tx.Rollback() }()
 
 	// Delete invalidated data atomically.
-	if _, err := tx.ExecContext(i.ctx, "DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2", i.network.ChainID, int64(forkBlock+1)); err != nil {
+	if _, err := tx.ExecContext(i.ctx, "DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2", i.network.ChainID, int64(forkBlock+1)); err != nil {
 		return fmt.Errorf("failed to delete reorged blobs: %w", err)
 	}
-	if _, err := tx.ExecContext(i.ctx, "DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2", i.network.ChainID, int64(forkBlock+1)); err != nil {
+	if _, err := tx.ExecContext(i.ctx, "DELETE FROM block_metrics WHERE chain_id = $1 AND block_number >= $2", i.network.ChainID, int64(forkBlock+1)); err != nil {
 		return fmt.Errorf("failed to delete reorged block metrics: %w", err)
 	}
-	if _, err := tx.ExecContext(i.ctx, "DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2", i.network.ChainID, forkBlock+1); err != nil {
+	if _, err := tx.ExecContext(i.ctx, "DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2", i.network.ChainID, forkBlock+1); err != nil {
 		return fmt.Errorf("failed to delete reorged indexed blocks: %w", err)
 	}
 
@@ -1303,9 +1301,9 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 	atomic.StoreUint64(&i.lastIndexedBlock, forkBlock)
 	i.mu.Lock()
 	if _, err := tx.ExecContext(i.ctx, `
-		INSERT INTO indexer_metadata (network_id, key, value)
+		INSERT INTO indexer_metadata (chain_id, key, value)
 		VALUES ($1, $2, $3)
-		ON CONFLICT (network_id, key) DO UPDATE SET value = $3
+		ON CONFLICT (chain_id, key) DO UPDATE SET value = $3
 	`, i.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(forkBlock, 10)); err != nil {
 		logger.Error("Failed to update last indexed block after reorg",
 			zap.String("network", i.network.Name),
@@ -1349,7 +1347,7 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				txHashes = append(txHashes, h)
 			}
 			deleteQuery, deleteArgs, err := sqlx.In(
-				"DELETE FROM blobs WHERE network_id = ? AND block_number < 0 AND tx_hash IN (?)",
+				"DELETE FROM blobs WHERE chain_id = ? AND block_number < 0 AND tx_hash IN (?)",
 				i.network.ChainID, txHashes,
 			)
 			if err != nil {
@@ -1369,21 +1367,20 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 
 		blobStmt, err := tx.PrepareContext(i.ctx, `
 			INSERT INTO blobs (
-				network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
-				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
-				timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-			ON CONFLICT (network_id, block_number, blob_index) DO UPDATE SET
+				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+				timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
 				tx_hash = EXCLUDED.tx_hash,
 				from_address = EXCLUDED.from_address,
 				user_attribution = EXCLUDED.user_attribution,
 				blob_size_bytes = EXCLUDED.blob_size_bytes,
 				base_fee_per_blob_gas = EXCLUDED.base_fee_per_blob_gas,
 				tip_per_blob_gas = EXCLUDED.tip_per_blob_gas,
-				total_cost_eth = EXCLUDED.total_cost_eth,
+				total_cost_wei = EXCLUDED.total_cost_wei,
 				timestamp = EXCLUDED.timestamp,
 				confirmed = EXCLUDED.confirmed,
-				indexer_version = EXCLUDED.indexer_version,
 				max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
 				blob_gas_used = EXCLUDED.blob_gas_used
 		`)
@@ -1394,9 +1391,9 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 
 		for _, blob := range blobs {
 			if _, err := blobStmt.ExecContext(i.ctx,
-				blob.NetworkID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
-				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostETH,
-				blob.Timestamp, blob.Confirmed, blob.IndexerVersion, blob.MaxFeePerBlobGas, blob.BlobGasUsed,
+				blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
+				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
+				blob.Timestamp, blob.Confirmed, blob.MaxFeePerBlobGas, blob.BlobGasUsed,
 			); err != nil {
 				return fmt.Errorf("failed to insert blob (tx: %s): %w", blob.TxHash, err)
 			}
@@ -1407,12 +1404,12 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 	if blockMetrics != nil {
 		_, err = tx.ExecContext(i.ctx, `
 			INSERT INTO block_metrics (
-				network_id, block_number, block_timestamp, blob_count,
+				chain_id, block_number, block_timestamp, blob_count,
 				blob_gas_used, blob_gas_target, blob_gas_limit,
 				excess_blob_gas, blob_base_fee, utilization_ratio,
 				blob_params_target, blob_params_max, update_fraction
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-			ON CONFLICT (network_id, block_number) DO UPDATE SET
+			ON CONFLICT (chain_id, block_number) DO UPDATE SET
 				block_timestamp = EXCLUDED.block_timestamp,
 				blob_count = EXCLUDED.blob_count,
 				blob_gas_used = EXCLUDED.blob_gas_used,
@@ -1424,7 +1421,7 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				blob_params_target = EXCLUDED.blob_params_target,
 				blob_params_max = EXCLUDED.blob_params_max,
 				update_fraction = EXCLUDED.update_fraction
-		`, blockMetrics.NetworkID, blockMetrics.BlockNumber, blockMetrics.BlockTimestamp, blockMetrics.BlobCount,
+		`, blockMetrics.ChainID, blockMetrics.BlockNumber, blockMetrics.BlockTimestamp, blockMetrics.BlobCount,
 			blockMetrics.BlobGasUsed, blockMetrics.BlobGasTarget, blockMetrics.BlobGasLimit,
 			blockMetrics.ExcessBlobGas, blockMetrics.BlobBaseFee, blockMetrics.UtilizationRatio,
 			blockMetrics.BlobParamsTarget, blockMetrics.BlobParamsMax, blockMetrics.UpdateFraction)
@@ -1435,13 +1432,13 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 
 	// Record the indexed block for reorg detection
 	_, err = tx.ExecContext(i.ctx, `
-		INSERT INTO indexed_blocks (network_id, block_number, block_hash, parent_hash)
+		INSERT INTO indexed_blocks (chain_id, block_number, block_hash, parent_hash)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (network_id, block_number) DO UPDATE SET
+		ON CONFLICT (chain_id, block_number) DO UPDATE SET
 			block_hash = EXCLUDED.block_hash,
 			parent_hash = EXCLUDED.parent_hash,
 			indexed_at = NOW()
-	`, indexedBlock.NetworkID, indexedBlock.BlockNumber, indexedBlock.BlockHash, indexedBlock.ParentHash)
+	`, indexedBlock.ChainID, indexedBlock.BlockNumber, indexedBlock.BlockHash, indexedBlock.ParentHash)
 	if err != nil {
 		return fmt.Errorf("failed to record indexed block: %w", err)
 	}
@@ -1580,7 +1577,7 @@ func (i *Indexer) processPendingTransactions() error {
 		// Get the user attribution at the latest known head for the pending transaction.
 		userAttribution := i.attribution.GetUserAttributionForBlock(from, int64(latestBlockNum))
 
-		pendingBlobs := buildPendingBlobs(tx, blobBaseFee, i.network.ChainID, from, userAttribution, i.indexerVersion)
+		pendingBlobs := buildPendingBlobs(tx, blobBaseFee, i.network.ChainID, from, userAttribution)
 		if len(pendingBlobs) == 0 {
 			continue
 		}
@@ -1598,7 +1595,7 @@ func (i *Indexer) processPendingTransactions() error {
 }
 
 // insertPendingBlobs upserts the per-blob pending rows for a single transaction.
-// All blobs in the slice must share the same NetworkID and TxHash. The method
+// All blobs in the slice must share the same ChainID and TxHash. The method
 // is idempotent in the steady state: when a poll re-discovers a tx that is
 // already represented at the right count, existing rows are UPDATEd in place
 // (their blob_index values are preserved). Only when the row count changes do
@@ -1610,7 +1607,7 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	if len(blobs) == 0 {
 		return nil
 	}
-	networkID := blobs[0].NetworkID
+	networkID := blobs[0].ChainID
 	txHash := blobs[0].TxHash
 	pendingBlock := blobs[0].BlockNumber
 
@@ -1626,7 +1623,7 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	// If the tx is already confirmed, do not (re)create pending rows.
 	var hasConfirmed bool
 	if err := tx.QueryRowContext(i.ctx,
-		`SELECT EXISTS (SELECT 1 FROM blobs WHERE network_id = $1 AND tx_hash = $2 AND block_number >= 0)`,
+		`SELECT EXISTS (SELECT 1 FROM blobs WHERE chain_id = $1 AND tx_hash = $2 AND block_number >= 0)`,
 		networkID, txHash,
 	).Scan(&hasConfirmed); err != nil {
 		return fmt.Errorf("failed to check confirmed blobs for pending tx: %w", err)
@@ -1639,7 +1636,7 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	// blob_index values (steady state) or fall back to reallocation.
 	rows, err := tx.QueryContext(i.ctx,
 		`SELECT blob_index FROM blobs
-		 WHERE network_id = $1 AND tx_hash = $2 AND block_number < 0
+		 WHERE chain_id = $1 AND tx_hash = $2 AND block_number < 0
 		 ORDER BY blob_index ASC`,
 		networkID, txHash,
 	)
@@ -1669,12 +1666,11 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 				blob_size_bytes = $3,
 				base_fee_per_blob_gas = $4,
 				tip_per_blob_gas = $5,
-				total_cost_eth = $6,
+				total_cost_wei = $6,
 				timestamp = $7,
-				indexer_version = $8,
-				max_fee_per_blob_gas = $9,
-				blob_gas_used = $10
-			WHERE network_id = $11 AND block_number = $12 AND blob_index = $13
+				max_fee_per_blob_gas = $8,
+				blob_gas_used = $9
+			WHERE chain_id = $10 AND block_number = $11 AND blob_index = $12
 		`)
 		if err != nil {
 			return fmt.Errorf("failed to prepare pending blob update: %w", err)
@@ -1684,9 +1680,9 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 		for offset, b := range blobs {
 			if _, err := updateStmt.ExecContext(i.ctx,
 				b.FromAddress, b.UserAttribution, b.BlobSizeBytes,
-				b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostETH,
-				b.Timestamp, b.IndexerVersion, b.MaxFeePerBlobGas, b.BlobGasUsed,
-				b.NetworkID, b.BlockNumber, existingIdx[offset],
+				b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostWei,
+				b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed,
+				b.ChainID, b.BlockNumber, existingIdx[offset],
 			); err != nil {
 				return fmt.Errorf("failed to update pending blob (tx: %s): %w", b.TxHash, err)
 			}
@@ -1699,18 +1695,18 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	// indexer restart loses partial state, or if the protocol blob-per-tx
 	// count for this tx changed under us.
 	if _, err := tx.ExecContext(i.ctx,
-		`DELETE FROM blobs WHERE network_id = $1 AND tx_hash = $2 AND block_number < 0`,
+		`DELETE FROM blobs WHERE chain_id = $1 AND tx_hash = $2 AND block_number < 0`,
 		networkID, txHash,
 	); err != nil {
 		return fmt.Errorf("failed to clear prior pending blobs: %w", err)
 	}
 
 	// Allocate distinct blob_index values inside the pending pool. The
-	// UNIQUE(network_id, block_number, blob_index) constraint applies here too,
+	// UNIQUE(chain_id, block_number, blob_index) constraint applies here too,
 	// so we just continue the running counter past the current max.
 	var nextIdx sql.NullInt64
 	if err := tx.QueryRowContext(i.ctx,
-		`SELECT MAX(blob_index) FROM blobs WHERE network_id = $1 AND block_number = $2`,
+		`SELECT MAX(blob_index) FROM blobs WHERE chain_id = $1 AND block_number = $2`,
 		networkID, pendingBlock,
 	).Scan(&nextIdx); err != nil {
 		return fmt.Errorf("failed to compute next pending blob_index: %w", err)
@@ -1722,10 +1718,10 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 
 	insertStmt, err := tx.PrepareContext(i.ctx, `
 		INSERT INTO blobs (
-			network_id, block_number, blob_index, tx_hash, from_address, user_attribution,
-			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_eth,
-			timestamp, confirmed, indexer_version, max_fee_per_blob_gas, blob_gas_used
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare pending blob insert: %w", err)
@@ -1734,9 +1730,9 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 
 	for offset, b := range blobs {
 		if _, err := insertStmt.ExecContext(i.ctx,
-			b.NetworkID, b.BlockNumber, base+offset, b.TxHash, b.FromAddress, b.UserAttribution,
-			b.BlobSizeBytes, b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostETH,
-			b.Timestamp, b.Confirmed, b.IndexerVersion, b.MaxFeePerBlobGas, b.BlobGasUsed,
+			b.ChainID, b.BlockNumber, base+offset, b.TxHash, b.FromAddress, b.UserAttribution,
+			b.BlobSizeBytes, b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostWei,
+			b.Timestamp, b.Confirmed, b.MaxFeePerBlobGas, b.BlobGasUsed,
 		); err != nil {
 			return fmt.Errorf("failed to insert pending blob (tx: %s): %w", b.TxHash, err)
 		}
@@ -1791,19 +1787,19 @@ func (i *Indexer) deleteReindexRange(startBlock, endBlock uint64) error {
 	defer func() { _ = tx.Rollback() }()
 
 	// Delete existing blob records in the range.
-	query := "DELETE FROM blobs WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3"
+	query := "DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2 AND block_number <= $3"
 	if _, err := tx.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock); err != nil {
 		return fmt.Errorf("failed to delete existing blob records: %w", err)
 	}
 
 	// Delete existing block metrics in the range.
-	query = "DELETE FROM block_metrics WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3"
+	query = "DELETE FROM block_metrics WHERE chain_id = $1 AND block_number >= $2 AND block_number <= $3"
 	if _, err := tx.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock); err != nil {
 		return fmt.Errorf("failed to delete existing block metrics: %w", err)
 	}
 
 	// Delete existing indexed block records in the range.
-	query = "DELETE FROM indexed_blocks WHERE network_id = $1 AND block_number >= $2 AND block_number <= $3"
+	query = "DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2 AND block_number <= $3"
 	if _, err := tx.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock); err != nil {
 		return fmt.Errorf("failed to delete existing indexed block records: %w", err)
 	}
@@ -1887,7 +1883,7 @@ func (i *Indexer) claimNextReindexRequest() (blockReindexRequest, error) {
 		WITH next_request AS (
 			SELECT id
 			FROM block_reindex_requests
-			WHERE network_id = $1
+			WHERE chain_id = $1
 				AND (
 					status = 'pending'
 					OR (
@@ -1910,7 +1906,7 @@ func (i *Indexer) claimNextReindexRequest() (blockReindexRequest, error) {
 			updated_at = NOW()
 		FROM next_request
 		WHERE r.id = next_request.id
-		RETURNING r.id, r.network_id, r.start_block, r.end_block, r.attempts, r.claimed_by
+		RETURNING r.id, r.chain_id, r.start_block, r.end_block, r.attempts, r.claimed_by
 	`
 	err := i.db.GetContext(
 		i.ctx,
@@ -1990,7 +1986,7 @@ func (i *Indexer) countMissingIndexedBlocks(startBlock, endBlock uint64) (int64,
 	query := `
 		SELECT ($3::bigint - $2::bigint + 1) - COUNT(*)
 		FROM indexed_blocks
-		WHERE network_id = $1
+		WHERE chain_id = $1
 			AND block_number >= $2
 			AND block_number <= $3
 	`
@@ -2007,7 +2003,7 @@ func (i *Indexer) completeReindexRequest(request blockReindexRequest) error {
 			completed_at = NOW(),
 			updated_at = NOW()
 		WHERE id = $1
-			AND network_id = $2
+			AND chain_id = $2
 			AND claimed_by = $3
 			AND status = 'processing'
 	`
@@ -2033,7 +2029,7 @@ func (i *Indexer) failReindexRequest(request blockReindexRequest, requestErr err
 			completed_at = NOW(),
 			updated_at = NOW()
 		WHERE id = $1
-			AND network_id = $2
+			AND chain_id = $2
 			AND claimed_by = $4
 			AND status = 'processing'
 	`
@@ -2058,7 +2054,7 @@ func (i *Indexer) heartbeatReindexRequest(request blockReindexRequest) error {
 		UPDATE block_reindex_requests
 		SET updated_at = NOW()
 		WHERE id = $1
-			AND network_id = $2
+			AND chain_id = $2
 			AND claimed_by = $3
 			AND status = 'processing'
 	`
@@ -2184,7 +2180,7 @@ func (i *Indexer) GetBlobCounts(ctx context.Context) (confirmedCount, pendingCou
 			SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END) as confirmed_count,
 			SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END) as pending_count
 		FROM blobs
-		WHERE network_id = $1
+		WHERE chain_id = $1
 	`
 
 	var counts struct {

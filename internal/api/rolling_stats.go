@@ -40,7 +40,7 @@ type statsWindowSpec struct {
 
 // RollingStatsResponse is a response containing rolling-window blob market stats.
 type RollingStatsResponse struct {
-	NetworkID   int                  `json:"network_id,omitempty"`
+	ChainID     int                  `json:"chain_id,omitempty"`
 	NetworkName string               `json:"network_name,omitempty"`
 	GeneratedAt time.Time            `json:"generated_at"`
 	Windows     []RollingWindowStats `json:"windows"`
@@ -74,9 +74,7 @@ type RollingWindowStats struct {
 	// Blocks in the window whose blob gas used reached the block's blob gas limit.
 	BlocksAtMax int64 `json:"blocks_at_max"`
 	// Total realized blob base-fee cost in wei for the window (sum of per-blob integer wei costs).
-	TotalCostWei string `json:"total_cost_wei" example:"26494271031506069"`
-	// Deprecated alias: use total_cost_wei. This legacy field contains wei, not ETH.
-	TotalCostETH  string `json:"total_cost_eth" extensions:"x-deprecated,x-replacement=total_cost_wei" example:"26494271031506069"`
+	TotalCostWei  string `json:"total_cost_wei" example:"26494271031506069"`
 	UniqueSenders int    `json:"unique_senders"`
 }
 
@@ -94,7 +92,7 @@ type rollingStatsWindowRow struct {
 	TotalBlocks        int64     `db:"total_blocks"`
 	BlocksAboveTarget  int64     `db:"blocks_above_target"`
 	BlocksAtMax        int64     `db:"blocks_at_max"`
-	TotalCostETH       string    `db:"total_cost_eth"`
+	TotalCostWei       string    `db:"total_cost_wei"`
 	UniqueSenders      int       `db:"unique_senders"`
 }
 
@@ -192,7 +190,7 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 		}
 
 		response := RollingStatsResponse{
-			NetworkID:   network.ChainID,
+			ChainID:     network.ChainID,
 			NetworkName: network.Name,
 			GeneratedAt: generatedAt,
 			Windows:     make([]RollingWindowStats, 0, len(windows)),
@@ -276,8 +274,7 @@ func toRollingWindowStats(row rollingStatsWindowRow) RollingWindowStats {
 		TotalBlocks:           row.TotalBlocks,
 		BlocksAboveTarget:     row.BlocksAboveTarget,
 		BlocksAtMax:           row.BlocksAtMax,
-		TotalCostWei:          row.TotalCostETH,
-		TotalCostETH:          row.TotalCostETH,
+		TotalCostWei:          row.TotalCostWei,
 		UniqueSenders:         row.UniqueSenders,
 	}
 }

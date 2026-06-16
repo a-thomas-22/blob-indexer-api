@@ -135,7 +135,7 @@ func TestGetBlobStats_CacheHit(t *testing.T) {
 	}
 	a := newTestAPIWithDB(db)
 	a.statsCache[42] = statsCacheEntry{
-		response:  StatsResponse{NetworkID: 42, TotalBlobs: 5},
+		response:  StatsResponse{ChainID: 42, TotalBlobs: 5},
 		expiresAt: time.Now().Add(time.Minute),
 	}
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)

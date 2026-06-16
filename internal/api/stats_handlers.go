@@ -14,7 +14,7 @@ import (
 
 // StatsResponse is a response containing blob statistics
 type StatsResponse struct {
-	NetworkID           int    `json:"network_id,omitempty"`
+	ChainID             int    `json:"chain_id,omitempty"`
 	NetworkName         string `json:"network_name,omitempty"`
 	TotalBlobs          int    `json:"total_blobs"`
 	TotalConfirmedBlobs int    `json:"total_confirmed_blobs"`
@@ -117,7 +117,7 @@ func (a *API) queryBlobStats(ctx context.Context, networkID int, networkName str
 
 func toStatsResponse(stats models.BlobStatsAggregate, networkID int, networkName string) StatsResponse {
 	return StatsResponse{
-		NetworkID:                   networkID,
+		ChainID:                     networkID,
 		NetworkName:                 networkName,
 		TotalBlobs:                  stats.TotalBlobs,
 		TotalConfirmedBlobs:         stats.TotalConfirmedBlobs,

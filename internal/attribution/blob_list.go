@@ -50,7 +50,7 @@ func (cfg BlobListConfig) withDefaults() BlobListConfig {
 
 // Claim represents a blob-list attribution claim.
 type Claim struct {
-	NetworkID      int    `db:"network_id"`
+	ChainID        int    `db:"chain_id"`
 	Source         string `db:"source"`
 	Address        string `db:"address"`
 	EntityID       string `db:"entity_id"`
@@ -116,7 +116,7 @@ func (s *Service) RefreshBlobList(ctx context.Context) error {
 	s.setClaims(claims, stats.CurrentBlock)
 
 	logger.Info("Blob-list attributions refreshed",
-		zap.Int("network_id", s.networkID),
+		zap.Int("chain_id", s.networkID),
 		zap.Int("claims", stats.Claims),
 		zap.Int("current_users", stats.CurrentUsers),
 		zap.Int("changed_addresses", stats.ChangedAddresses),
@@ -154,7 +154,7 @@ func (s *Service) startBlobListRefresh(ctx context.Context) {
 			case <-ticker.C:
 				if err := s.RefreshBlobList(ctx); err != nil {
 					logger.Error("Failed to refresh blob-list attributions",
-						zap.Int("network_id", s.networkID),
+						zap.Int("chain_id", s.networkID),
 						zap.Error(err))
 				}
 			}
@@ -206,7 +206,7 @@ func (s *Service) fetchBlobListClaims(ctx context.Context, cfg BlobListConfig) (
 				continue
 			}
 			claims = append(claims, Claim{
-				NetworkID:      s.networkID,
+				ChainID:        s.networkID,
 				Source:         blobListSource,
 				Address:        normalized,
 				EntityID:       entry.EntityID,
@@ -382,7 +382,7 @@ func sameClaims(a, b []Claim) bool {
 }
 
 func sameClaim(a, b Claim) bool {
-	if a.NetworkID != b.NetworkID ||
+	if a.ChainID != b.ChainID ||
 		a.Source != b.Source ||
 		a.Address != b.Address ||
 		a.EntityID != b.EntityID ||
@@ -419,9 +419,9 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 
 	previous := make([]Claim, 0, len(claims))
 	if err := tx.SelectContext(ctx, &previous, `
-		SELECT network_id, source, address, entity_id, name, category, role, confidence, status, valid_from_block, valid_to_block
+		SELECT chain_id, source, address, entity_id, name, category, role, confidence, status, valid_from_block, valid_to_block
 		FROM blob_attribution_claims
-		WHERE network_id = $1 AND source = $2
+		WHERE chain_id = $1 AND source = $2
 	`, s.networkID, blobListSource); err != nil {
 		return stats, fmt.Errorf("failed to load previous blob-list claims: %w", err)
 	}
@@ -429,14 +429,14 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 	if err := tx.GetContext(ctx, &stats.CurrentBlock, `
 		SELECT COALESCE(MAX(block_number), -1)
 		FROM blobs
-		WHERE network_id = $1 AND block_number >= 0
+		WHERE chain_id = $1 AND block_number >= 0
 	`, s.networkID); err != nil {
 		return stats, fmt.Errorf("failed to load latest attribution block: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM blob_attribution_claims
-		WHERE network_id = $1 AND source = $2
+		WHERE chain_id = $1 AND source = $2
 	`, s.networkID, blobListSource); err != nil {
 		return stats, fmt.Errorf("failed to delete previous blob-list claims: %w", err)
 	}
@@ -444,11 +444,11 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 	for _, claim := range claims {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO blob_attribution_claims (
-				network_id, source, address, entity_id, name, category, role,
+				chain_id, source, address, entity_id, name, category, role,
 				confidence, status, valid_from_block, valid_to_block, updated_at
 			)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
-		`, claim.NetworkID, claim.Source, claim.Address, claim.EntityID, claim.Name, claim.Category,
+		`, claim.ChainID, claim.Source, claim.Address, claim.EntityID, claim.Name, claim.Category,
 			claim.Role, claim.Confidence, claim.Status, claim.ValidFromBlock, claim.ValidToBlock); err != nil {
 			return stats, fmt.Errorf("failed to insert blob-list claim for %s: %w", claim.Address, err)
 		}
@@ -471,7 +471,7 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 		if len(deletedAddresses) > 0 {
 			res, err := tx.ExecContext(ctx, `
 				DELETE FROM blob_users
-				WHERE network_id = $1 AND address = ANY($2)
+				WHERE chain_id = $1 AND address = ANY($2)
 			`, s.networkID, pq.Array(deletedAddresses))
 			if err != nil {
 				return stats, fmt.Errorf("failed to delete stale blob users: %w", err)
@@ -483,9 +483,9 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 	for _, claim := range currentUsers {
 		description := claim.description()
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO blob_users (network_id, address, name, description, category, first_seen, last_seen)
+			INSERT INTO blob_users (chain_id, address, name, description, category, first_seen, last_seen)
 			VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-			ON CONFLICT (network_id, address) DO UPDATE SET
+			ON CONFLICT (chain_id, address) DO UPDATE SET
 				name = EXCLUDED.name,
 				description = EXCLUDED.description,
 				category = EXCLUDED.category
@@ -499,7 +499,7 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 		res, err := tx.ExecContext(ctx, `
 			UPDATE blobs
 			SET user_attribution = ''
-			WHERE network_id = $1
+			WHERE chain_id = $1
 				AND LOWER(from_address) = ANY($2)
 				AND COALESCE(user_attribution, '') <> ''
 		`, s.networkID, pq.Array(changedAddresses))
@@ -531,7 +531,7 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 		res, err := tx.ExecContext(ctx, `
 			UPDATE blobs
 			SET user_attribution = $1
-			WHERE network_id = $2
+			WHERE chain_id = $2
 				AND LOWER(from_address) = $3
 				AND block_number < 0
 				AND COALESCE(user_attribution, '') IS DISTINCT FROM $1
@@ -558,7 +558,7 @@ func updateBlobsForClaim(ctx context.Context, execer claimExecutor, networkID in
 		res, err := execer.ExecContext(ctx, `
 			UPDATE blobs
 			SET user_attribution = $1
-			WHERE network_id = $2
+			WHERE chain_id = $2
 				AND LOWER(from_address) = $3
 				AND block_number >= $4
 				AND block_number >= 0
@@ -573,7 +573,7 @@ func updateBlobsForClaim(ctx context.Context, execer claimExecutor, networkID in
 	res, err := execer.ExecContext(ctx, `
 		UPDATE blobs
 		SET user_attribution = $1
-		WHERE network_id = $2
+		WHERE chain_id = $2
 			AND LOWER(from_address) = $3
 			AND block_number >= $4
 			AND block_number <= $5

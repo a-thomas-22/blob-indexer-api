@@ -25,7 +25,7 @@ func TestGetTopBlobUsers_Success(t *testing.T) {
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
 			users := dest.(*[]models.BlobUserStats)
 			*users = []models.BlobUserStats{
-				{Address: "0xabc", Name: "Alice", BlobCount: 10, TotalCostETH: "1.5", LastTimestamp: time.Now()},
+				{Address: "0xabc", Name: "Alice", BlobCount: 10, TotalCostWei: "1.5", LastTimestamp: time.Now()},
 			}
 			return nil
 		},
@@ -54,7 +54,7 @@ func TestGetTopBlobUsers_SortSpendWindow(t *testing.T) {
 					Name:              "Alice",
 					Category:          "rollup",
 					BlobCount:         10,
-					TotalCostETH:      "47185487462400",
+					TotalCostWei:      "47185487462400",
 					LastTimestamp:     time.Now(),
 					BlobSharePercent:  62.5,
 					SpendSharePercent: 75,
@@ -92,7 +92,7 @@ func TestGetTopBlobUsers_SortSpendWindow(t *testing.T) {
 	if resp.Data[0].Category != "rollup" || resp.Data[0].BlobSharePercent != 62.5 || resp.Data[0].SpendSharePercent != 75 {
 		t.Fatalf("unexpected user share fields: %+v", resp.Data[0])
 	}
-	if resp.Data[0].TotalCostWei != "47185487462400" || resp.Data[0].TotalCostETH != "47185487462400" {
+	if resp.Data[0].TotalCostWei != "47185487462400" {
 		t.Fatalf("unexpected user cost fields: %+v", resp.Data[0])
 	}
 }
@@ -139,7 +139,7 @@ func TestGetTopUnattributedBlobUsers_SortSpendWindow(t *testing.T) {
 					Address:           "0xunknown",
 					Category:          "unknown",
 					BlobCount:         12,
-					TotalCostETH:      "2.5",
+					TotalCostWei:      "2.5",
 					LastTimestamp:     time.Now(),
 					BlobSharePercent:  55.5,
 					SpendSharePercent: 66.6,
@@ -302,14 +302,14 @@ func TestGetUserBreakdown_Success(t *testing.T) {
 				{
 					Category:          "rollup",
 					BlobCount:         16,
-					TotalCostETH:      "4.2",
+					TotalCostWei:      "4.2",
 					BlobSharePercent:  80,
 					SpendSharePercent: 91.5,
 				},
 				{
 					Category:          "unknown",
 					BlobCount:         4,
-					TotalCostETH:      "0.39",
+					TotalCostWei:      "0.39",
 					BlobSharePercent:  20,
 					SpendSharePercent: 8.5,
 				},
@@ -399,8 +399,8 @@ func TestGetUserBreakdown_CacheHit(t *testing.T) {
 	cacheKey := fmt.Sprintf("breakdown:%d:%s", 42, userWindowAll)
 	a.breakdownCache[cacheKey] = userBreakdownCacheEntry{
 		response: UserBreakdownResponse{
-			NetworkID: 42,
-			Window:    string(userWindowAll),
+			ChainID: 42,
+			Window:  string(userWindowAll),
 			CategoryShares: []CategoryShareResponse{
 				{Category: "rollup", BlobCount: 3},
 			},
@@ -515,7 +515,7 @@ func TestGetUserByAddress_Success(t *testing.T) {
 				Name:              "TestRollup",
 				Category:          "rollup",
 				BlobCount:         42,
-				TotalCostETH:      "1.5",
+				TotalCostWei:      "1.5",
 				LastTimestamp:     time.Now(),
 				BlobSharePercent:  12.5,
 				SpendSharePercent: 20,

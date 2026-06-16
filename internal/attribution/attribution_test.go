@@ -30,16 +30,16 @@ func TestNormalizeAddress(t *testing.T) {
 	}
 }
 
-func TestNewService_WithNetworkID(t *testing.T) {
+func TestNewService_WithChainID(t *testing.T) {
 	s := NewService(nil, 42)
 	if s.networkID != 42 {
 		t.Fatalf("expected networkID=42, got %d", s.networkID)
 	}
 }
 
-func TestSetNetworkID(t *testing.T) {
+func TestSetChainID(t *testing.T) {
 	s := NewService(nil)
-	s.SetNetworkID(42)
+	s.SetChainID(42)
 	if s.networkID != 42 {
 		t.Errorf("expected networkID=42, got %d", s.networkID)
 	}

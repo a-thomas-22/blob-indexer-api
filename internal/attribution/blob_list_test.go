@@ -20,7 +20,7 @@ func TestGetUserAttributionForBlock_UsesBlobListClaims(t *testing.T) {
 	toBlock := int64(199)
 	svc.setClaims([]Claim{
 		{
-			NetworkID:      1,
+			ChainID:        1,
 			Source:         blobListSource,
 			Address:        testBlobListAddress,
 			EntityID:       "old-base",
@@ -33,7 +33,7 @@ func TestGetUserAttributionForBlock_UsesBlobListClaims(t *testing.T) {
 			ValidToBlock:   &toBlock,
 		},
 		{
-			NetworkID:      1,
+			ChainID:        1,
 			Source:         blobListSource,
 			Address:        testBlobListAddress,
 			EntityID:       "base",
@@ -45,7 +45,7 @@ func TestGetUserAttributionForBlock_UsesBlobListClaims(t *testing.T) {
 			ValidFromBlock: 200,
 		},
 		{
-			NetworkID:      1,
+			ChainID:        1,
 			Source:         blobListSource,
 			Address:        testBlobListAddress,
 			EntityID:       "disputed",
@@ -109,12 +109,12 @@ func TestRefreshBlobList_SyncsClaimsAndReattributesExistingBlobs(t *testing.T) {
 	})
 
 	rows := sqlmock.NewRows([]string{
-		"network_id", "source", "address", "entity_id", "name", "category", "role",
+		"chain_id", "source", "address", "entity_id", "name", "category", "role",
 		"confidence", "status", "valid_from_block", "valid_to_block",
 	}).AddRow(1, blobListSource, testBlobListAddress, "old-base", "Old Base", "rollup", "batcher", "confirmed", "active", 100, nil)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT network_id, source, address, entity_id, name, category, role, confidence, status, valid_from_block, valid_to_block").
+	mock.ExpectQuery("SELECT chain_id, source, address, entity_id, name, category, role, confidence, status, valid_from_block, valid_to_block").
 		WithArgs(1, blobListSource).
 		WillReturnRows(rows)
 	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(block_number\\), -1\\)").
@@ -529,7 +529,7 @@ func TestSyncBlobListClaims_BeginError(t *testing.T) {
 func TestSyncBlobListClaims_SelectError(t *testing.T) {
 	svc, mock := newMockService(t)
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT network_id, source, address").
+	mock.ExpectQuery("SELECT chain_id, source, address").
 		WithArgs(1, blobListSource).
 		WillReturnError(assertiveError("select failed"))
 	mock.ExpectRollback()

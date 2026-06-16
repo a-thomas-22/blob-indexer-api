@@ -113,7 +113,7 @@ func TestExplorerURLsForBlob(t *testing.T) {
 func TestToBlobResponseDisplayHelpers(t *testing.T) {
 	maxFee := "2000000000"
 	blob := models.Blob{
-		NetworkID:         1,
+		ChainID:           1,
 		BlockNumber:       123456,
 		BlobIndex:         2,
 		TxHash:            validDisplayTxHash,
@@ -121,7 +121,7 @@ func TestToBlobResponseDisplayHelpers(t *testing.T) {
 		BlobSizeBytes:     131072,
 		BaseFeePerBlobGas: "1500000000",
 		TipPerBlobGas:     "125000000",
-		TotalCostETH:      "0.001",
+		TotalCostWei:      "0.001",
 		Timestamp:         time.Unix(1700000000, 0).UTC(),
 		Confirmed:         true,
 		MaxFeePerBlobGas:  &maxFee,

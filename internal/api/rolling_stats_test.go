@@ -117,7 +117,7 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 					TotalBlocks:        300,
 					BlocksAboveTarget:  187,
 					BlocksAtMax:        42,
-					TotalCostETH:       "26494271031506069",
+					TotalCostWei:       "26494271031506069",
 					UniqueSenders:      3,
 				},
 			})
@@ -145,7 +145,7 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 	if !resp.Success {
 		t.Fatalf("expected success response, got error %q", resp.Error)
 	}
-	if resp.Data.NetworkID != 42 || resp.Data.NetworkName != "testnet" {
+	if resp.Data.ChainID != 42 || resp.Data.NetworkName != "testnet" {
 		t.Fatalf("unexpected network in response: %+v", resp.Data)
 	}
 	if len(resp.Data.Windows) != 1 {
@@ -161,7 +161,7 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 	if window.AverageBlobBaseFeeWei != "100" || window.MedianBlobBaseFeeWei != "90" || window.P95BlobBaseFeeWei != "150" {
 		t.Fatalf("unexpected explicit base fee stats: %+v", window)
 	}
-	if window.AverageUtilization != "0.750000" || window.TotalCostETH != "26494271031506069" || window.TotalCostWei != "26494271031506069" || window.UniqueSenders != 3 {
+	if window.AverageUtilization != "0.750000" || window.TotalCostWei != "26494271031506069" || window.UniqueSenders != 3 {
 		t.Fatalf("unexpected market stats: %+v", window)
 	}
 	if window.TotalBlocks != 300 || window.BlocksAboveTarget != 187 || window.BlocksAtMax != 42 {
@@ -307,7 +307,7 @@ func TestGetRollingStatsWindows_CacheHit(t *testing.T) {
 	cacheKey := "rolling:42:5m,1h,24h,7d"
 	a.rollingCache[cacheKey] = rollingStatsCacheEntry{
 		response: RollingStatsResponse{
-			NetworkID: 42,
+			ChainID: 42,
 			Windows: []RollingWindowStats{
 				{Window: "5m", TotalBlobs: 7},
 			},

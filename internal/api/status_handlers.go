@@ -11,7 +11,7 @@ import (
 
 // StatusResponse is a response containing indexer status
 type StatusResponse struct {
-	NetworkID        int              `json:"network_id,omitempty"`
+	ChainID          int              `json:"chain_id,omitempty"`
 	NetworkName      string           `json:"network_name,omitempty"`
 	LastIndexedBlock uint64           `json:"last_indexed_block"`
 	IndexerVersion   string           `json:"indexer_version"`
@@ -42,7 +42,7 @@ func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting indexer status", zap.String("network", network.Name))
 
 	var lastIndexedTime *time.Time
-	query := "SELECT MAX(timestamp) FROM blobs WHERE confirmed = true AND network_id = $1"
+	query := "SELECT MAX(timestamp) FROM blobs WHERE confirmed = true AND chain_id = $1"
 	if err := a.db.GetContext(r.Context(), &lastIndexedTime, query, network.ChainID); err != nil {
 		logger.Error("Failed to get last indexed time",
 			zap.String("network", network.Name),
@@ -60,7 +60,7 @@ func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
 
 	freshness := a.getNetworkFreshnessFromDB(r.Context(), network.ChainID)
 	response := StatusResponse{
-		NetworkID:         network.ChainID,
+		ChainID:           network.ChainID,
 		NetworkName:       network.Name,
 		LastIndexedBlock:  freshness.LastIndexedBlock,
 		IndexerVersion:    a.config.Indexer.Version,

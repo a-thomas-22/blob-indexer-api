@@ -76,7 +76,7 @@ func TestBuildMarketPressure_FallbacksAndDirections(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	metrics := []models.BlockMetrics{
 		{
-			NetworkID:      42,
+			ChainID:        42,
 			BlockNumber:    3,
 			BlockTimestamp: now,
 			BlobGasUsed:    2,
@@ -85,7 +85,7 @@ func TestBuildMarketPressure_FallbacksAndDirections(t *testing.T) {
 			ExcessBlobGas:  6,
 		},
 		{
-			NetworkID:      42,
+			ChainID:        42,
 			BlockNumber:    2,
 			BlockTimestamp: now.Add(-12 * time.Second),
 			BlobGasUsed:    -1,
@@ -118,7 +118,7 @@ func TestBuildMarketPressure_UsesPerMetricBlobLimits(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	metrics := []models.BlockMetrics{
 		{
-			NetworkID:      42,
+			ChainID:        42,
 			BlockNumber:    3,
 			BlockTimestamp: now,
 			BlobGasUsed:    8,
@@ -127,7 +127,7 @@ func TestBuildMarketPressure_UsesPerMetricBlobLimits(t *testing.T) {
 			ExcessBlobGas:  6,
 		},
 		{
-			NetworkID:      42,
+			ChainID:        42,
 			BlockNumber:    2,
 			BlockTimestamp: now.Add(-12 * time.Second),
 			BlobGasUsed:    10,
@@ -184,7 +184,7 @@ func TestMarketPressureHelpers(t *testing.T) {
 
 func testPressureMetric(blockNumber int64, timestamp time.Time, blobGasUsed, excessBlobGas int64) models.BlockMetrics {
 	return models.BlockMetrics{
-		NetworkID:        42,
+		ChainID:          42,
 		BlockNumber:      blockNumber,
 		BlockTimestamp:   timestamp,
 		BlobCount:        int(blobGasUsed / params.BlobTxBlobGasPerBlob),
