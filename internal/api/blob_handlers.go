@@ -23,17 +23,6 @@ import (
 
 const mempoolPressureSampleLimit = 10000
 
-// latestBlobsCacheTTL bounds edge/browser caching of the hot /blob/latest list.
-// Kept well under the ~12s block time, and clients also receive live updates
-// over the WebSocket, so a few seconds of staleness on the polled list is fine
-// while letting Cloudflare coalesce polling bursts.
-const latestBlobsCacheTTL = 5 * time.Second
-
-// confirmedBlobCacheTTL caches a single confirmed blob lookup. A confirmed blob
-// at a tx hash is effectively immutable; the moderate TTL still lets the entry
-// self-heal after a (rare) reorg rather than being pinned immutable.
-const confirmedBlobCacheTTL = 60 * time.Second
-
 // BlobResponse is a response containing blob data
 type BlobResponse struct {
 	ChainID     int    `json:"chain_id"`

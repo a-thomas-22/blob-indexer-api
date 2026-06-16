@@ -55,8 +55,9 @@ func TestGetLatestBlobs_Success(t *testing.T) {
 	if !resp.Success {
 		t.Error("expected Success=true")
 	}
-	if got := w.Header().Get("Cache-Control"); got != "public, max-age=5" {
-		t.Errorf("Cache-Control = %q, want public, max-age=5", got)
+	wantCache := fmt.Sprintf("public, max-age=%d", int(latestBlobsCacheTTL.Seconds()))
+	if got := w.Header().Get("Cache-Control"); got != wantCache {
+		t.Errorf("Cache-Control = %q, want %q", got, wantCache)
 	}
 }
 
@@ -407,8 +408,9 @@ func TestGetBlobByTxHash_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	if got := w.Header().Get("Cache-Control"); got != "public, max-age=60" {
-		t.Errorf("confirmed blob Cache-Control = %q, want public, max-age=60", got)
+	wantCache := fmt.Sprintf("public, max-age=%d", int(confirmedBlobCacheTTL.Seconds()))
+	if got := w.Header().Get("Cache-Control"); got != wantCache {
+		t.Errorf("confirmed blob Cache-Control = %q, want %q", got, wantCache)
 	}
 }
 
