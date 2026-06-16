@@ -158,13 +158,14 @@ appConfig:
     dev_port: 0
     dev_mode: false
     # Real client IP source for rate limiting and the WebSocket per-IP
-    # connection caps. Empty by default (falls back to RemoteAddr). Set this to
-    # a proxy's client-IP header ONLY when origin ingress is restricted to that
-    # proxy — the header is otherwise spoofable. For Cloudflare, set:
-    #   trusted_ip_headers:
-    #     - CF-Connecting-IP
-    # and restrict ingress to Cloudflare's IP ranges (see issue #248).
-    trusted_ip_headers: []
+    # connection caps. This deployment runs behind a Cloudflare Tunnel
+    # (cloudflared): the origin is not publicly reachable, so CF-Connecting-IP
+    # cannot be spoofed by a direct connection and is the authoritative client
+    # IP. No ingress IP-range restriction is needed (the tunnel is the boundary).
+    # Reusers who are NOT fronted by a tunnel or Cloudflare-IP-restricted ingress
+    # should set this back to [] to avoid trusting a spoofable header.
+    trusted_ip_headers:
+      - CF-Connecting-IP
     rate_limit_rps: 100
     rate_limit_burst: 200
     aggregate_rate_limit_rps: 5
