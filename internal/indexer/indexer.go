@@ -266,17 +266,21 @@ func (i *Indexer) setNetworkMetadataValues(updates ...metadataUpdate) {
 }
 
 func (i *Indexer) setNetworkMetadataValuesLocked(updates ...metadataUpdate) {
-	if i.db == nil {
+	if i.db == nil || len(updates) == 0 {
 		return
 	}
 
-	for _, update := range updates {
-		if err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID, update.key, update.value); err != nil {
-			logger.Error("Failed to update indexer metadata",
-				zap.String("network", i.network.Name),
-				zap.String("metadata_key", update.key),
-				zap.Error(err))
-		}
+	entries := make([]db.MetadataKV, len(updates))
+	keys := make([]string, len(updates))
+	for idx, update := range updates {
+		entries[idx] = db.MetadataKV{Key: update.key, Value: update.value}
+		keys[idx] = update.key
+	}
+	if err := i.db.SetNetworkMetadataBatch(i.ctx, i.network.ChainID, entries); err != nil {
+		logger.Error("Failed to update indexer metadata",
+			zap.String("network", i.network.Name),
+			zap.Strings("metadata_keys", keys),
+			zap.Error(err))
 	}
 }
 
@@ -1437,6 +1441,55 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 	return fmt.Errorf("reorg handled, rewound from %d to %d: %w", fromBlock, forkBlock, errReorgDetected)
 }
 
+// blobInsertColumns is the number of columns written per row when inserting
+// into blobs.
+const blobInsertColumns = 14
+
+// pendingUpdateCasts are the Postgres types, in column order, for the VALUES
+// rows fed to the pending-blob UPDATE ... FROM (VALUES ...) statement:
+// from_address, user_attribution, blob_size_bytes, base_fee_per_blob_gas,
+// tip_per_blob_gas, total_cost_wei, timestamp, max_fee_per_blob_gas,
+// blob_gas_used, chain_id, block_number, blob_index.
+//
+//nolint:goconst // SQL type names, not magic strings worth naming
+var pendingUpdateCasts = []string{
+	"text", "text", "bigint", "numeric",
+	"numeric", "numeric", "timestamp", "numeric",
+	"bigint", "int", "bigint", "int",
+}
+
+// valuesPlaceholders builds a multi-row VALUES clause "($1,$2,...),($n,...),..."
+// for rows rows of width columns. casts, when non-nil, must have width entries
+// and appends "::type" to each placeholder — required when the VALUES list has
+// no INSERT target to infer parameter types from (e.g. UPDATE ... FROM (VALUES ...)).
+func valuesPlaceholders(rows, width int, casts []string) string {
+	if casts != nil && len(casts) != width {
+		panic(fmt.Sprintf("valuesPlaceholders: %d casts for width %d", len(casts), width))
+	}
+	var b strings.Builder
+	n := 1
+	for r := 0; r < rows; r++ {
+		if r > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteByte('(')
+		for c := 0; c < width; c++ {
+			if c > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteByte('$')
+			b.WriteString(strconv.Itoa(n))
+			if casts != nil {
+				b.WriteString("::")
+				b.WriteString(casts[c])
+			}
+			n++
+		}
+		b.WriteByte(')')
+	}
+	return b.String()
+}
+
 // insertBlockData inserts all blobs, block metrics, and records the indexed block in a single
 // database transaction. This ensures atomicity — either the entire block is recorded or nothing is.
 func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.IndexedBlock, blockMetrics *models.BlockMetrics) error {
@@ -1482,12 +1535,15 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			}
 		}
 
-		blobStmt, err := tx.PrepareContext(i.ctx, `
+		// Insert all blobs in one multi-row statement so the statement-level
+		// aggregate triggers on blobs (network_blob_stats, blob_user_stats,
+		// blob_chart_rollups) fire once per block instead of once per row.
+		insertQuery := `
 			INSERT INTO blobs (
 				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
 				timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			) VALUES ` + valuesPlaceholders(len(blobs), blobInsertColumns, nil) + `
 			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
 				tx_hash = EXCLUDED.tx_hash,
 				from_address = EXCLUDED.from_address,
@@ -1500,20 +1556,16 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				confirmed = EXCLUDED.confirmed,
 				max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
 				blob_gas_used = EXCLUDED.blob_gas_used
-		`)
-		if err != nil {
-			return fmt.Errorf("failed to prepare blob statement: %w", err)
-		}
-		defer blobStmt.Close()
-
+		`
+		insertArgs := make([]interface{}, 0, len(blobs)*blobInsertColumns)
 		for _, blob := range blobs {
-			if _, err := blobStmt.ExecContext(i.ctx,
+			insertArgs = append(insertArgs,
 				blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.Confirmed, blob.MaxFeePerBlobGas, blob.BlobGasUsed,
-			); err != nil {
-				return fmt.Errorf("failed to insert blob (tx: %s): %w", blob.TxHash, err)
-			}
+				blob.Timestamp, blob.Confirmed, blob.MaxFeePerBlobGas, blob.BlobGasUsed)
+		}
+		if _, err := tx.ExecContext(i.ctx, insertQuery, insertArgs...); err != nil {
+			return fmt.Errorf("failed to insert blobs (block: %d): %w", indexedBlock.BlockNumber, err)
 		}
 	}
 
@@ -1775,34 +1827,41 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	}
 
 	// Steady-state path: same number of rows as expected → update in place.
+	// A single UPDATE ... FROM (VALUES ...) fires the statement-level stats
+	// triggers once per poll instead of once per blob row. The VALUES list has
+	// no INSERT target to infer parameter types from, so each column carries an
+	// explicit cast matching the blobs schema.
 	if len(existingIdx) == len(blobs) {
-		updateStmt, err := tx.PrepareContext(i.ctx, `
+		updateQuery := `
 			UPDATE blobs SET
-				from_address = $1,
-				user_attribution = $2,
-				blob_size_bytes = $3,
-				base_fee_per_blob_gas = $4,
-				tip_per_blob_gas = $5,
-				total_cost_wei = $6,
-				timestamp = $7,
-				max_fee_per_blob_gas = $8,
-				blob_gas_used = $9
-			WHERE chain_id = $10 AND block_number = $11 AND blob_index = $12
-		`)
-		if err != nil {
-			return fmt.Errorf("failed to prepare pending blob update: %w", err)
-		}
-		defer updateStmt.Close()
-
+				from_address = v.from_address,
+				user_attribution = v.user_attribution,
+				blob_size_bytes = v.blob_size_bytes,
+				base_fee_per_blob_gas = v.base_fee_per_blob_gas,
+				tip_per_blob_gas = v.tip_per_blob_gas,
+				total_cost_wei = v.total_cost_wei,
+				timestamp = v.timestamp,
+				max_fee_per_blob_gas = v.max_fee_per_blob_gas,
+				blob_gas_used = v.blob_gas_used
+			FROM (VALUES ` + valuesPlaceholders(len(blobs), len(pendingUpdateCasts), pendingUpdateCasts) + `) AS v(
+				from_address, user_attribution, blob_size_bytes, base_fee_per_blob_gas,
+				tip_per_blob_gas, total_cost_wei, timestamp, max_fee_per_blob_gas,
+				blob_gas_used, chain_id, block_number, blob_index
+			)
+			WHERE blobs.chain_id = v.chain_id
+				AND blobs.block_number = v.block_number
+				AND blobs.blob_index = v.blob_index
+		`
+		updateArgs := make([]interface{}, 0, len(blobs)*len(pendingUpdateCasts))
 		for offset, b := range blobs {
-			if _, err := updateStmt.ExecContext(i.ctx,
+			updateArgs = append(updateArgs,
 				b.FromAddress, b.UserAttribution, b.BlobSizeBytes,
 				b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostWei,
 				b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed,
-				b.ChainID, b.BlockNumber, existingIdx[offset],
-			); err != nil {
-				return fmt.Errorf("failed to update pending blob (tx: %s): %w", b.TxHash, err)
-			}
+				b.ChainID, b.BlockNumber, existingIdx[offset])
+		}
+		if _, err := tx.ExecContext(i.ctx, updateQuery, updateArgs...); err != nil {
+			return fmt.Errorf("failed to update pending blobs (tx: %s): %w", txHash, err)
 		}
 		return tx.Commit()
 	}
@@ -1833,26 +1892,22 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 		base = int(nextIdx.Int64) + 1
 	}
 
-	insertStmt, err := tx.PrepareContext(i.ctx, `
+	// One multi-row insert → one firing of the statement-level stats triggers.
+	insertQuery := `
 		INSERT INTO blobs (
 			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
 			timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to prepare pending blob insert: %w", err)
-	}
-	defer insertStmt.Close()
-
+		) VALUES ` + valuesPlaceholders(len(blobs), blobInsertColumns, nil)
+	insertArgs := make([]interface{}, 0, len(blobs)*blobInsertColumns)
 	for offset, b := range blobs {
-		if _, err := insertStmt.ExecContext(i.ctx,
+		insertArgs = append(insertArgs,
 			b.ChainID, b.BlockNumber, base+offset, b.TxHash, b.FromAddress, b.UserAttribution,
 			b.BlobSizeBytes, b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostWei,
-			b.Timestamp, b.Confirmed, b.MaxFeePerBlobGas, b.BlobGasUsed,
-		); err != nil {
-			return fmt.Errorf("failed to insert pending blob (tx: %s): %w", b.TxHash, err)
-		}
+			b.Timestamp, b.Confirmed, b.MaxFeePerBlobGas, b.BlobGasUsed)
+	}
+	if _, err := tx.ExecContext(i.ctx, insertQuery, insertArgs...); err != nil {
+		return fmt.Errorf("failed to insert pending blobs (tx: %s): %w", txHash, err)
 	}
 
 	return tx.Commit()
