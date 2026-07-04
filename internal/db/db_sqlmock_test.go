@@ -213,6 +213,19 @@ func TestSetNetworkMetadataBatch(t *testing.T) {
 		}
 	})
 
+	t.Run("duplicate keys are rejected before hitting the database", func(t *testing.T) {
+		db, mock := newMockDB(t)
+
+		entries := []MetadataKV{{Key: "k1", Value: "v1"}, {Key: "k1", Value: "v2"}}
+		err := db.SetNetworkMetadataBatch(context.Background(), 1, entries)
+		if err == nil || !strings.Contains(err.Error(), `duplicate metadata key "k1"`) {
+			t.Fatalf("expected duplicate key error, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("expected no statements, got: %v", err)
+		}
+	})
+
 	t.Run("empty batch is a no-op", func(t *testing.T) {
 		db, mock := newMockDB(t)
 

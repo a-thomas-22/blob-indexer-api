@@ -1259,6 +1259,22 @@ func TestInsertPendingBlobs(t *testing.T) {
 	})
 }
 
+func TestValuesPlaceholders(t *testing.T) {
+	if got := valuesPlaceholders(2, 3, nil); got != "($1,$2,$3), ($4,$5,$6)" {
+		t.Fatalf("unexpected placeholders: %q", got)
+	}
+	if got := valuesPlaceholders(1, 2, []string{"text", "int"}); got != "($1::text,$2::int)" {
+		t.Fatalf("unexpected cast placeholders: %q", got)
+	}
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic on casts/width mismatch")
+		}
+	}()
+	valuesPlaceholders(1, 3, []string{"text"})
+}
+
 func TestInsertBlockData(t *testing.T) {
 	indexedBlock := models.IndexedBlock{ChainID: 42, BlockNumber: 10, BlockHash: "0xhash", ParentHash: "0xparent"}
 	blob := newBlobFixture()

@@ -179,10 +179,15 @@ func (db *DB) SetNetworkMetadataBatch(ctx context.Context, networkID int, entrie
 		return nil
 	}
 
+	seen := make(map[string]struct{}, len(entries))
 	var values strings.Builder
 	args := make([]interface{}, 0, 1+len(entries)*2)
 	args = append(args, networkID)
 	for i, entry := range entries {
+		if _, dup := seen[entry.Key]; dup {
+			return fmt.Errorf("duplicate metadata key %q in batch for network %d", entry.Key, networkID)
+		}
+		seen[entry.Key] = struct{}{}
 		if i > 0 {
 			values.WriteString(", ")
 		}

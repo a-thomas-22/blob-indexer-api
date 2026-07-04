@@ -1463,6 +1463,9 @@ var pendingUpdateCasts = []string{
 // and appends "::type" to each placeholder — required when the VALUES list has
 // no INSERT target to infer parameter types from (e.g. UPDATE ... FROM (VALUES ...)).
 func valuesPlaceholders(rows, width int, casts []string) string {
+	if casts != nil && len(casts) != width {
+		panic(fmt.Sprintf("valuesPlaceholders: %d casts for width %d", len(casts), width))
+	}
 	var b strings.Builder
 	n := 1
 	for r := 0; r < rows; r++ {
