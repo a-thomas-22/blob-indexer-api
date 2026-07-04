@@ -135,7 +135,7 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 	a.cacheMu.RLock()
 	if cached, ok := a.rollingCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		a.cacheMu.RUnlock()
-		setCacheControl(w, statsCacheTTL)
+		setCacheControl(w, statsCacheTTL, statsEdgeTTL)
 		a.respondSuccess(w, cached.response)
 		return
 	}
@@ -222,7 +222,7 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 	// so the assertion's ok value can never be false here.
 	response, _ := value.(RollingStatsResponse)
 
-	setCacheControl(w, statsCacheTTL)
+	setCacheControl(w, statsCacheTTL, statsEdgeTTL)
 	a.respondSuccess(w, response)
 }
 

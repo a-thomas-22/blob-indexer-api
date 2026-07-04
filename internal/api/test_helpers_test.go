@@ -66,13 +66,16 @@ func newTestAPIWithDB(db DBProvider) *API {
 			Server:  config.ServerConfig{Port: 8080, DevMode: true},
 			Indexer: config.IndexerConfig{Version: "test-v1"},
 		},
-		startTime:      time.Now(),
-		statsCache:     make(map[int]statsCacheEntry),
-		topUsersCache:  make(map[string]topUsersCacheEntry),
-		breakdownCache: make(map[string]userBreakdownCacheEntry),
-		rollingCache:   make(map[string]rollingStatsCacheEntry),
-		mempoolCache:   make(map[int]mempoolPressureCacheEntry),
-		chartCache:     make(map[string]chartCacheEntry),
+		startTime:         time.Now(),
+		statsCache:        make(map[int]statsCacheEntry),
+		topUsersCache:     make(map[string]topUsersCacheEntry),
+		breakdownCache:    make(map[string]userBreakdownCacheEntry),
+		rollingCache:      make(map[string]rollingStatsCacheEntry),
+		mempoolCache:      make(map[int]mempoolPressureCacheEntry),
+		chartCache:        make(map[string]chartCacheEntry),
+		latestBlobsCache:  make(map[string]blobListCacheEntry),
+		mempoolBlobsCache: make(map[string]blobListCacheEntry),
+		pricingCache:      make(map[string]pricingCacheEntry),
 	}
 }
 

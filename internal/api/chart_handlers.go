@@ -371,7 +371,7 @@ func (a *API) GetBlobMarketChart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setCacheControl(w, aggregateCacheTTL)
+	setCacheControl(w, aggregateCacheTTL, aggregateEdgeTTL)
 	a.respondSuccess(w, value)
 }
 
@@ -444,7 +444,7 @@ func (a *API) GetAttributionUsageChart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setCacheControl(w, aggregateCacheTTL)
+	setCacheControl(w, aggregateCacheTTL, aggregateEdgeTTL)
 	a.respondSuccess(w, value)
 }
 
@@ -510,7 +510,7 @@ func (a *API) GetCostComparisonChart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setCacheControl(w, aggregateCacheTTL)
+	setCacheControl(w, aggregateCacheTTL, aggregateEdgeTTL)
 	a.respondSuccess(w, value)
 }
 

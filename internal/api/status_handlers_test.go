@@ -37,8 +37,11 @@ func TestGetIndexerStatus_IncludesFreshness(t *testing.T) {
 	backfillUpdatedAt := indexedAt.Add(3 * time.Second)
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			timestamp := dest.(**time.Time)
-			*timestamp = &lastBlobTime
+			if query != queryNetworkLastIndexedTime {
+				t.Fatalf("unexpected status query: %s", query)
+			}
+			timestamp := dest.(*time.Time)
+			*timestamp = lastBlobTime
 			return nil
 		},
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {

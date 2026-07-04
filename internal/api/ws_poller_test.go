@@ -283,24 +283,21 @@ func TestPoller_MempoolDiff_AddAndRemove(t *testing.T) {
 			return nil
 		},
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			if strings.Contains(query, "confirmed = false") {
-				blobs := dest.(*[]models.Blob)
+			switch query {
+			case queryPendingBlobTxHashes:
+				hashes := dest.(*[]string)
 				pollCycle++
-				switch {
-				case pollCycle <= 1:
+				if pollCycle <= 1 {
 					// First poll: one pending tx (baseline, no broadcast).
-					*blobs = []models.Blob{
-						{ChainID: 11155111, TxHash: "0x111", BaseFeePerBlobGas: "0", TipPerBlobGas: "0", TotalCostWei: "0"},
-					}
-				case pollCycle == 2:
-					// Second poll: 0x111 gone (removed), 0x222 appeared (added).
-					*blobs = []models.Blob{
-						{ChainID: 11155111, TxHash: "0x222", BaseFeePerBlobGas: "0", TipPerBlobGas: "0", TotalCostWei: "0"},
-					}
-				default:
-					*blobs = []models.Blob{
-						{ChainID: 11155111, TxHash: "0x222", BaseFeePerBlobGas: "0", TipPerBlobGas: "0", TotalCostWei: "0"},
-					}
+					*hashes = []string{"0x111"}
+				} else {
+					// Later polls: 0x111 gone (removed), 0x222 appeared (added).
+					*hashes = []string{"0x222"}
+				}
+			case queryPendingBlobsByTxHashes:
+				blobs := dest.(*[]models.Blob)
+				*blobs = []models.Blob{
+					{ChainID: 11155111, TxHash: "0x222", BaseFeePerBlobGas: "0", TipPerBlobGas: "0", TotalCostWei: "0"},
 				}
 			}
 			return nil
@@ -447,10 +444,10 @@ func TestPoller_BroadcastUsersUpdate_Success(t *testing.T) {
 	poller := NewPoller(db, hub, testNetworks(), time.Second, time.Second)
 	poller.broadcastUsersUpdate(context.Background(), network)
 
-	if gotQuery != queryTopBlobUsersAll {
+	if gotQuery != queryTopBlobUsersAllByCount {
 		t.Fatal("expected poller to use all-window users rollup query")
 	}
-	wantArgs := []interface{}{11155111, 10, 0, "all", "count"}
+	wantArgs := []interface{}{11155111, 10, 0, "all"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("got args %v, want %v", gotArgs, wantArgs)
 	}
@@ -767,5 +764,98 @@ func TestPoller_SkipsWhenNoClientsConnected(t *testing.T) {
 
 	if got := atomic.LoadInt64(&queries); got != 0 {
 		t.Fatalf("expected zero DB queries while no clients connected, got %d", got)
+	}
+}
+
+// TestPoller_PollMempool_AddedFetchErrorKeepsBaseline verifies that when the
+// full-row fetch for newly seen hashes fails, the previous baseline is kept so
+// the additions are re-broadcast on the next tick instead of being lost.
+func TestPoller_PollMempool_AddedFetchErrorKeepsBaseline(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			switch query {
+			case queryPendingBlobTxHashes:
+				hashes := dest.(*[]string)
+				*hashes = []string{"0xaaa"}
+				return nil
+			case queryPendingBlobsByTxHashes:
+				return fmt.Errorf("fetch error")
+			}
+			return nil
+		},
+	}
+
+	network := config.NetworkConfig{Name: "sepolia", ChainID: 11155111}
+	poller := NewPoller(db, hub, testNetworks(), time.Second, time.Second)
+	poller.lastPendingTxs[11155111] = map[string]struct{}{} // established, empty baseline
+
+	poller.pollMempool(context.Background(), network)
+
+	if _, ok := poller.lastPendingTxs[11155111]["0xaaa"]; ok {
+		t.Fatal("baseline must not advance when the added-row fetch fails")
+	}
+}
+
+type fakeInvalidator struct {
+	blockCalls   []int
+	mempoolCalls []int
+}
+
+func (f *fakeInvalidator) invalidateBlockCaches(chainID int) {
+	f.blockCalls = append(f.blockCalls, chainID)
+}
+func (f *fakeInvalidator) invalidateMempoolCaches(chainID int) {
+	f.mempoolCalls = append(f.mempoolCalls, chainID)
+}
+
+// TestPoller_InvalidatesCachesOnNewBlockAndMempoolChange verifies the poller
+// drops origin response caches when it detects a new block or a mempool diff,
+// before broadcasting.
+func TestPoller_InvalidatesCachesOnNewBlockAndMempoolChange(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if strings.Contains(query, "indexer_metadata") {
+				v := dest.(*string)
+				*v = "101"
+			}
+			return nil
+		},
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if query == queryPendingBlobTxHashes {
+				hashes := dest.(*[]string)
+				*hashes = []string{"0xnew"}
+			}
+			return nil
+		},
+	}
+
+	inv := &fakeInvalidator{}
+	network := config.NetworkConfig{Name: "sepolia", ChainID: 11155111}
+	poller := NewPoller(db, hub, testNetworks(), time.Second, time.Second)
+	poller.invalidator = inv
+	poller.lastSeenBlocks[11155111] = 100                   // DB reports 101 → new block
+	poller.lastPendingTxs[11155111] = map[string]struct{}{} // established baseline → 0xnew is an add
+
+	poller.pollNetwork(context.Background(), network)
+
+	if len(inv.blockCalls) != 1 || inv.blockCalls[0] != 11155111 {
+		t.Fatalf("expected one block invalidation for 11155111, got %v", inv.blockCalls)
+	}
+	if len(inv.mempoolCalls) != 1 || inv.mempoolCalls[0] != 11155111 {
+		t.Fatalf("expected one mempool invalidation for 11155111, got %v", inv.mempoolCalls)
+	}
+
+	// No block advance and no mempool diff → no further invalidations.
+	poller.pollNetwork(context.Background(), network)
+	if len(inv.blockCalls) != 1 || len(inv.mempoolCalls) != 1 {
+		t.Fatalf("expected no additional invalidations, got %v / %v", inv.blockCalls, inv.mempoolCalls)
 	}
 }

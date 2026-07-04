@@ -802,7 +802,7 @@ func TestChartHandlers_ResponseCacheHitsDBOnce(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("request %d: expected 200, got %d", i, w.Code)
 		}
-		if got := w.Header().Get("Cache-Control"); got != "public, max-age=30" {
+		if got := w.Header().Get("Cache-Control"); got != "public, max-age=30, s-maxage=30" {
 			t.Fatalf("request %d: Cache-Control = %q", i, got)
 		}
 	}
