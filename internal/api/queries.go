@@ -20,6 +20,28 @@ const blobSelectColumns = `
 	blob_gas_used
 `
 
+// mempoolBlobSelectColumns projects mempool_blobs rows into the models.Blob
+// shape. Pending rows carry the internal block-number sentinel
+// (models.PendingBlockNumber) and are never confirmed, so downstream
+// serialization (JSON null block_number, confirmed=false) is unchanged.
+const mempoolBlobSelectColumns = `
+	0 AS id,
+	chain_id,
+	-1 AS block_number,
+	blob_index,
+	tx_hash,
+	from_address,
+	user_attribution,
+	blob_size_bytes,
+	base_fee_per_blob_gas,
+	tip_per_blob_gas,
+	total_cost_wei,
+	timestamp,
+	false AS confirmed,
+	max_fee_per_blob_gas,
+	blob_gas_used
+`
+
 const blockMetricsSelectColumns = `
 	chain_id,
 	block_number,
@@ -46,10 +68,10 @@ const (
 		LIMIT $2 OFFSET $3
 	`
 
-	// queryMempoolBlobs retrieves unconfirmed (pending) blobs ordered by timestamp descending.
+	// queryMempoolBlobs retrieves pending (mempool) blobs ordered by timestamp descending.
 	queryMempoolBlobs = `
-		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = false AND chain_id = $1
+		SELECT ` + mempoolBlobSelectColumns + ` FROM mempool_blobs
+		WHERE chain_id = $1
 		ORDER BY timestamp DESC
 		LIMIT $2 OFFSET $3
 	`
@@ -62,8 +84,8 @@ const (
 				timestamp,
 				max_fee_per_blob_gas,
 				COALESCE(blob_gas_used, blob_size_bytes / 128, 0) AS blob_gas_used
-			FROM blobs
-			WHERE confirmed = false AND chain_id = $1
+			FROM mempool_blobs
+			WHERE chain_id = $1
 			ORDER BY timestamp DESC
 			LIMIT $2
 		),
@@ -112,8 +134,16 @@ const (
 		LIMIT 1
 	`
 
-	// queryBlobByTxHash retrieves a single blob by transaction hash and network.
-	queryBlobByTxHash = "SELECT " + blobSelectColumns + " FROM blobs WHERE tx_hash = $1 AND chain_id = $2"
+	// queryBlobByTxHash retrieves a single blob by transaction hash and network,
+	// checking confirmed rows first and falling back to the mempool. Multi-blob
+	// transactions return their first blob.
+	queryBlobByTxHash = `
+		SELECT ` + blobSelectColumns + ` FROM blobs WHERE tx_hash = $1 AND chain_id = $2
+		UNION ALL
+		SELECT ` + mempoolBlobSelectColumns + ` FROM mempool_blobs WHERE tx_hash = $1 AND chain_id = $2
+		ORDER BY confirmed DESC, blob_index ASC
+		LIMIT 1
+	`
 
 	// queryTopBlobUsersWithOptions aggregates windowed sender usage ($4 is '24h'
 	// or '7d'; all-history reads use queryTopBlobUsersAll) from hourly chart
@@ -201,8 +231,8 @@ const (
 			SELECT
 				COUNT(*)::bigint AS total_pending_blobs,
 				COALESCE(SUM(total_cost_wei::numeric), 0) AS pending_total_cost
-			FROM blobs
-			WHERE chain_id = $1 AND confirmed = false
+			FROM mempool_blobs
+			WHERE chain_id = $1
 		),
 		totals AS (
 			SELECT
@@ -423,8 +453,8 @@ const (
 			SELECT
 				COUNT(*)::bigint AS total_pending_blobs,
 				COALESCE(SUM(total_cost_wei::numeric), 0) AS pending_total_cost
-			FROM blobs
-			WHERE chain_id = $1 AND confirmed = false
+			FROM mempool_blobs
+			WHERE chain_id = $1
 		),
 		totals AS (
 			SELECT
@@ -451,7 +481,7 @@ const (
 	`
 
 	// queryBlobStats reads whole-history statistics from the maintained network summary.
-	// Pending rows stay tiny and indexed, so they are folded in at read time.
+	// The pending set is a trivially small dedicated table, so it is folded in at read time.
 	queryBlobStats = `
 		WITH pending AS (
 			SELECT
@@ -459,8 +489,8 @@ const (
 				COALESCE(SUM(base_fee_per_blob_gas::numeric), 0) AS pending_base_fee,
 				COALESCE(SUM(tip_per_blob_gas::numeric), 0) AS pending_tip,
 				COALESCE(SUM(total_cost_wei::numeric), 0) AS pending_total_cost
-			FROM blobs
-			WHERE chain_id = $1 AND confirmed = false
+			FROM mempool_blobs
+			WHERE chain_id = $1
 		)
 		SELECT
 			(COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs) AS total_blobs,
@@ -711,10 +741,10 @@ const (
 		LIMIT $3 OFFSET $4
 	`
 
-	// queryMempoolBlobsByAddress retrieves unconfirmed blobs for a specific sender address.
+	// queryMempoolBlobsByAddress retrieves pending blobs for a specific sender address.
 	queryMempoolBlobsByAddress = `
-		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = false AND chain_id = $1 AND from_address = $2
+		SELECT ` + mempoolBlobSelectColumns + ` FROM mempool_blobs
+		WHERE chain_id = $1 AND from_address = $2
 		ORDER BY timestamp DESC
 		LIMIT $3 OFFSET $4
 	`
@@ -739,8 +769,8 @@ const (
 			SELECT
 				COUNT(*)::bigint AS total_pending_blobs,
 				COALESCE(SUM(total_cost_wei::numeric), 0) AS pending_total_cost
-			FROM blobs
-			WHERE chain_id = $1 AND confirmed = false
+			FROM mempool_blobs
+			WHERE chain_id = $1
 		),
 		totals AS (
 			SELECT

@@ -242,7 +242,7 @@ func (db *DB) DeleteBlockMetricsFromBlock(ctx context.Context, networkID int, fr
 
 // DeleteStalePendingBlobs removes pending blobs older than the given cutoff time.
 func (db *DB) DeleteStalePendingBlobs(ctx context.Context, networkID int, cutoff time.Time) (int64, error) {
-	query := "DELETE FROM blobs WHERE chain_id = $1 AND block_number < 0 AND timestamp < $2"
+	query := "DELETE FROM mempool_blobs WHERE chain_id = $1 AND timestamp < $2"
 	res, err := db.ExecContext(ctx, query, networkID, cutoff)
 	if err != nil {
 		return 0, err
