@@ -197,6 +197,49 @@ func TestSetNetworkMetadata(t *testing.T) {
 	})
 }
 
+func TestSetNetworkMetadataBatch(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec("INSERT INTO indexer_metadata").
+			WithArgs(1, "k1", "v1", "k2", "v2").
+			WillReturnResult(sqlmock.NewResult(1, 2))
+
+		entries := []MetadataKV{{Key: "k1", Value: "v1"}, {Key: "k2", Value: "v2"}}
+		if err := db.SetNetworkMetadataBatch(context.Background(), 1, entries); err != nil {
+			t.Fatalf("SetNetworkMetadataBatch() error = %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	t.Run("empty batch is a no-op", func(t *testing.T) {
+		db, mock := newMockDB(t)
+
+		if err := db.SetNetworkMetadataBatch(context.Background(), 1, nil); err != nil {
+			t.Fatalf("SetNetworkMetadataBatch() error = %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("expected no statements, got: %v", err)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec("INSERT INTO indexer_metadata").
+			WithArgs(1, "k1", "v1").
+			WillReturnError(errors.New("write failed"))
+
+		err := db.SetNetworkMetadataBatch(context.Background(), 1, []MetadataKV{{Key: "k1", Value: "v1"}})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "failed to set metadata batch (1 keys) for network 1") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
 func TestUpsertNetworks(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		db, mock := newMockDB(t)
