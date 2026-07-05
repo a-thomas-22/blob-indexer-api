@@ -36,7 +36,10 @@ appConfig:
     url: "postgres://testuser:testpass@blob-indexer-postgresql.default.svc.cluster.local:5432/blobindexer?sslmode=disable"
   server:
     port: 8080
-    dev_mode: true
+    # dev_mode requires server.dev_api_key since config-validation hardening,
+    # and the chart exposes no way to set the key. The smoke tests only hit
+    # public endpoints, so run the test install like production.
+    dev_mode: false
   logging:
     level: "debug"
     format: "json"
