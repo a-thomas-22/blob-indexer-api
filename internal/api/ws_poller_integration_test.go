@@ -10,7 +10,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"testing"
 	"time"
 
@@ -18,13 +17,11 @@ import (
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
+	"github.com/a-thomas-22/blob-indexer-api/internal/testdb"
 )
 
 func TestPollerListenNotifyEndToEnd(t *testing.T) {
-	url := os.Getenv("TEST_DB_URL")
-	if url == "" {
-		t.Skip("TEST_DB_URL not set; skipping integration test")
-	}
+	url := testdb.URL(t, "api")
 	sqlxDB, err := sqlx.Connect("postgres", url)
 	if err != nil {
 		t.Fatalf("connect: %v", err)

@@ -174,10 +174,7 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 // snapshot builder's query text against a real schema, including type
 // unification of block_number scans into uint64 slices.
 func TestWSPollerQueriesAgainstRealPostgres(t *testing.T) {
-	url := os.Getenv("TEST_DB_URL")
-	if url == "" {
-		t.Skip("TEST_DB_URL not set; skipping integration test")
-	}
+	url := testdb.URL(t, "api")
 	sqlxDB, err := sqlx.Connect("postgres", url)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
