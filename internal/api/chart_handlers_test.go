@@ -270,11 +270,14 @@ func TestGetCostComparisonChart_Success(t *testing.T) {
 			if !strings.Contains(query, "blob_chart_rollups") {
 				t.Fatalf("expected hour granularity to read rollups: %s", query)
 			}
-			if len(args) != 6 {
-				t.Fatalf("expected 6 args, got %d", len(args))
+			if len(args) != 7 {
+				t.Fatalf("expected 7 args, got %d", len(args))
 			}
 			if args[5] != calldataGasPerByte {
 				t.Fatalf("expected calldata gas per byte arg %d, got %#v", calldataGasPerByte, args[5])
+			}
+			if args[6] != int64(3600) {
+				t.Fatalf("expected source bucket arg 3600, got %#v", args[6])
 			}
 			setSliceResult(dest, []costComparisonChartRow{
 				{
@@ -704,24 +707,73 @@ func TestChartRoutesMounted(t *testing.T) {
 	}
 }
 
-func TestChartServedByRollups(t *testing.T) {
+func TestChartRollupSourceBucket(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Minute)
+	rangeStart := now.Add(-time.Hour)
+
 	tests := []struct {
+		name          string
 		granularity   string
 		bucketSeconds int64
-		want          bool
+		startTime     time.Time
+		coverage      time.Time
+		hasCoverage   bool
+		wantSource    int64
+		wantOK        bool
+		wantProbe     bool
 	}{
-		{chartGranularityMinute, 60, false},
-		{chartGranularityMinute, 300, false},
-		{chartGranularityHour, 3600, true},
-		{chartGranularityHour, 21600, true},
-		{chartGranularityDay, 86400, true},
-		{chartGranularityBlock, approxBlockSeconds, false},
+		{name: "hour exact", granularity: chartGranularityHour, bucketSeconds: 3600, startTime: rangeStart, wantSource: 3600, wantOK: true},
+		{name: "six hour exact", granularity: chartGranularityHour, bucketSeconds: 21600, startTime: rangeStart, wantSource: 21600, wantOK: true},
+		{name: "day exact", granularity: chartGranularityDay, bucketSeconds: 86400, startTime: rangeStart, wantSource: 86400, wantOK: true},
+		{name: "block never", granularity: chartGranularityBlock, bucketSeconds: approxBlockSeconds, startTime: rangeStart, wantProbe: false},
+		{name: "minute covered", granularity: chartGranularityMinute, bucketSeconds: 60, startTime: rangeStart, coverage: rangeStart.Add(-time.Hour), hasCoverage: true, wantSource: fineRollupBucketSeconds, wantOK: true, wantProbe: true},
+		{name: "five minute covered", granularity: chartGranularityMinute, bucketSeconds: 300, startTime: rangeStart, coverage: rangeStart, hasCoverage: true, wantSource: fineRollupBucketSeconds, wantOK: true, wantProbe: true},
+		{name: "minute coverage too recent", granularity: chartGranularityMinute, bucketSeconds: 60, startTime: rangeStart, coverage: rangeStart.Add(time.Minute), hasCoverage: true, wantProbe: true},
+		{name: "minute no coverage", granularity: chartGranularityMinute, bucketSeconds: 60, startTime: rangeStart, wantProbe: true},
+		{name: "non-minute bucket", granularity: chartGranularityMinute, bucketSeconds: 90, startTime: rangeStart},
 	}
 	for _, tc := range tests {
-		chart := chartRequest{Granularity: tc.granularity, BucketSeconds: tc.bucketSeconds}
-		if got := chartServedByRollups(chart); got != tc.want {
-			t.Fatalf("chartServedByRollups(%s, %d) = %v, want %v", tc.granularity, tc.bucketSeconds, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			probed := false
+			db := &mockDB{
+				getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+					probed = true
+					if !strings.Contains(query, "block_metrics_rollups") || !strings.Contains(query, "bucket_seconds = 60") {
+						t.Fatalf("unexpected coverage probe query: %s", query)
+					}
+					if tc.hasCoverage {
+						setStructResult(dest, sql.NullTime{Time: tc.coverage, Valid: true})
+					}
+					return nil
+				},
+			}
+			a := newTestAPIWithDB(db)
+			chart := chartRequest{Granularity: tc.granularity, BucketSeconds: tc.bucketSeconds, StartTime: tc.startTime}
+			source, ok, err := a.chartRollupSourceBucket(context.Background(), 42, chart)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ok != tc.wantOK || source != tc.wantSource {
+				t.Fatalf("chartRollupSourceBucket(%s, %d) = (%d, %v), want (%d, %v)",
+					tc.granularity, tc.bucketSeconds, source, ok, tc.wantSource, tc.wantOK)
+			}
+			if probed != tc.wantProbe {
+				t.Fatalf("coverage probed = %v, want %v", probed, tc.wantProbe)
+			}
+		})
+	}
+}
+
+func TestChartRollupSourceBucket_ProbeError(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return errors.New("probe failed")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	chart := chartRequest{Granularity: chartGranularityMinute, BucketSeconds: 60, StartTime: time.Now().UTC()}
+	if _, _, err := a.chartRollupSourceBucket(context.Background(), 42, chart); err == nil {
+		t.Fatal("expected probe error to propagate")
 	}
 }
 
@@ -733,10 +785,10 @@ func TestGetBlobMarketChart_RollupRouting(t *testing.T) {
 			if !strings.Contains(query, "block_metrics_rollups") || !strings.Contains(query, "blob_chart_rollups") {
 				t.Fatalf("expected rollup-backed query for range=7d, got: %s", query)
 			}
-			if len(args) != 4 {
-				t.Fatalf("expected 4 args, got %d", len(args))
+			if len(args) != 5 {
+				t.Fatalf("expected 5 args, got %d", len(args))
 			}
-			if args[0] != 42 || args[3] != int64(3600) {
+			if args[0] != 42 || args[3] != int64(3600) || args[4] != int64(3600) {
 				t.Fatalf("unexpected args: %#v", args)
 			}
 			setSliceResult(dest, []blobMarketChartRow{})
@@ -757,16 +809,78 @@ func TestGetBlobMarketChart_RollupRouting(t *testing.T) {
 	}
 }
 
+func TestGetBlobMarketChart_FineRollupsServeSubHourGranularity(t *testing.T) {
+	coverage := time.Now().UTC().Add(-48 * time.Hour)
+	queried := false
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if !strings.Contains(query, "block_metrics_rollups") {
+				t.Fatalf("unexpected coverage probe query: %s", query)
+			}
+			setStructResult(dest, sql.NullTime{Time: coverage, Valid: true})
+			return nil
+		},
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			queried = true
+			if !strings.Contains(query, "block_metrics_rollups") || !strings.Contains(query, "blob_chart_rollups") {
+				t.Fatalf("expected rollup-backed query for covered 24h range, got: %s", query)
+			}
+			if len(args) != 5 {
+				t.Fatalf("expected 5 args, got %d", len(args))
+			}
+			if args[0] != 42 || args[3] != int64(300) || args[4] != int64(fineRollupBucketSeconds) {
+				t.Fatalf("unexpected args: %#v", args)
+			}
+			setSliceResult(dest, []blobMarketChartRow{})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?range=24h", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetBlobMarketChart(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !queried {
+		t.Fatal("expected a database query")
+	}
+}
+
+func TestGetBlobMarketChart_SubHourFallsBackToRawWithoutCoverage(t *testing.T) {
+	db := &mockDB{
+		// Default getFn leaves the probe result NULL: no fine coverage yet.
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if strings.Contains(query, "block_metrics_rollups") {
+				t.Fatalf("expected raw fallback without fine coverage, got: %s", query)
+			}
+			setSliceResult(dest, []blobMarketChartRow{})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?range=1h&granularity=minute", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetBlobMarketChart(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
 func TestGetAttributionUsageChart_AllRangeUsesRollups(t *testing.T) {
 	db := &mockDB{
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
 			if !strings.Contains(query, "blob_chart_rollups") || !strings.Contains(query, "LIMIT $6") {
 				t.Fatalf("expected rollup-backed attribution query for range=all, got: %s", query)
 			}
-			if len(args) != 6 {
-				t.Fatalf("expected 6 args, got %d", len(args))
+			if len(args) != 7 {
+				t.Fatalf("expected 7 args, got %d", len(args))
 			}
-			if args[1] != chartRangeAll || args[4] != int64(86400) {
+			if args[1] != chartRangeAll || args[4] != int64(86400) || args[6] != int64(86400) {
 				t.Fatalf("unexpected args: %#v", args)
 			}
 			setSliceResult(dest, []attributionUsageChartRow{})

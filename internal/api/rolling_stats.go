@@ -19,10 +19,12 @@ const (
 	minRollingStatsWindowDuration = time.Minute
 	maxRollingStatsWindowDuration = 30 * 24 * time.Hour
 
-	// rollingStatsRawWindowCutoff is the longest window served by raw blob and
-	// block-metric scans. Longer windows read hourly chart rollups instead,
-	// because raw scans grow with window width and blow the aggregate query
-	// timeout on large deployments.
+	// rollingStatsRawWindowCutoff is the longest window served below the
+	// hourly-rollup tier. Longer windows read hourly chart rollups, because
+	// scan cost grows with window width and blows the aggregate query timeout
+	// on large deployments. Windows at or below the cutoff read fine (60s)
+	// rollups when those cover the window, and fall back to raw blob and
+	// block-metric scans while fine coverage is still being backfilled.
 	rollingStatsRawWindowCutoff = 24 * time.Hour
 )
 
@@ -153,7 +155,12 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 		queryCtx, cancel := context.WithTimeout(aggregateWorkContext(r), aggregateQueryTimeout)
 		defer cancel()
 
-		rawWindows, rollupWindows := splitRollingStatsWindows(windows)
+		fineCoverageStart, hasFineCoverage, err := a.fineRollupCoverageStart(queryCtx, network.ChainID)
+		if err != nil {
+			return RollingStatsResponse{}, err
+		}
+
+		fineWindows, rawWindows, rollupWindows := splitRollingStatsWindows(windows, generatedAt, fineCoverageStart, hasFineCoverage)
 		rowsByLabel := make(map[string]rollingStatsWindowRow, len(windows))
 		runWindowsQuery := func(query string, specs []statsWindowSpec) error {
 			if len(specs) == 0 {
@@ -181,6 +188,9 @@ func (a *API) GetRollingStatsWindows(w http.ResponseWriter, r *http.Request) {
 				rowsByLabel[row.Window] = row
 			}
 			return nil
+		}
+		if err := runWindowsQuery(queryRollingStatsWindowsFine, fineWindows); err != nil {
+			return RollingStatsResponse{}, err
 		}
 		if err := runWindowsQuery(queryRollingStatsWindows, rawWindows); err != nil {
 			return RollingStatsResponse{}, err
@@ -243,17 +253,26 @@ func (a *API) GetRollingStatsChart(w http.ResponseWriter, r *http.Request) {
 	a.GetRollingStatsWindows(w, r)
 }
 
-// splitRollingStatsWindows partitions requested windows into those served by
-// raw scans (the cutoff and shorter) and those served by hourly rollups.
-func splitRollingStatsWindows(windows []statsWindowSpec) (raw, rollup []statsWindowSpec) {
+// splitRollingStatsWindows partitions requested windows by serving tier:
+// windows longer than the cutoff read hourly rollups, windows at or below it
+// read fine (60s) rollups when coverage reaches the window start, and the
+// remainder falls back to raw scans (fine coverage is only missing until the
+// indexer's retention-window backfill completes after migration 2).
+func splitRollingStatsWindows(windows []statsWindowSpec, generatedAt, fineCoverageStart time.Time, hasFineCoverage bool) (fine, raw, rollup []statsWindowSpec) {
+	// The fine query aligns window ends down to the last completed minute, so
+	// coverage is judged against the aligned window start.
+	fineEnd := generatedAt.UTC().Truncate(time.Minute)
 	for _, window := range windows {
-		if window.Duration > rollingStatsRawWindowCutoff {
+		switch {
+		case window.Duration > rollingStatsRawWindowCutoff:
 			rollup = append(rollup, window)
-		} else {
+		case hasFineCoverage && !fineCoverageStart.After(fineEnd.Add(-window.Duration)):
+			fine = append(fine, window)
+		default:
 			raw = append(raw, window)
 		}
 	}
-	return raw, rollup
+	return fine, raw, rollup
 }
 
 func toRollingWindowStats(row rollingStatsWindowRow) RollingWindowStats {

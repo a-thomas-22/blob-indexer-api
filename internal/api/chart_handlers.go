@@ -343,19 +343,22 @@ func (a *API) GetBlobMarketChart(w http.ResponseWriter, r *http.Request) {
 		zap.String("range", chart.Range),
 		zap.String("granularity", chart.Granularity))
 
-	query := queryBlobMarketTimeChart
-	args := chartBlobMarketTimeArgs(network.ChainID, chart)
-	if chart.Granularity == chartGranularityBlock {
-		query = queryBlobMarketBlockChart
-		args = chartBlockArgs(network.ChainID, chart)
-	} else if chartServedByRollups(chart) {
-		query = queryBlobMarketTimeChartRollup
-	}
-
 	cacheKey := fmt.Sprintf("chart:blob-market:%d:%s:%s:%d", network.ChainID, chart.Range, chart.Granularity, chart.BucketSeconds)
 	value, err := a.cachedChartResponse(r, cacheKey, func(ctx context.Context) (interface{}, error) {
 		queryCtx, cancel := context.WithTimeout(ctx, aggregateQueryTimeout)
 		defer cancel()
+
+		query := queryBlobMarketTimeChart
+		args := chartBlobMarketTimeArgs(network.ChainID, chart)
+		if chart.Granularity == chartGranularityBlock {
+			query = queryBlobMarketBlockChart
+			args = chartBlockArgs(network.ChainID, chart)
+		} else if sourceBucket, ok, err := a.chartRollupSourceBucket(queryCtx, network.ChainID, chart); err != nil {
+			return nil, err
+		} else if ok {
+			query = queryBlobMarketTimeChartRollup
+			args = append(chartBlobMarketTimeArgs(network.ChainID, chart), sourceBucket)
+		}
 
 		var rows []blobMarketChartRow
 		if err := a.db.SelectContext(queryCtx, &rows, query, args...); err != nil {
@@ -415,20 +418,22 @@ func (a *API) GetAttributionUsageChart(w http.ResponseWriter, r *http.Request) {
 		zap.String("granularity", chart.Granularity),
 		zap.Int("series_limit", seriesLimit))
 
-	query := queryAttributionUsageTimeChart
-	args := append(chartTimeArgs(network.ChainID, chart), seriesLimit)
-	if chart.Granularity == chartGranularityBlock {
-		query = queryAttributionUsageBlockChart
-		args = append(chartBlockArgs(network.ChainID, chart), seriesLimit)
-	} else if chartServedByRollups(chart) {
-		query = queryAttributionUsageTimeChartRollup
-		args = append(chartRollupTimeArgs(network.ChainID, chart), seriesLimit)
-	}
-
 	cacheKey := fmt.Sprintf("chart:attribution-usage:%d:%s:%s:%d:%d", network.ChainID, chart.Range, chart.Granularity, chart.BucketSeconds, seriesLimit)
 	value, err := a.cachedChartResponse(r, cacheKey, func(ctx context.Context) (interface{}, error) {
 		queryCtx, cancel := context.WithTimeout(ctx, aggregateQueryTimeout)
 		defer cancel()
+
+		query := queryAttributionUsageTimeChart
+		args := append(chartTimeArgs(network.ChainID, chart), seriesLimit)
+		if chart.Granularity == chartGranularityBlock {
+			query = queryAttributionUsageBlockChart
+			args = append(chartBlockArgs(network.ChainID, chart), seriesLimit)
+		} else if sourceBucket, ok, err := a.chartRollupSourceBucket(queryCtx, network.ChainID, chart); err != nil {
+			return nil, err
+		} else if ok {
+			query = queryAttributionUsageTimeChartRollup
+			args = append(chartRollupTimeArgs(network.ChainID, chart), seriesLimit, sourceBucket)
+		}
 
 		var rows []attributionUsageChartRow
 		if err := a.db.SelectContext(queryCtx, &rows, query, args...); err != nil {
@@ -481,20 +486,22 @@ func (a *API) GetCostComparisonChart(w http.ResponseWriter, r *http.Request) {
 		zap.String("range", chart.Range),
 		zap.String("granularity", chart.Granularity))
 
-	query := queryCostComparisonTimeChart
-	args := append(chartTimeArgs(network.ChainID, chart), calldataGasPerByte)
-	if chart.Granularity == chartGranularityBlock {
-		query = queryCostComparisonBlockChart
-		args = append(chartBlockArgs(network.ChainID, chart), calldataGasPerByte)
-	} else if chartServedByRollups(chart) {
-		query = queryCostComparisonTimeChartRollup
-		args = append(chartRollupTimeArgs(network.ChainID, chart), calldataGasPerByte)
-	}
-
 	cacheKey := fmt.Sprintf("chart:cost-comparison:%d:%s:%s:%d", network.ChainID, chart.Range, chart.Granularity, chart.BucketSeconds)
 	value, err := a.cachedChartResponse(r, cacheKey, func(ctx context.Context) (interface{}, error) {
 		queryCtx, cancel := context.WithTimeout(ctx, aggregateQueryTimeout)
 		defer cancel()
+
+		query := queryCostComparisonTimeChart
+		args := append(chartTimeArgs(network.ChainID, chart), calldataGasPerByte)
+		if chart.Granularity == chartGranularityBlock {
+			query = queryCostComparisonBlockChart
+			args = append(chartBlockArgs(network.ChainID, chart), calldataGasPerByte)
+		} else if sourceBucket, ok, err := a.chartRollupSourceBucket(queryCtx, network.ChainID, chart); err != nil {
+			return nil, err
+		} else if ok {
+			query = queryCostComparisonTimeChartRollup
+			args = append(chartRollupTimeArgs(network.ChainID, chart), calldataGasPerByte, sourceBucket)
+		}
 
 		var rows []costComparisonChartRow
 		if err := a.db.SelectContext(queryCtx, &rows, query, args...); err != nil {
@@ -681,16 +688,55 @@ func estimatedBlockPoints(duration time.Duration) int {
 	return int(math.Ceil(duration.Seconds() / approxBlockSeconds))
 }
 
-// rollupMinBucketSeconds is the finest bucket size maintained in the chart
-// rollup tables (migration 13). Coarser buckets are exactly the granularities
-// the chart API serves at and above one hour: 3600, 21600, and 86400 seconds.
+// rollupMinBucketSeconds is the smallest bucket size besides the fine (60s)
+// bucket stored in the chart rollup tables. Granularities of an hour and
+// coarser (3600, 21600, and 86400 seconds) read stored rows of their own
+// bucket size 1:1.
 const rollupMinBucketSeconds = 3600
 
-// chartServedByRollups reports whether a time-granularity chart request reads
-// the pre-aggregated rollup tables instead of raw rows. Sub-hour buckets stay
-// on raw scans, which the point limit bounds to at most 24 hours of data.
-func chartServedByRollups(chart chartRequest) bool {
-	return chart.Granularity != chartGranularityBlock && chart.BucketSeconds >= rollupMinBucketSeconds
+// fineRollupBucketSeconds is the fine chart rollup bucket size, mirroring
+// chart_rollup_fine_bucket_seconds() in migration 2. Fine buckets carry a
+// ~48h retention window; every sub-hour chart request fits inside it because
+// the point limit caps such ranges at 1000 buckets (under 17 hours at 60s,
+// and the only 300s requests are range=24h).
+const fineRollupBucketSeconds = 60
+
+// chartRollupSourceBucket reports whether a time-granularity chart request
+// can read the pre-aggregated rollup tables and, if so, the stored bucket
+// size to read: hour-and-coarser granularities match stored rows exactly,
+// and whole-minute sub-hour granularities re-aggregate fine (60s) rows into
+// display buckets. Fine serving additionally requires fine coverage to reach
+// the range start — coverage is backfilled by the indexer after migration 2 —
+// so until then sub-hour requests keep using raw scans, which the point limit
+// bounds to at most 24 hours of data.
+func (a *API) chartRollupSourceBucket(ctx context.Context, chainID int, chart chartRequest) (sourceBucketSeconds int64, servedByRollups bool, err error) {
+	if chart.Granularity == chartGranularityBlock {
+		return 0, false, nil
+	}
+	if chart.BucketSeconds >= rollupMinBucketSeconds {
+		return chart.BucketSeconds, true, nil
+	}
+	if chart.BucketSeconds <= 0 || chart.BucketSeconds%fineRollupBucketSeconds != 0 || chart.StartTime.IsZero() {
+		return 0, false, nil
+	}
+	coverageStart, hasCoverage, err := a.fineRollupCoverageStart(ctx, chainID)
+	if err != nil {
+		return 0, false, err
+	}
+	if !hasCoverage || coverageStart.After(chart.StartTime) {
+		return 0, false, nil
+	}
+	return fineRollupBucketSeconds, true, nil
+}
+
+// fineRollupCoverageStart returns the earliest fine (60s) rollup bucket for
+// the network, if any exist.
+func (a *API) fineRollupCoverageStart(ctx context.Context, chainID int) (time.Time, bool, error) {
+	var start sql.NullTime
+	if err := a.db.GetContext(ctx, &start, queryFineRollupCoverageStart, chainID); err != nil {
+		return time.Time{}, false, err
+	}
+	return start.Time.UTC(), start.Valid, nil
 }
 
 func chartTimeArgs(networkID int, chart chartRequest) []interface{} {
@@ -1690,9 +1736,15 @@ var queryAttributionUsageBlockChart = `
 	ORDER BY b.bucket_start ASC, u.blob_count DESC NULLS LAST, u.series_key ASC
 `
 
-// Rollup-backed chart queries (migration 13). These serve every time
-// granularity of one hour and coarser, reading O(buckets) pre-aggregated rows
-// instead of raw blobs. Args: $1 network, $2 start, $3 end, $4 bucket seconds.
+// Rollup-backed chart queries. These serve every whole-minute time
+// granularity from pre-aggregated rows instead of raw blobs: granularities of
+// one hour and coarser read stored rows of their own bucket size 1:1 (the
+// display-bucket regrouping is an identity there), and sub-hour granularities
+// re-aggregate fine (60s) rows into display buckets — sums, averages, and
+// unique-sender counts stay exact, while per-point median/p95 become the
+// median of per-minute values, the same estimate the wide rolling windows
+// accept. Args: $1 network, $2 start, $3 end, $4 display bucket seconds,
+// $5 source bucket seconds.
 const queryBlobMarketTimeChartRollup = `
 	WITH bounds AS (
 		SELECT
@@ -1712,58 +1764,96 @@ const queryBlobMarketTimeChartRollup = `
 		) AS g(bucket_start)
 		WHERE b.range_end > b.range_start
 	),
-	bucket_metrics AS (
+	source_metrics AS (
 		SELECT
-			r.bucket_start,
-			r.start_block,
-			r.end_block,
-			CASE
-				WHEN r.block_count > 0 THEN (r.sum_blob_base_fee / r.block_count)::text
-				ELSE '0'
-			END AS average_blob_base_fee_wei,
-			r.median_blob_base_fee::text AS median_blob_base_fee_wei,
-			r.p95_blob_base_fee::text AS p95_blob_base_fee_wei,
-			r.sum_blob_count::int AS blob_count,
-			r.sum_blob_gas_used::bigint AS blob_gas_used,
-			r.sum_blob_gas_target::bigint AS blob_gas_target,
-			CASE
-				WHEN r.block_count > 0 THEN (r.sum_utilization / r.block_count)::text
-				ELSE '0'
-			END AS average_utilization
+			TIMESTAMP 'epoch' + (
+				FLOOR(EXTRACT(EPOCH FROM r.bucket_start) / $4::numeric)::bigint
+				* ($4::bigint * INTERVAL '1 second')
+			) AS display_bucket_start,
+			r.*
 		FROM block_metrics_rollups r
 		CROSS JOIN bounds b
 		WHERE r.chain_id = $1
-			AND r.bucket_seconds = $4::int
+			AND r.bucket_seconds = $5::int
+			AND r.bucket_start >= b.range_start
+			AND r.bucket_start < b.range_end
+	),
+	bucket_metrics AS (
+		SELECT
+			display_bucket_start AS bucket_start,
+			MIN(start_block) AS start_block,
+			MAX(end_block) AS end_block,
+			CASE
+				WHEN COALESCE(SUM(block_count), 0) > 0 THEN (SUM(sum_blob_base_fee) / SUM(block_count))::text
+				ELSE '0'
+			END AS average_blob_base_fee_wei,
+			COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY median_blob_base_fee), 0)::text AS median_blob_base_fee_wei,
+			-- Identity groups (hour-and-coarser) keep the stored per-bucket
+			-- p95; fine re-aggregation estimates a point's p95 as the 95th
+			-- percentile of its minute medians (minutes have almost no
+			-- internal spread, so medians stand in for their blocks).
+			CASE
+				WHEN $4::int > $5::int AND $5::int < 3600
+					THEN COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY median_blob_base_fee), 0)
+				ELSE COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY p95_blob_base_fee), 0)
+			END::text AS p95_blob_base_fee_wei,
+			COALESCE(SUM(sum_blob_count), 0)::int AS blob_count,
+			COALESCE(SUM(sum_blob_gas_used), 0)::bigint AS blob_gas_used,
+			COALESCE(SUM(sum_blob_gas_target), 0)::bigint AS blob_gas_target,
+			CASE
+				WHEN COALESCE(SUM(block_count), 0) > 0 THEN (SUM(sum_utilization) / SUM(block_count))::text
+				ELSE '0'
+			END AS average_utilization
+		FROM source_metrics
+		GROUP BY display_bucket_start
+	),
+	source_blobs AS (
+		SELECT
+			TIMESTAMP 'epoch' + (
+				FLOOR(EXTRACT(EPOCH FROM r.bucket_start) / $4::numeric)::bigint
+				* ($4::bigint * INTERVAL '1 second')
+			) AS display_bucket_start,
+			r.from_address,
+			r.total_cost_wei
+		FROM blob_chart_rollups r
+		CROSS JOIN bounds b
+		WHERE r.chain_id = $1
+			AND r.bucket_seconds = $5::int
 			AND r.bucket_start >= b.range_start
 			AND r.bucket_start < b.range_end
 	),
 	bucket_blobs AS (
 		SELECT
-			r.bucket_start,
-			COALESCE(SUM(r.total_cost_wei), 0)::text AS total_cost_wei,
-			COUNT(DISTINCT r.from_address)::int AS unique_senders
-		FROM blob_chart_rollups r
-		CROSS JOIN bounds b
-		WHERE r.chain_id = $1
-			AND r.bucket_seconds = $4::int
-			AND r.bucket_start >= b.range_start
-			AND r.bucket_start < b.range_end
-		GROUP BY r.bucket_start
+			display_bucket_start AS bucket_start,
+			COALESCE(SUM(total_cost_wei), 0)::text AS total_cost_wei,
+			COUNT(DISTINCT from_address)::int AS unique_senders
+		FROM source_blobs
+		GROUP BY display_bucket_start
 	),
 	summary_metrics AS (
 		-- Range-wide aggregates from rollup rows, so wide ranges never scan raw
-		-- block_metrics. Always reads the hourly rollups regardless of chart
-		-- granularity: sums and averages are granularity-independent anyway,
-		-- and pinning the bucket size keeps the estimated range median/p95
-		-- (median of per-bucket values) stable when the caller switches
-		-- granularity over the same range.
+		-- block_metrics. Coarse requests always read the hourly rollups
+		-- regardless of chart granularity: sums and averages are
+		-- granularity-independent anyway, and pinning the bucket size keeps the
+		-- estimated range median/p95 (median of per-bucket values) stable when
+		-- the caller switches granularity over the same range. Fine-served
+		-- requests read the fine rows instead — their ranges align to sub-hour
+		-- buckets, which hourly rows cannot cover.
 		SELECT
 			CASE
 				WHEN COALESCE(SUM(r.block_count), 0) > 0 THEN (SUM(r.sum_blob_base_fee) / SUM(r.block_count))::text
 				ELSE '0'
 			END AS average_blob_base_fee_wei,
 			COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY r.median_blob_base_fee), 0)::text AS median_blob_base_fee_wei,
-			COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY r.p95_blob_base_fee), 0)::text AS p95_blob_base_fee_wei,
+			-- Hourly rows keep the established median-of-bucket-p95s estimate;
+			-- fine rows use the 95th percentile of minute medians instead,
+			-- because per-minute p95s carry almost no internal spread and
+			-- their median would collapse toward the range median.
+			CASE
+				WHEN $5::int < 3600
+					THEN COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY r.median_blob_base_fee), 0)
+				ELSE COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY r.p95_blob_base_fee), 0)
+			END::text AS p95_blob_base_fee_wei,
 			COALESCE(SUM(r.sum_blob_count), 0)::int AS total_blobs,
 			COALESCE(SUM(r.sum_blob_gas_used), 0)::bigint AS total_blob_gas_used,
 			CASE
@@ -1773,7 +1863,7 @@ const queryBlobMarketTimeChartRollup = `
 		FROM block_metrics_rollups r
 		CROSS JOIN bounds b
 		WHERE r.chain_id = $1
-			AND r.bucket_seconds = 3600
+			AND r.bucket_seconds = LEAST($5::int, 3600)
 			AND r.bucket_start >= b.range_start
 			AND r.bucket_start < b.range_end
 	),
@@ -1784,7 +1874,7 @@ const queryBlobMarketTimeChartRollup = `
 		FROM blob_chart_rollups r
 		CROSS JOIN bounds b
 		WHERE r.chain_id = $1
-			AND r.bucket_seconds = $4::int
+			AND r.bucket_seconds = LEAST($5::int, 3600)
 			AND r.bucket_start >= b.range_start
 			AND r.bucket_start < b.range_end
 	),
@@ -1831,9 +1921,12 @@ const queryBlobMarketTimeChartRollup = `
 `
 
 // queryCostComparisonTimeChartRollup mirrors queryCostComparisonTimeChart on
-// rollup rows. Args: $1 network, $2 range label, $3 start, $4 end,
-// $5 bucket seconds, $6 calldata gas per byte. range=all resolves its start
-// from the earliest rollup bucket, which is already day-aligned.
+// rollup rows, regrouping source-bucket rows into display buckets (identity
+// for hour-and-coarser granularities, fine 60s rows for sub-hour ones — the
+// per-point columns are all sums, so both stay exact). Args: $1 network,
+// $2 range label, $3 start, $4 end, $5 display bucket seconds, $6 calldata
+// gas per byte, $7 source bucket seconds. range=all resolves its start from
+// the earliest rollup bucket, which is already day-aligned.
 const queryCostComparisonTimeChartRollup = `
 	WITH bounds AS (
 		SELECT
@@ -1841,7 +1934,7 @@ const queryCostComparisonTimeChartRollup = `
 				WHEN $2::text = 'all' THEN COALESCE((
 					SELECT MIN(r.bucket_start)
 					FROM blob_chart_rollups r
-					WHERE r.chain_id = $1 AND r.bucket_seconds = $5::int
+					WHERE r.chain_id = $1 AND r.bucket_seconds = $7::int
 				), $4::timestamp)
 				ELSE $3::timestamp
 			END AS range_start,
@@ -1860,31 +1953,38 @@ const queryCostComparisonTimeChartRollup = `
 		) AS g(bucket_start)
 		WHERE b.range_end > b.range_start
 	),
-	bucket_costs AS (
+	source_costs AS (
 		SELECT
-			r.bucket_start,
-			COALESCE(SUM(r.blob_count), 0)::int AS blob_count,
-			COALESCE(SUM(r.blob_bytes), 0)::bigint AS blob_bytes,
-			COALESCE(SUM(r.total_cost_wei), 0)::text AS blob_cost_wei,
-			COALESCE(SUM(r.sum_size_base_fee) * $6::numeric, 0)::text AS calldata_equivalent_cost_wei
+			TIMESTAMP 'epoch' + (
+				FLOOR(EXTRACT(EPOCH FROM r.bucket_start) / $5::numeric)::bigint
+				* ($5::bigint * INTERVAL '1 second')
+			) AS display_bucket_start,
+			r.blob_count,
+			r.blob_bytes,
+			r.total_cost_wei,
+			r.sum_size_base_fee
 		FROM blob_chart_rollups r
 		CROSS JOIN bounds b
 		WHERE r.chain_id = $1
-			AND r.bucket_seconds = $5::int
+			AND r.bucket_seconds = $7::int
 			AND r.bucket_start >= b.range_start
 			AND r.bucket_start < b.range_end
-		GROUP BY r.bucket_start
+	),
+	bucket_costs AS (
+		SELECT
+			display_bucket_start AS bucket_start,
+			COALESCE(SUM(blob_count), 0)::int AS blob_count,
+			COALESCE(SUM(blob_bytes), 0)::bigint AS blob_bytes,
+			COALESCE(SUM(total_cost_wei), 0)::text AS blob_cost_wei,
+			COALESCE(SUM(sum_size_base_fee) * $6::numeric, 0)::text AS calldata_equivalent_cost_wei
+		FROM source_costs
+		GROUP BY display_bucket_start
 	),
 	summary_costs AS (
 		SELECT
-			COALESCE(SUM(r.total_cost_wei), 0) AS blob_cost_wei,
-			COALESCE(SUM(r.sum_size_base_fee) * $6::numeric, 0) AS calldata_equivalent_cost_wei
-		FROM blob_chart_rollups r
-		CROSS JOIN bounds b
-		WHERE r.chain_id = $1
-			AND r.bucket_seconds = $5::int
-			AND r.bucket_start >= b.range_start
-			AND r.bucket_start < b.range_end
+			COALESCE(SUM(total_cost_wei), 0) AS blob_cost_wei,
+			COALESCE(SUM(sum_size_base_fee) * $6::numeric, 0) AS calldata_equivalent_cost_wei
+		FROM source_costs
 	)
 	SELECT
 		b.bucket_start AS timestamp,
@@ -1916,8 +2016,11 @@ const queryCostComparisonTimeChartRollup = `
 `
 
 // queryAttributionUsageTimeChartRollup mirrors queryAttributionUsageTimeChart
-// on rollup rows. Args: $1 network, $2 range label, $3 start, $4 end,
-// $5 bucket seconds, $6 series limit.
+// on rollup rows, regrouping source-bucket rows into display buckets (the
+// downstream entity CTEs aggregate per display bucket, so sub-hour requests
+// served from fine 60s rows stay exact). Args: $1 network, $2 range label,
+// $3 start, $4 end, $5 display bucket seconds, $6 series limit, $7 source
+// bucket seconds.
 var queryAttributionUsageTimeChartRollup = `
 	WITH bounds AS (
 		SELECT
@@ -1925,7 +2028,7 @@ var queryAttributionUsageTimeChartRollup = `
 				WHEN $2::text = 'all' THEN COALESCE((
 					SELECT MIN(r.bucket_start)
 					FROM blob_chart_rollups r
-					WHERE r.chain_id = $1 AND r.bucket_seconds = $5::int
+					WHERE r.chain_id = $1 AND r.bucket_seconds = $7::int
 				), $4::timestamp)
 				ELSE $3::timestamp
 			END AS range_start,
@@ -1946,7 +2049,10 @@ var queryAttributionUsageTimeChartRollup = `
 	),
 	attribution_source AS MATERIALIZED (
 		SELECT
-			r.bucket_start,
+			TIMESTAMP 'epoch' + (
+				FLOOR(EXTRACT(EPOCH FROM r.bucket_start) / $5::numeric)::bigint
+				* ($5::bigint * INTERVAL '1 second')
+			) AS bucket_start,
 			r.from_address,
 			r.blob_count,
 			r.total_cost_wei AS total_cost_wei,
@@ -1959,7 +2065,7 @@ var queryAttributionUsageTimeChartRollup = `
 			ON known.chain_id = r.chain_id
 			AND LOWER(known.address) = LOWER(r.from_address)
 		WHERE r.chain_id = $1
-			AND r.bucket_seconds = $5::int
+			AND r.bucket_seconds = $7::int
 			AND r.bucket_start >= b.range_start
 			AND r.bucket_start < b.range_end
 	),

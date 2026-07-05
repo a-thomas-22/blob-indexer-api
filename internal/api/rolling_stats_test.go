@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
@@ -247,18 +248,140 @@ func TestGetRollingStatsWindows_SplitsRawAndRollupWindows(t *testing.T) {
 	}
 }
 
+func TestGetRollingStatsWindows_FineRollupsServeShortWindows(t *testing.T) {
+	coverageStart := time.Now().UTC().Add(-48 * time.Hour)
+	var queries []string
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if !strings.Contains(query, "block_metrics_rollups") || !strings.Contains(query, "bucket_seconds = 60") {
+				t.Fatalf("unexpected coverage probe query: %s", query)
+			}
+			setStructResult(dest, sql.NullTime{Time: coverageStart, Valid: true})
+			return nil
+		},
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			queries = append(queries, query)
+			switch {
+			case strings.Contains(query, "date_trunc('minute'"):
+				if strings.Contains(query, "FROM blobs b") || strings.Contains(query, "FROM block_metrics bm") {
+					t.Fatalf("fine query must not scan raw tables: %s", query)
+				}
+				if !strings.Contains(query, "bucket_seconds = 60") {
+					t.Fatalf("expected fine query to read 60s buckets: %s", query)
+				}
+				requireDriverValue(t, args[1], `{"5m","1h","24h"}`)
+				requireDriverValue(t, args[2], `{300,3600,86400}`)
+				setSliceResult(dest, []rollingStatsWindowRow{
+					{Window: "5m", DurationSeconds: 300, TotalBlobs: 2},
+					{Window: "1h", DurationSeconds: 3600, TotalBlobs: 24},
+					{Window: apiWindow24h, DurationSeconds: 86400, TotalBlobs: 576},
+				})
+			case strings.Contains(query, "date_trunc('hour'"):
+				requireDriverValue(t, args[1], `{"7d"}`)
+				setSliceResult(dest, []rollingStatsWindowRow{
+					{Window: "7d", DurationSeconds: 604800, TotalBlobs: 4032},
+				})
+			default:
+				t.Fatalf("unexpected query (raw fallback should not run with fine coverage): %s", query)
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=testnet&windows=5m,1h,24h,7d", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetRollingStatsWindows(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if len(queries) != 2 {
+		t.Fatalf("expected one fine and one hourly rollup query, got %d queries", len(queries))
+	}
+
+	var resp struct {
+		Success bool                 `json:"success"`
+		Data    RollingStatsResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	wantBlobs := map[string]int{"5m": 2, "1h": 24, apiWindow24h: 576, "7d": 4032}
+	if len(resp.Data.Windows) != len(wantBlobs) {
+		t.Fatalf("expected %d windows, got %d", len(wantBlobs), len(resp.Data.Windows))
+	}
+	for _, window := range resp.Data.Windows {
+		if window.TotalBlobs != wantBlobs[window.Window] {
+			t.Fatalf("window %s blobs = %d, want %d", window.Window, window.TotalBlobs, wantBlobs[window.Window])
+		}
+	}
+}
+
+func TestGetRollingStatsWindows_CoverageProbeError(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return fmt.Errorf("probe failed")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=testnet&windows=5m", http.NoBody)
+	w := httptest.NewRecorder()
+
+	a.GetRollingStatsWindows(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
 func TestSplitRollingStatsWindows_CutoffBoundary(t *testing.T) {
-	raw, rollup := splitRollingStatsWindows([]statsWindowSpec{
+	windows := []statsWindowSpec{
 		{Label: "5m", Duration: 5 * time.Minute},
 		{Label: apiWindow24h, Duration: 24 * time.Hour},
 		{Label: "25h", Duration: 25 * time.Hour},
 		{Label: "7d", Duration: 7 * 24 * time.Hour},
-	})
+	}
+	generatedAt := time.Date(2026, 5, 24, 12, 0, 30, 0, time.UTC)
+
+	// Without fine coverage every window at or below the cutoff is raw.
+	fine, raw, rollup := splitRollingStatsWindows(windows, generatedAt, time.Time{}, false)
+	if len(fine) != 0 {
+		t.Fatalf("unexpected fine windows without coverage: %+v", fine)
+	}
 	if len(raw) != 2 || raw[0].Label != "5m" || raw[1].Label != apiWindow24h {
 		t.Fatalf("unexpected raw windows: %+v", raw)
 	}
 	if len(rollup) != 2 || rollup[0].Label != "25h" || rollup[1].Label != "7d" {
 		t.Fatalf("unexpected rollup windows: %+v", rollup)
+	}
+
+	// Full fine coverage serves every window at or below the cutoff.
+	fine, raw, rollup = splitRollingStatsWindows(windows, generatedAt, generatedAt.Add(-48*time.Hour), true)
+	if len(fine) != 2 || fine[0].Label != "5m" || fine[1].Label != apiWindow24h {
+		t.Fatalf("unexpected fine windows with coverage: %+v", fine)
+	}
+	if len(raw) != 0 {
+		t.Fatalf("unexpected raw windows with coverage: %+v", raw)
+	}
+	if len(rollup) != 2 {
+		t.Fatalf("unexpected rollup windows with coverage: %+v", rollup)
+	}
+
+	// Partial coverage (backfill still pending) serves only the windows whose
+	// aligned start the coverage reaches: 5m starts at 11:55, 24h a day earlier.
+	fine, raw, _ = splitRollingStatsWindows(windows, generatedAt, generatedAt.Add(-2*time.Hour), true)
+	if len(fine) != 1 || fine[0].Label != "5m" {
+		t.Fatalf("unexpected fine windows with partial coverage: %+v", fine)
+	}
+	if len(raw) != 1 || raw[0].Label != apiWindow24h {
+		t.Fatalf("unexpected raw windows with partial coverage: %+v", raw)
+	}
+
+	// Coverage boundary is judged against the minute-aligned window start.
+	fine, raw, _ = splitRollingStatsWindows(windows, generatedAt, generatedAt.Truncate(time.Minute).Add(-5*time.Minute), true)
+	if len(fine) != 1 || fine[0].Label != "5m" || len(raw) != 1 {
+		t.Fatalf("expected exact-boundary coverage to serve 5m fine, got fine=%+v raw=%+v", fine, raw)
 	}
 }
 
