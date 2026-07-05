@@ -33,7 +33,10 @@ resources:
 
 appConfig:
   database:
-    url: "postgres://testuser:testpass@blob-indexer-postgresql.default.svc.cluster.local:5432/blobindexer?sslmode=disable"
+    # sslmode=prefer: config validation rejects the literal sslmode=disable
+    # outside dev mode; prefer attempts TLS and falls back to plaintext against
+    # the non-TLS in-cluster test PostgreSQL.
+    url: "postgres://testuser:testpass@blob-indexer-postgresql.default.svc.cluster.local:5432/blobindexer?sslmode=prefer"
   server:
     port: 8080
     # dev_mode requires server.dev_api_key since config-validation hardening,
