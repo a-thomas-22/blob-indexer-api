@@ -191,7 +191,13 @@ type Indexer struct {
 	failedBlocks            map[uint64]int // block number -> cumulative failure count
 	failedBlockNextRetry    map[uint64]time.Time
 	failedBlocksMu          sync.Mutex
-	reorgDetected           uint32              // atomic flag: 1 = reorg detected, main loop should reset
+	reorgDetected           uint32 // atomic flag: 1 = reorg detected, main loop should reset
+	// reorgRangeMu guards reorgRewindFrom/reorgInvalidatedThrough, which are
+	// only meaningful while reorgDetected == 1. Reorgs signaled before the main
+	// loop consumes the flag merge into the widest invalidated range.
+	reorgRangeMu            sync.Mutex
+	reorgRewindFrom         uint64              // first invalidated block (fork point + 1)
+	reorgInvalidatedThrough uint64              // highest block deleted by the reorg
 	chainConfig             *params.ChainConfig // go-ethereum chain config for fork-aware blob math
 }
 
@@ -712,11 +718,31 @@ func (i *Indexer) backfillResumeBlock(configuredStart, targetBlock uint64, targe
 				zap.Uint64("backfill_current_block", *state.currentBlock))
 			return configuredStart, true, nil
 		}
-		logger.Info("Resuming active backfill from metadata cursor",
-			zap.String("network", i.network.Name),
-			zap.Uint64("backfill_current_block", *state.currentBlock),
-			zap.Uint64("resume_block", *state.currentBlock+1))
-		return *state.currentBlock + 1, true, nil
+
+		// The cursor is only a hint, not the source of truth: a tip-gap
+		// catch-up shares these metadata keys with the historical backfill and
+		// can overwrite the cursor with a tip-region block while the range
+		// below is still unindexed. Trusting cursor+1 here would silently
+		// orphan that range, so resume from the first indexed_blocks gap at or
+		// above the configured start instead. When coverage below the cursor
+		// is complete this returns cursor+1, matching the old fast path.
+		resumeBlock, err = i.db.GetFirstUnindexedBlock(i.ctx, i.network.ChainID, configuredStart, *state.currentBlock)
+		if err != nil {
+			return 0, false, err
+		}
+		if resumeBlock <= *state.currentBlock {
+			logger.Warn("Backfill cursor is ahead of indexed coverage, resuming from first unindexed block",
+				zap.String("network", i.network.Name),
+				zap.Uint64("configured_start_block", configuredStart),
+				zap.Uint64("backfill_current_block", *state.currentBlock),
+				zap.Uint64("resume_block", resumeBlock))
+		} else {
+			logger.Info("Resuming active backfill from metadata cursor",
+				zap.String("network", i.network.Name),
+				zap.Uint64("backfill_current_block", *state.currentBlock),
+				zap.Uint64("resume_block", resumeBlock))
+		}
+		return resumeBlock, true, nil
 	}
 
 	if state.targetBlock != nil {
@@ -838,10 +864,14 @@ func (i *Indexer) blockProcessingWorker(workerID int) {
 						break
 					}
 
-					// Reorg was detected and handled — don't retry, the main loop will re-queue
+					// Reorg was detected and handled — don't retry, the main loop
+					// re-queues the invalidated range (which includes this block).
+					// The block was never inserted, so bail out without advancing
+					// the watermark: persisting an uninserted block as the
+					// high-water mark leaves a hole on crash and lets the
+					// WebSocket follower skip the rewound range.
 					if errors.Is(lastErr, errReorgDetected) {
-						lastErr = nil
-						break
+						return
 					}
 
 					if attempt < i.maxBlockRetries {
@@ -912,6 +942,35 @@ func (i *Indexer) trackFailedBlock(blockNumber uint64) {
 	i.failedBlocksMu.Unlock()
 }
 
+// backfillRangeFullyIndexed reports whether indexed_blocks covers
+// [startBlock, endBlock] with no gaps. Errors count as not covered: staying
+// backfill_active=true is the safe state — it keeps the coverage-verified
+// resume path armed across restarts.
+func (i *Indexer) backfillRangeFullyIndexed(startBlock, endBlock uint64) bool {
+	if i.db == nil {
+		return true
+	}
+
+	firstGap, err := i.db.GetFirstUnindexedBlock(i.ctx, i.network.ChainID, startBlock, endBlock)
+	if err != nil {
+		logger.Error("Failed to verify backfill coverage, keeping backfill active",
+			zap.String("network", i.network.Name),
+			zap.Uint64("start_block", startBlock),
+			zap.Uint64("end_block", endBlock),
+			zap.Error(err))
+		return false
+	}
+	if firstGap <= endBlock {
+		logger.Info("Backfill range not fully indexed yet, deferring completion",
+			zap.String("network", i.network.Name),
+			zap.Uint64("start_block", startBlock),
+			zap.Uint64("end_block", endBlock),
+			zap.Uint64("first_unindexed_block", firstGap))
+		return false
+	}
+	return true
+}
+
 // runBlockIndexer runs the block indexer
 func (i *Indexer) runBlockIndexer(startBlock uint64) {
 	logger.Info("Block indexer starting",
@@ -921,6 +980,10 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 	currentBlock := startBlock
 	var backfillStartBlock uint64
 	backfillActive := false
+	// Throttles repeated coverage scans while a completion attempt is deferred
+	// by in-flight or failed blocks: the phase range can span millions of rows
+	// right after a historical walk, so don't re-scan it every tick.
+	var nextCompletionCheck time.Time
 	ticker := time.NewTicker(i.pollingInterval)
 	defer ticker.Stop()
 
@@ -933,14 +996,35 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 			// Only use the ticker when we're caught up
 		}
 
-		// Check if a reorg was handled and we need to reset position
-		if atomic.CompareAndSwapUint32(&i.reorgDetected, 1, 0) {
-			newStart := atomic.LoadUint64(&i.lastIndexedBlock) + 1
-			logger.Info("Resetting indexer position after chain reorganization",
-				zap.String("network", i.network.Name),
-				zap.Uint64("old_position", currentBlock),
-				zap.Uint64("new_position", newStart))
-			currentBlock = newStart
+		// Check if a reorg was handled and we need to re-index invalidated blocks
+		if atomic.LoadUint32(&i.reorgDetected) == 1 {
+			rewindFrom, invalidatedThrough := i.consumeReorgReset()
+			if rewindFrom <= currentBlock {
+				logger.Info("Resetting indexer position after chain reorganization",
+					zap.String("network", i.network.Name),
+					zap.Uint64("old_position", currentBlock),
+					zap.Uint64("new_position", rewindFrom))
+				currentBlock = rewindFrom
+			} else {
+				// The reorg happened entirely above this walker's position — a
+				// tip reorg while the historical backfill is still running.
+				// Moving the walker forward would overwrite the backfill cursor
+				// with a tip-region block and silently orphan the unindexed
+				// range below (mainnet incident, 2026-07-05), so re-queue the
+				// invalidated tip range directly and keep walking history.
+				logger.Info("Re-queueing reorged blocks above walker position",
+					zap.String("network", i.network.Name),
+					zap.Uint64("walker_position", currentBlock),
+					zap.Uint64("rewind_from", rewindFrom),
+					zap.Uint64("invalidated_through", invalidatedThrough))
+				for blockNumber := rewindFrom; blockNumber <= invalidatedThrough; blockNumber++ {
+					select {
+					case <-i.ctx.Done():
+						return
+					case i.blockTaskCh <- BlockTask{BlockNumber: blockNumber}:
+					}
+				}
+			}
 		}
 
 		// Get the latest block number
@@ -956,9 +1040,18 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 
 		// If we're caught up, wait for the next tick
 		if currentBlock > latestBlock {
-			if backfillActive {
-				i.updateBackfillStatus(false, backfillStartBlock, latestBlock, latestBlock, observedAt)
-				backfillActive = false
+			if backfillActive && observedAt.After(nextCompletionCheck) {
+				// Completion means every block was enqueued, not that every
+				// block committed. Only record it once indexed_blocks actually
+				// covers the phase range: with backfill_active=false a crash
+				// here would skip the coverage-verified resume and orphan any
+				// queued-but-uncommitted blocks.
+				if i.backfillRangeFullyIndexed(backfillStartBlock, latestBlock) {
+					i.updateBackfillStatus(false, backfillStartBlock, latestBlock, latestBlock, observedAt)
+					backfillActive = false
+				} else {
+					nextCompletionCheck = observedAt.Add(i.gapScanInterval)
+				}
 			}
 			continue
 		}
@@ -1485,6 +1578,25 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Bound the range this reorg invalidates before deleting. dbWriteMu is held,
+	// so every committed insert is visible and the bound is exact — the in-memory
+	// lastIndexedBlock watermark can lag a just-committed block and would
+	// undercount.
+	var maxIndexed sql.NullInt64
+	if err := tx.GetContext(i.ctx, &maxIndexed, "SELECT MAX(block_number) FROM indexed_blocks WHERE chain_id = $1", i.network.ChainID); err != nil {
+		return fmt.Errorf("failed to determine reorg invalidated range: %w", err)
+	}
+	invalidatedThrough := forkBlock
+	if maxIndexed.Valid && maxIndexed.Int64 > int64(forkBlock) {
+		invalidatedThrough = uint64(maxIndexed.Int64)
+	}
+	// fromBlock aborted without being inserted, so it can sit above every
+	// indexed row — include it, or the re-queue would drop the one block that
+	// exposed the reorg.
+	if fromBlock > invalidatedThrough {
+		invalidatedThrough = fromBlock
+	}
+
 	// Delete invalidated data atomically.
 	if _, err := tx.ExecContext(i.ctx, "DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2", i.network.ChainID, int64(forkBlock+1)); err != nil {
 		return fmt.Errorf("failed to delete reorged blobs: %w", err)
@@ -1513,10 +1625,44 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 		return fmt.Errorf("failed to commit reorg transaction: %w", err)
 	}
 
-	// Signal the main indexer loop to reset its position
-	atomic.StoreUint32(&i.reorgDetected, 1)
+	// Signal the main indexer loop to re-index the invalidated range
+	i.signalReorgReset(forkBlock+1, invalidatedThrough)
 
 	return fmt.Errorf("reorg handled, rewound from %d to %d: %w", fromBlock, forkBlock, errReorgDetected)
+}
+
+// signalReorgReset records the block range invalidated by a reorg and raises
+// the reorgDetected flag for the main loop. If a prior signal has not been
+// consumed yet, the ranges merge so no invalidated block is lost.
+func (i *Indexer) signalReorgReset(from, through uint64) {
+	i.reorgRangeMu.Lock()
+	defer i.reorgRangeMu.Unlock()
+
+	if atomic.LoadUint32(&i.reorgDetected) == 1 {
+		if from < i.reorgRewindFrom {
+			i.reorgRewindFrom = from
+		}
+		if through > i.reorgInvalidatedThrough {
+			i.reorgInvalidatedThrough = through
+		}
+		return
+	}
+
+	i.reorgRewindFrom = from
+	i.reorgInvalidatedThrough = through
+	atomic.StoreUint32(&i.reorgDetected, 1)
+}
+
+// consumeReorgReset returns the pending invalidated range and clears the
+// reorgDetected flag. Only meaningful after observing reorgDetected == 1.
+func (i *Indexer) consumeReorgReset() (from, through uint64) {
+	i.reorgRangeMu.Lock()
+	defer i.reorgRangeMu.Unlock()
+
+	from = i.reorgRewindFrom
+	through = i.reorgInvalidatedThrough
+	atomic.StoreUint32(&i.reorgDetected, 0)
+	return from, through
 }
 
 // blobInsertColumns is the number of columns written per row when inserting
