@@ -864,10 +864,14 @@ func (i *Indexer) blockProcessingWorker(workerID int) {
 						break
 					}
 
-					// Reorg was detected and handled — don't retry, the main loop will re-queue
+					// Reorg was detected and handled — don't retry, the main loop
+					// re-queues the invalidated range (which includes this block).
+					// The block was never inserted, so bail out without advancing
+					// the watermark: persisting an uninserted block as the
+					// high-water mark leaves a hole on crash and lets the
+					// WebSocket follower skip the rewound range.
 					if errors.Is(lastErr, errReorgDetected) {
-						lastErr = nil
-						break
+						return
 					}
 
 					if attempt < i.maxBlockRetries {
@@ -938,6 +942,35 @@ func (i *Indexer) trackFailedBlock(blockNumber uint64) {
 	i.failedBlocksMu.Unlock()
 }
 
+// backfillRangeFullyIndexed reports whether indexed_blocks covers
+// [startBlock, endBlock] with no gaps. Errors count as not covered: staying
+// backfill_active=true is the safe state — it keeps the coverage-verified
+// resume path armed across restarts.
+func (i *Indexer) backfillRangeFullyIndexed(startBlock, endBlock uint64) bool {
+	if i.db == nil {
+		return true
+	}
+
+	firstGap, err := i.db.GetFirstUnindexedBlock(i.ctx, i.network.ChainID, startBlock, endBlock)
+	if err != nil {
+		logger.Error("Failed to verify backfill coverage, keeping backfill active",
+			zap.String("network", i.network.Name),
+			zap.Uint64("start_block", startBlock),
+			zap.Uint64("end_block", endBlock),
+			zap.Error(err))
+		return false
+	}
+	if firstGap <= endBlock {
+		logger.Info("Backfill range not fully indexed yet, deferring completion",
+			zap.String("network", i.network.Name),
+			zap.Uint64("start_block", startBlock),
+			zap.Uint64("end_block", endBlock),
+			zap.Uint64("first_unindexed_block", firstGap))
+		return false
+	}
+	return true
+}
+
 // runBlockIndexer runs the block indexer
 func (i *Indexer) runBlockIndexer(startBlock uint64) {
 	logger.Info("Block indexer starting",
@@ -947,6 +980,10 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 	currentBlock := startBlock
 	var backfillStartBlock uint64
 	backfillActive := false
+	// Throttles repeated coverage scans while a completion attempt is deferred
+	// by in-flight or failed blocks: the phase range can span millions of rows
+	// right after a historical walk, so don't re-scan it every tick.
+	var nextCompletionCheck time.Time
 	ticker := time.NewTicker(i.pollingInterval)
 	defer ticker.Stop()
 
@@ -1003,9 +1040,18 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 
 		// If we're caught up, wait for the next tick
 		if currentBlock > latestBlock {
-			if backfillActive {
-				i.updateBackfillStatus(false, backfillStartBlock, latestBlock, latestBlock, observedAt)
-				backfillActive = false
+			if backfillActive && observedAt.After(nextCompletionCheck) {
+				// Completion means every block was enqueued, not that every
+				// block committed. Only record it once indexed_blocks actually
+				// covers the phase range: with backfill_active=false a crash
+				// here would skip the coverage-verified resume and orphan any
+				// queued-but-uncommitted blocks.
+				if i.backfillRangeFullyIndexed(backfillStartBlock, latestBlock) {
+					i.updateBackfillStatus(false, backfillStartBlock, latestBlock, latestBlock, observedAt)
+					backfillActive = false
+				} else {
+					nextCompletionCheck = observedAt.Add(i.gapScanInterval)
+				}
 			}
 			continue
 		}
@@ -1543,6 +1589,12 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 	invalidatedThrough := forkBlock
 	if maxIndexed.Valid && maxIndexed.Int64 > int64(forkBlock) {
 		invalidatedThrough = uint64(maxIndexed.Int64)
+	}
+	// fromBlock aborted without being inserted, so it can sit above every
+	// indexed row — include it, or the re-queue would drop the one block that
+	// exposed the reorg.
+	if fromBlock > invalidatedThrough {
+		invalidatedThrough = fromBlock
 	}
 
 	// Delete invalidated data atomically.

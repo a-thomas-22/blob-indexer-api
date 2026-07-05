@@ -1766,7 +1766,8 @@ func TestHandleReorg_DepthCapExhausted(t *testing.T) {
 	}
 	forkBlock := fromBlock - 1 - uint64(idx.maxReorgDepth) // 7
 	mock.ExpectBegin()
-	// NULL MAX (no indexed rows) must clamp the invalidated range to empty.
+	// NULL MAX (no indexed rows) must not shrink the invalidated range below
+	// the triggering block, which was never inserted.
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(block_number) FROM indexed_blocks WHERE chain_id = $1")).
 		WithArgs(idx.network.ChainID).
 		WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(nil))
@@ -1791,8 +1792,8 @@ func TestHandleReorg_DepthCapExhausted(t *testing.T) {
 	if got := idx.GetLastIndexedBlock(); got != forkBlock {
 		t.Fatalf("expected lastIndexedBlock=%d after depth-cap truncation, got %d", forkBlock, got)
 	}
-	if from, through := idx.consumeReorgReset(); from != forkBlock+1 || through != forkBlock {
-		t.Fatalf("expected empty invalidated range [%d %d], got [%d %d]", forkBlock+1, forkBlock, from, through)
+	if from, through := idx.consumeReorgReset(); from != forkBlock+1 || through != fromBlock {
+		t.Fatalf("expected invalidated range [%d %d], got [%d %d]", forkBlock+1, fromBlock, from, through)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sqlmock expectations: %v", err)
@@ -1921,6 +1922,137 @@ func TestBlockProcessingWorker_TracksFailedBlock(t *testing.T) {
 	if failures != 1 {
 		t.Fatalf("expected failed block retry count of 1, got %d", failures)
 	}
+}
+
+// Regression: a worker whose block triggers reorg handling must not advance
+// the watermark — the block was never inserted, and persisting it as
+// last_indexed_block leaves a hole on crash. The invalidated range signaled to
+// the walker must also include the triggering block itself, which can sit
+// above every indexed row.
+func TestBlockProcessingWorker_ReorgDoesNotAdvanceWatermark(t *testing.T) {
+	idx := newTestIndexer()
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+	idx.ethClient, _ = newMockEthClient(t, 10)
+	idx.blockTaskCh = make(chan BlockTask, 1)
+	atomic.StoreUint64(&idx.lastIndexedBlock, 8)
+
+	forkBlock := uint64(4)
+	canonical, err := idx.ethClient.GetBlockByNumber(context.Background(), forkBlock)
+	if err != nil {
+		t.Fatalf("failed to get canonical fork block: %v", err)
+	}
+
+	// processBlock(5): stored parent hash mismatches — reorg handling starts.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE chain_id = $1 AND block_number = $2")).
+		WithArgs(idx.network.ChainID, forkBlock).
+		WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow("0xdeadbeef"))
+	// handleReorg fork walk: block 4 still matches the chain — fork point.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE chain_id = $1 AND block_number = $2")).
+		WithArgs(idx.network.ChainID, forkBlock).
+		WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(canonical.Hash().Hex()))
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(block_number) FROM indexed_blocks WHERE chain_id = $1")).
+		WithArgs(idx.network.ChainID).
+		WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(nil))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, int64(forkBlock+1)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM block_metrics WHERE chain_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, int64(forkBlock+1)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, forkBlock+1).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(forkBlock, 10)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	done := make(chan struct{})
+	go func() {
+		idx.blockProcessingWorker(1)
+		close(done)
+	}()
+
+	idx.blockTaskCh <- BlockTask{BlockNumber: 5}
+	deadline := time.After(400 * time.Millisecond)
+	for atomic.LoadUint32(&idx.reorgDetected) != 1 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for reorg signal")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	// Give a buggy worker time to advance the watermark before asserting.
+	time.Sleep(50 * time.Millisecond)
+	idx.cancel()
+
+	select {
+	case <-done:
+	case <-time.After(400 * time.Millisecond):
+		t.Fatal("blockProcessingWorker did not exit")
+	}
+
+	if got := idx.GetLastIndexedBlock(); got != forkBlock {
+		t.Fatalf("expected watermark to stay at fork point %d, got %d", forkBlock, got)
+	}
+	if from, through := idx.consumeReorgReset(); from != 5 || through != 5 {
+		t.Fatalf("expected invalidated range [5 5] including the triggering block, got [%d %d]", from, through)
+	}
+}
+
+func TestBackfillRangeFullyIndexed(t *testing.T) {
+	t.Run("no database", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.db = nil
+		if !idx.backfillRangeFullyIndexed(1, 10) {
+			t.Fatal("expected nil-db indexer to treat range as covered")
+		}
+	})
+
+	t.Run("fully covered", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectQuery("WITH indexed AS").
+			WithArgs(idx.network.ChainID, uint64(100), uint64(200)).
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(201)))
+
+		if !idx.backfillRangeFullyIndexed(100, 200) {
+			t.Fatal("expected fully covered range to report complete")
+		}
+	})
+
+	t.Run("gap defers completion", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectQuery("WITH indexed AS").
+			WithArgs(idx.network.ChainID, uint64(100), uint64(200)).
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(150)))
+
+		if idx.backfillRangeFullyIndexed(100, 200) {
+			t.Fatal("expected range with a gap to defer completion")
+		}
+	})
+
+	t.Run("query error defers completion", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectQuery("WITH indexed AS").
+			WithArgs(idx.network.ChainID, uint64(100), uint64(200)).
+			WillReturnError(errors.New("coverage scan failed"))
+
+		if idx.backfillRangeFullyIndexed(100, 200) {
+			t.Fatal("expected coverage scan error to defer completion")
+		}
+	})
 }
 
 func TestMempoolProcessingAndLoop(t *testing.T) {
