@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -18,12 +19,47 @@ type StatusResponse struct {
 	Uptime           string           `json:"uptime"`
 	LastIndexedTime  time.Time        `json:"last_indexed_time"`
 	Backfill         BackfillResponse `json:"backfill"`
+	// EarliestIndexedBlock and LatestIndexedBlock are the MIN/MAX indexed
+	// block numbers: best-effort coverage bounds, not a contiguity guarantee.
+	// The range can contain transient interior gaps (failed blocks awaiting
+	// retry, out-of-order commits) that the indexer's gap scanner closes, and
+	// the lower bound can briefly sit above the configured indexing start
+	// while its first blocks retry. Consumers should treat the bounds as a
+	// messaging heuristic ("likely before our history" / "not yet indexed"),
+	// not as proof that a block inside the range is present. Both fields are
+	// omitted when nothing is indexed yet or the bounds are temporarily
+	// unavailable — absence means unknown, not an empty chain.
+	EarliestIndexedBlock *int64 `json:"earliest_indexed_block,omitempty"`
+	LatestIndexedBlock   *int64 `json:"latest_indexed_block,omitempty"`
 	FreshnessResponse
+}
+
+// indexedBlockCoverage carries the MIN/MAX indexed block bounds for a network.
+// Both are nil when the network has no indexed blocks.
+type indexedBlockCoverage struct {
+	EarliestIndexedBlock *int64 `db:"earliest_indexed_block"`
+	LatestIndexedBlock   *int64 `db:"latest_indexed_block"`
+}
+
+// getIndexedBlockCoverageFromDB reads the indexed block range for a network.
+// Coverage is additive status metadata, so failures degrade to absent bounds
+// instead of failing the whole /status response — the wire contract defines
+// absence as unknown, so an error here is indistinguishable from an empty
+// network by design.
+func (a *API) getIndexedBlockCoverageFromDB(ctx context.Context, networkID int) indexedBlockCoverage {
+	var coverage indexedBlockCoverage
+	if err := a.db.GetContext(ctx, &coverage, queryIndexedBlockCoverage, networkID); err != nil {
+		logger.Error("Failed to get indexed block coverage",
+			zap.Int("chain_id", networkID),
+			zap.Error(err))
+		return indexedBlockCoverage{}
+	}
+	return coverage
 }
 
 // GetIndexerStatus godoc
 // @Summary Get indexer status
-// @Description Retrieve the current status of the indexer
+// @Description Retrieve the current status of the indexer, including best-effort indexed block coverage bounds (earliest_indexed_block / latest_indexed_block). The bounds are MIN/MAX of indexed blocks: the range may contain transient interior gaps, and both fields are omitted when coverage is unknown (nothing indexed yet, or the bounds are temporarily unavailable).
 // @Tags status
 // @Accept json
 // @Produce json
@@ -53,15 +89,18 @@ func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
 	uptime := time.Since(a.startTime).Truncate(time.Second).String()
 
 	freshness := a.getNetworkFreshnessFromDB(r.Context(), network.ChainID)
+	coverage := a.getIndexedBlockCoverageFromDB(r.Context(), network.ChainID)
 	response := StatusResponse{
-		ChainID:           network.ChainID,
-		NetworkName:       network.Name,
-		LastIndexedBlock:  freshness.LastIndexedBlock,
-		IndexerVersion:    a.config.Indexer.Version,
-		Uptime:            uptime,
-		LastIndexedTime:   indexedTime,
-		Backfill:          freshness.backfillResponse(),
-		FreshnessResponse: freshness.FreshnessResponse,
+		ChainID:              network.ChainID,
+		NetworkName:          network.Name,
+		LastIndexedBlock:     freshness.LastIndexedBlock,
+		IndexerVersion:       a.config.Indexer.Version,
+		Uptime:               uptime,
+		LastIndexedTime:      indexedTime,
+		Backfill:             freshness.backfillResponse(),
+		EarliestIndexedBlock: coverage.EarliestIndexedBlock,
+		LatestIndexedBlock:   coverage.LatestIndexedBlock,
+		FreshnessResponse:    freshness.FreshnessResponse,
 	}
 
 	setCacheControl(w, networkStatusCacheTTL, networkStatusEdgeTTL)

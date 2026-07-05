@@ -342,6 +342,9 @@ func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) 
 			r.Get("/{txHash}", a.GetBlobByTxHash)
 		})
 
+		// Block endpoint
+		r.Get("/block/{number}", a.GetBlockByNumber)
+
 		// User endpoints
 		r.Route("/users", func(r chi.Router) {
 			r.With(aggregateLimit).Get("/", a.GetTopBlobUsers)

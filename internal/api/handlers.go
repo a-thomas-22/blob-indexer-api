@@ -63,6 +63,12 @@ const mempoolBlobsCacheTTL = 3 * time.Second
 // lets the entry self-heal after a (rare) reorg rather than being pinned.
 const confirmedBlobCacheTTL = 60 * time.Second
 
+// indexedBlockCacheTTL is the browser TTL for a single indexed-block lookup
+// (/block/{number}). Same rationale as confirmedBlobCacheTTL: an indexed block
+// at a height is effectively immutable, and the moderate TTL lets a cached
+// copy self-heal after a (rare) reorg.
+const indexedBlockCacheTTL = 60 * time.Second
+
 // Edge (shared-cache) TTLs, sent as s-maxage so Cloudflare can serve the
 // blob-flow polling herd from cache while browsers revalidate sooner.
 // Staleness is additive across layers: the worst case is the SUM of
@@ -84,6 +90,8 @@ const (
 	// a cached confirmed blob self-heal after a (rare) reorg, and that bound
 	// has to hold at shared caches too or the edge pins the pre-reorg copy.
 	confirmedBlobEdgeTTL = confirmedBlobCacheTTL
+	// indexedBlockEdgeTTL matches its browser TTL for the same reason.
+	indexedBlockEdgeTTL = indexedBlockCacheTTL
 )
 
 // networkStatusCacheTTL is the browser TTL for /networks and /status, which
