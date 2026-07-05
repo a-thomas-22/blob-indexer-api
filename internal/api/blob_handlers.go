@@ -728,12 +728,12 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 
 // GetBlobPricing godoc
 // @Summary Get blob pricing data
-// @Description Retrieve current and historical blob pricing with utilization metrics and fork parameters
+// @Description Retrieve current and historical blob pricing with utilization metrics and fork parameters. recent_blocks holds the N most recently indexed blocks, newest first and contiguous by block number (zero-blob blocks included — they still carry a blob base fee). market_pressure is computed over the same requested window.
 // @Tags blobs
 // @Accept json
 // @Produce json
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
-// @Param blocks query int false "Number of recent blocks to include (default: 20, max: 100)"
+// @Param blocks query int false "Number of recent blocks to include (default: 20, max: 512; out-of-range values are clamped, not rejected)"
 // @Success 200 {object} Response{data=PricingResponse}
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -745,16 +745,21 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse blocks parameter
-	blocks := 20
+	// Out-of-range blocks values clamp rather than 400 so older clients keep
+	// working when the limits move; the frontend feature-detects the cap by
+	// comparing recent_blocks length to what it asked for.
+	blocks := DefaultPricingBlocks
 	if blocksStr := r.URL.Query().Get("blocks"); blocksStr != "" {
 		b, err := strconv.Atoi(blocksStr)
-		if err != nil || b < 1 {
+		if err != nil {
 			a.respondError(w, http.StatusBadRequest, "Invalid blocks parameter")
 			return
 		}
-		if b > MaxQueryLimit {
-			b = MaxQueryLimit
+		switch {
+		case b < 1:
+			b = DefaultPricingBlocks
+		case b > MaxPricingBlocks:
+			b = MaxPricingBlocks
 		}
 		blocks = b
 	}
@@ -762,7 +767,8 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 	// blob-flow refetches pricing on every WebSocket new_block broadcast, so
 	// all connected clients arrive nearly simultaneously; the cache plus
 	// singleflight collapses that herd to at most one query per TTL per
-	// (network, blocks) key. The key space is bounded: blocks <= MaxQueryLimit.
+	// (network, blocks) key. The key space is bounded: blocks <= MaxPricingBlocks,
+	// and invalidateBlockCaches clears the network's entries on every new block.
 	key := "pricing:" + strconv.Itoa(network.ChainID) + ":" + strconv.Itoa(blocks)
 
 	a.cacheMu.RLock()

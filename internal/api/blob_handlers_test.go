@@ -748,12 +748,52 @@ func TestGetBlobPricing_EmptyMetrics(t *testing.T) {
 
 func TestGetBlobPricing_InvalidBlocks(t *testing.T) {
 	a := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?blocks=-1", http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, "/?blocks=abc", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetBlobPricing(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// TestGetBlobPricing_BlocksClamping verifies out-of-range blocks values are
+// clamped rather than rejected: below 1 falls back to the default window,
+// above MaxPricingBlocks caps there, and in-range values (including the
+// frontend's 1h request of 300) pass through unchanged.
+func TestGetBlobPricing_BlocksClamping(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+		want   int
+	}{
+		{"default when absent", "/", DefaultPricingBlocks},
+		{"zero clamps to default", "/?blocks=0", DefaultPricingBlocks},
+		{"negative clamps to default", "/?blocks=-1", DefaultPricingBlocks},
+		{"one hour of mainnet slots", "/?blocks=300", 300},
+		{"max passes through", "/?blocks=512", MaxPricingBlocks},
+		{"above max clamps to max", "/?blocks=9999", MaxPricingBlocks},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotLimit interface{}
+			db := &mockDB{
+				selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+					gotLimit = args[1]
+					return nil
+				},
+			}
+			a := newTestAPIWithDB(db)
+			w := httptest.NewRecorder()
+			a.GetBlobPricing(w, httptest.NewRequest(http.MethodGet, tt.target, http.NoBody))
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", w.Code)
+			}
+			if gotLimit != tt.want {
+				t.Fatalf("query limit = %v, want %d", gotLimit, tt.want)
+			}
+		})
 	}
 }
 

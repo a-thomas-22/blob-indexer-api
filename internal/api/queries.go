@@ -823,7 +823,11 @@ const (
 		ORDER BY wb.ord
 	`
 
-	// queryBlockMetrics retrieves recent block metrics for pricing data.
+	// queryBlockMetrics retrieves recent block metrics for pricing data: the N
+	// most recently indexed blocks, newest first. Every indexed block has a row
+	// (including zero-blob blocks), so the window is contiguous by block number;
+	// the (chain_id, block_number) primary key serves this as a single backward
+	// range scan.
 	queryBlockMetrics = `
 		SELECT ` + blockMetricsSelectColumns + ` FROM block_metrics
 		WHERE chain_id = $1
