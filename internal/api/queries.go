@@ -2,6 +2,10 @@ package api
 
 import "github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 
+// blobSelectColumns projects blobs rows into the models.Blob shape. The
+// blobs table holds confirmed rows only (pending rows live in mempool_blobs),
+// so the wire-visible confirmed flag is the projected literal true rather
+// than a stored column.
 const blobSelectColumns = `
 	id,
 	chain_id,
@@ -15,7 +19,7 @@ const blobSelectColumns = `
 	tip_per_blob_gas,
 	total_cost_wei,
 	timestamp,
-	confirmed,
+	true AS confirmed,
 	max_fee_per_blob_gas,
 	blob_gas_used
 `
@@ -63,7 +67,7 @@ const (
 	// queryLatestBlobs retrieves confirmed blobs ordered by block number descending.
 	queryLatestBlobs = `
 		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = true AND chain_id = $1
+		WHERE chain_id = $1
 		ORDER BY block_number DESC, blob_index ASC
 		LIMIT $2 OFFSET $3
 	`
@@ -551,7 +555,6 @@ const (
 				COALESCE(b.blob_gas_used, 0)::bigint AS blob_gas_used
 			FROM blobs b
 			WHERE b.chain_id = $1
-				AND b.confirmed = true
 				AND b.timestamp >= (SELECT MIN(start_time) FROM window_bounds)
 				AND b.timestamp < $4::timestamp
 		),
@@ -736,7 +739,7 @@ const (
 	// queryLatestBlobsByAddress retrieves confirmed blobs for a specific sender address.
 	queryLatestBlobsByAddress = `
 		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = true AND chain_id = $1 AND from_address = $2
+		WHERE chain_id = $1 AND from_address = $2
 		ORDER BY block_number DESC, blob_index ASC
 		LIMIT $3 OFFSET $4
 	`
@@ -800,7 +803,7 @@ const (
 
 	// queryLastIndexedTimeCoalesce retrieves the most recent confirmed blob timestamp,
 	// defaulting to epoch if no blobs exist.
-	queryLastIndexedTimeCoalesce = "SELECT COALESCE(MAX(timestamp), '1970-01-01'::timestamp) FROM blobs WHERE confirmed = true AND chain_id = $1"
+	queryLastIndexedTimeCoalesce = "SELECT COALESCE(MAX(timestamp), '1970-01-01'::timestamp) FROM blobs WHERE chain_id = $1"
 
 	// queryTableSize retrieves the total size of a table in bytes.
 	queryTableSize = `
@@ -845,7 +848,7 @@ const (
 	// queryNewBlobsSinceBlock retrieves confirmed blobs after a given block number.
 	queryNewBlobsSinceBlock = `
 		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE confirmed = true AND chain_id = $1 AND block_number > $2
+		WHERE chain_id = $1 AND block_number > $2
 		ORDER BY block_number ASC, blob_index ASC
 		LIMIT $3
 	`

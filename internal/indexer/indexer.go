@@ -1449,7 +1449,7 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 
 // blobInsertColumns is the number of columns written per row when inserting
 // into blobs.
-const blobInsertColumns = 14
+const blobInsertColumns = 13
 
 // mempoolBlobInsertColumns is the number of columns written per row when
 // upserting into mempool_blobs.
@@ -1539,7 +1539,7 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			INSERT INTO blobs (
 				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-				timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
+				timestamp, max_fee_per_blob_gas, blob_gas_used
 			) VALUES ` + valuesPlaceholders(len(blobs), blobInsertColumns, nil) + `
 			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
 				tx_hash = EXCLUDED.tx_hash,
@@ -1550,7 +1550,6 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				tip_per_blob_gas = EXCLUDED.tip_per_blob_gas,
 				total_cost_wei = EXCLUDED.total_cost_wei,
 				timestamp = EXCLUDED.timestamp,
-				confirmed = EXCLUDED.confirmed,
 				max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
 				blob_gas_used = EXCLUDED.blob_gas_used
 		`
@@ -1559,7 +1558,7 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			insertArgs = append(insertArgs,
 				blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.Confirmed, blob.MaxFeePerBlobGas, blob.BlobGasUsed)
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed)
 		}
 		if _, err := tx.ExecContext(i.ctx, insertQuery, insertArgs...); err != nil {
 			return fmt.Errorf("failed to insert blobs (block: %d): %w", indexedBlock.BlockNumber, err)
