@@ -21,6 +21,12 @@ type corsPolicy struct {
 	exposedHeaders        []string
 	allowCredentials      bool
 	maxAgeSeconds         int
+	// pinnedOrigin is set when exactly one literal origin is allowed (no
+	// wildcard, no patterns). Responses then carry a constant
+	// Access-Control-Allow-Origin instead of reflecting the request Origin:
+	// shared caches like Cloudflare ignore Vary on JSON, so a reflected header
+	// would serve whichever requester populated the cache to everyone else.
+	pinnedOrigin string
 }
 
 func CORSMiddleware(cfg config.CORSConfig) func(http.Handler) http.Handler {
@@ -33,6 +39,21 @@ func CORSMiddleware(cfg config.CORSConfig) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if policy.isPreflight(r) {
 				policy.handlePreflight(w, r)
+				return
+			}
+
+			// Single-origin deployments emit a constant header set — with or
+			// without a request Origin — so every cached copy of a response is
+			// valid for the one real frontend. No Vary: Origin either, since
+			// the response no longer varies by requester.
+			if policy.pinnedOrigin != "" {
+				if policy.isMethodAllowed(r.Method) {
+					policy.setAllowedOriginHeaders(w.Header(), policy.pinnedOrigin)
+					if len(policy.exposedHeaders) > 0 {
+						w.Header().Set("Access-Control-Expose-Headers", strings.Join(policy.exposedHeaders, ", "))
+					}
+				}
+				next.ServeHTTP(w, r)
 				return
 			}
 
@@ -67,6 +88,7 @@ func newCORSPolicy(cfg config.CORSConfig) corsPolicy {
 		maxAgeSeconds:         cfg.MaxAgeSeconds,
 	}
 
+	firstLiteralOrigin := ""
 	for _, origin := range cfg.AllowedOrigins {
 		origin = strings.TrimSpace(origin)
 		if origin == "" {
@@ -76,7 +98,14 @@ func newCORSPolicy(cfg config.CORSConfig) corsPolicy {
 			policy.allowAllOrigins = true
 			continue
 		}
+		if firstLiteralOrigin == "" {
+			firstLiteralOrigin = origin
+		}
 		policy.allowedOrigins[strings.ToLower(origin)] = struct{}{}
+	}
+
+	if !policy.allowAllOrigins && len(policy.allowedOrigins) == 1 && len(policy.allowedOriginPatterns) == 0 {
+		policy.pinnedOrigin = firstLiteralOrigin
 	}
 
 	for _, method := range policy.allowedMethods {

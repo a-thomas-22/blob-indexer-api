@@ -55,7 +55,8 @@ func TestGetLatestBlobs_Success(t *testing.T) {
 	if !resp.Success {
 		t.Error("expected Success=true")
 	}
-	wantCache := fmt.Sprintf("public, max-age=%d", int(latestBlobsCacheTTL.Seconds()))
+	wantCache := fmt.Sprintf("public, max-age=%d, s-maxage=%d",
+		int(latestBlobsCacheTTL.Seconds()), int(latestBlobsEdgeTTL.Seconds()))
 	if got := w.Header().Get("Cache-Control"); got != wantCache {
 		t.Errorf("Cache-Control = %q, want %q", got, wantCache)
 	}
@@ -408,7 +409,8 @@ func TestGetBlobByTxHash_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	wantCache := fmt.Sprintf("public, max-age=%d", int(confirmedBlobCacheTTL.Seconds()))
+	wantCache := fmt.Sprintf("public, max-age=%d, s-maxage=%d",
+		int(confirmedBlobCacheTTL.Seconds()), int(confirmedBlobEdgeTTL.Seconds()))
 	if got := w.Header().Get("Cache-Control"); got != wantCache {
 		t.Errorf("confirmed blob Cache-Control = %q, want %q", got, wantCache)
 	}
@@ -1105,5 +1107,164 @@ func TestGetLatestBlobs_ConfirmedBlockNumberNumber(t *testing.T) {
 	raw := firstBlobRawBlockNumber(t, w.Body.Bytes())
 	if string(raw) != "100" {
 		t.Fatalf("expected confirmed block_number 100 on the wire, got %s", raw)
+	}
+}
+
+// TestBlobListCaches_HitDBOnce verifies the hot list endpoints serve repeat
+// requests from the in-process cache instead of re-querying the database, and
+// that the address-filtered and paginated shapes bypass the cache.
+func TestBlobListCaches_HitDBOnce(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler func(a *API) http.HandlerFunc
+	}{
+		{"latest", func(a *API) http.HandlerFunc { return a.GetLatestBlobs }},
+		{"mempool", func(a *API) http.HandlerFunc { return a.GetMempoolBlobs }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			db := &mockDB{
+				selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+					calls++
+					blobs := dest.(*[]models.Blob)
+					*blobs = []models.Blob{{
+						ChainID: 42, BlockNumber: 100, TxHash: "0xabc", FromAddress: "0x123",
+						BaseFeePerBlobGas: "1000", TipPerBlobGas: "100", TotalCostWei: "1",
+						Timestamp: time.Now(), Confirmed: true,
+					}}
+					return nil
+				},
+			}
+			a := newTestAPIWithDB(db)
+			handler := tc.handler(a)
+
+			for i := 0; i < 3; i++ {
+				w := httptest.NewRecorder()
+				handler(w, httptest.NewRequest(http.MethodGet, "/?limit=10", http.NoBody))
+				if w.Code != http.StatusOK {
+					t.Fatalf("request %d: expected 200, got %d", i, w.Code)
+				}
+			}
+			if calls != 1 {
+				t.Fatalf("expected 1 DB call for identical cacheable requests, got %d", calls)
+			}
+
+			// A different limit is a different cache key.
+			w := httptest.NewRecorder()
+			handler(w, httptest.NewRequest(http.MethodGet, "/?limit=20", http.NoBody))
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", w.Code)
+			}
+			if calls != 2 {
+				t.Fatalf("expected a DB call for a new limit, got %d total", calls)
+			}
+
+			// Pagination and address filters bypass the cache entirely.
+			for _, target := range []string{"/?limit=10&offset=5", "/?limit=10&from=0x000000000000000000000000000000000000dEaD"} {
+				before := calls
+				w := httptest.NewRecorder()
+				handler(w, httptest.NewRequest(http.MethodGet, target, http.NoBody))
+				if w.Code != http.StatusOK {
+					t.Fatalf("%s: expected 200, got %d", target, w.Code)
+				}
+				if calls != before+1 {
+					t.Fatalf("%s: expected an uncached DB call", target)
+				}
+			}
+		})
+	}
+}
+
+func TestGetMempoolBlobs_SetsCacheControl(t *testing.T) {
+	a := newTestAPIWithDB(&mockDB{})
+	w := httptest.NewRecorder()
+	a.GetMempoolBlobs(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+
+	wantCache := fmt.Sprintf("public, max-age=%d, s-maxage=%d",
+		int(mempoolBlobsCacheTTL.Seconds()), int(mempoolBlobsEdgeTTL.Seconds()))
+	if got := w.Header().Get("Cache-Control"); got != wantCache {
+		t.Errorf("Cache-Control = %q, want %q", got, wantCache)
+	}
+}
+
+// TestGetBlobPricing_CacheHitsDBOnce verifies repeat pricing requests for the
+// same (network, blocks) key are served from the in-process cache.
+func TestGetBlobPricing_CacheHitsDBOnce(t *testing.T) {
+	calls := 0
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			calls++
+			metrics := dest.(*[]models.BlockMetrics)
+			*metrics = []models.BlockMetrics{{
+				ChainID: 42, BlockNumber: 100, BlockTimestamp: time.Now(),
+				BlobCount: 3, BlobGasUsed: 393216, BlobGasTarget: 786432, BlobGasLimit: 1179648,
+				BlobBaseFee: "1000", UtilizationRatio: "0.33",
+				BlobParamsTarget: 6, BlobParamsMax: 9, UpdateFraction: 5007716,
+			}}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+
+	for i := 0; i < 3; i++ {
+		w := httptest.NewRecorder()
+		a.GetBlobPricing(w, httptest.NewRequest(http.MethodGet, "/?blocks=30", http.NoBody))
+		if w.Code != http.StatusOK {
+			t.Fatalf("request %d: expected 200, got %d", i, w.Code)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 DB call for identical pricing requests, got %d", calls)
+	}
+
+	// A different blocks value is a distinct cache key.
+	w := httptest.NewRecorder()
+	a.GetBlobPricing(w, httptest.NewRequest(http.MethodGet, "/?blocks=100", http.NoBody))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if calls != 2 {
+		t.Fatalf("expected a DB call for a new blocks value, got %d total", calls)
+	}
+}
+
+// TestCacheInvalidation_DropsPerNetworkEntries verifies the poller-driven
+// invalidation hooks clear exactly the target network's cached responses.
+func TestCacheInvalidation_DropsPerNetworkEntries(t *testing.T) {
+	a := newTestAPI()
+	future := time.Now().Add(time.Hour)
+
+	a.latestBlobsCache["latest_blobs:42:10"] = blobListCacheEntry{expiresAt: future}
+	a.latestBlobsCache["latest_blobs:7:10"] = blobListCacheEntry{expiresAt: future}
+	a.pricingCache["pricing:42:30"] = pricingCacheEntry{expiresAt: future}
+	a.statsCache[42] = statsCacheEntry{expiresAt: future}
+	a.mempoolBlobsCache["mempool_blobs:42:10"] = blobListCacheEntry{expiresAt: future}
+	a.mempoolCache[42] = mempoolPressureCacheEntry{expiresAt: future}
+
+	a.invalidateBlockCaches(42)
+	if _, ok := a.latestBlobsCache["latest_blobs:42:10"]; ok {
+		t.Error("latest blobs cache for network 42 should be dropped")
+	}
+	if _, ok := a.latestBlobsCache["latest_blobs:7:10"]; !ok {
+		t.Error("other networks' latest blobs cache must survive")
+	}
+	if _, ok := a.pricingCache["pricing:42:30"]; ok {
+		t.Error("pricing cache for network 42 should be dropped")
+	}
+	if _, ok := a.statsCache[42]; ok {
+		t.Error("stats cache for network 42 should be dropped")
+	}
+	if _, ok := a.mempoolBlobsCache["mempool_blobs:42:10"]; !ok {
+		t.Error("mempool caches must survive block invalidation")
+	}
+
+	a.invalidateMempoolCaches(42)
+	if _, ok := a.mempoolBlobsCache["mempool_blobs:42:10"]; ok {
+		t.Error("mempool blobs cache for network 42 should be dropped")
+	}
+	if _, ok := a.mempoolCache[42]; ok {
+		t.Error("mempool pressure cache for network 42 should be dropped")
 	}
 }

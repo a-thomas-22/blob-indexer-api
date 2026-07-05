@@ -35,6 +35,6 @@ USER 1000
 EXPOSE 8080 8081
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -qO- http://localhost:8080/api/v1/status || exit 1
+    CMD wget -qO- http://localhost:8080/api/v1/healthz || exit 1
 
 CMD ["./blob-indexer-api"]

@@ -128,10 +128,10 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		}
 	})
 
-	t.Run("queryTopBlobUsersAll", func(t *testing.T) {
+	t.Run("queryTopBlobUsersAllByCount", func(t *testing.T) {
 		var users []models.BlobUserStats
-		if err := sqlxDB.SelectContext(ctx, &users, queryTopBlobUsersAll, 1, 10, 0, "all", "count"); err != nil {
-			t.Fatalf("queryTopBlobUsersAll: %v", err)
+		if err := sqlxDB.SelectContext(ctx, &users, queryTopBlobUsersAllByCount, 1, 10, 0, "all"); err != nil {
+			t.Fatalf("queryTopBlobUsersAllByCount: %v", err)
 		}
 		// blob_user_stats is confirmed-only; totals fold in the pending set.
 		if len(users) != 1 || users[0].BlobCount != 1 || users[0].BlobSharePercent != 50 {

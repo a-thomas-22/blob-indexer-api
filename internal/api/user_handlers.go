@@ -146,6 +146,21 @@ func (a *API) GetTopUnattributedBlobUsers(w http.ResponseWriter, r *http.Request
 	a.getTopBlobUsers(w, r, true)
 }
 
+// topBlobUsersAllQuery selects the all-history top-user query variant whose
+// static ORDER BY matches the requested sort.
+func topBlobUsersAllQuery(sort userSortOption, unattributedOnly bool) string {
+	if unattributedOnly {
+		if sort == userSortSpend {
+			return queryTopUnattributedBlobUsersAllBySpend
+		}
+		return queryTopUnattributedBlobUsersAllByCount
+	}
+	if sort == userSortSpend {
+		return queryTopBlobUsersAllBySpend
+	}
+	return queryTopBlobUsersAllByCount
+}
+
 func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattributedOnly bool) {
 	network, err := a.getNetworkFromRequest(r)
 	if err != nil {
@@ -176,7 +191,7 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 	returnMessage := "Returning top blob users"
 	query := queryTopBlobUsersWithOptions
 	if window == userWindowAll {
-		query = queryTopBlobUsersAll
+		query = topBlobUsersAllQuery(sort, false)
 	}
 	cacheKey := fmt.Sprintf("%d:%d:%d:%s:%s", network.ChainID, limit, offset, sort, window)
 	if unattributedOnly {
@@ -185,9 +200,17 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 		returnMessage = "Returning top unattributed blob users"
 		query = queryTopUnattributedBlobUsersWithOptions
 		if window == userWindowAll {
-			query = queryTopUnattributedBlobUsersAll
+			query = topBlobUsersAllQuery(sort, true)
 		}
 		cacheKey = fmt.Sprintf("unattributed:%d:%d:%d:%s:%s", network.ChainID, limit, offset, sort, window)
+	}
+
+	// The windowed queries take the sort as a parameter; the all-history
+	// variants encode it statically in the query text (see queries.go) and so
+	// take one fewer argument.
+	queryArgs := []interface{}{network.ChainID, limit, offset, string(window), string(sort)}
+	if window == userWindowAll {
+		queryArgs = []interface{}{network.ChainID, limit, offset, string(window)}
 	}
 
 	logger.Debug(logMessage,
@@ -200,7 +223,7 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 	a.cacheMu.RLock()
 	if cached, ok := a.topUsersCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		a.cacheMu.RUnlock()
-		setCacheControl(w, aggregateCacheTTL)
+		setCacheControl(w, aggregateCacheTTL, aggregateEdgeTTL)
 		a.respondJSON(w, http.StatusOK, Response{
 			Success: true,
 			Data:    cached.response,
@@ -220,7 +243,7 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 		var users []models.BlobUserStats
 		queryCtx, cancel := context.WithTimeout(aggregateWorkContext(r), aggregateQueryTimeout)
 		defer cancel()
-		if err := a.db.SelectContext(queryCtx, &users, query, network.ChainID, limit, offset, string(window), string(sort)); err != nil {
+		if err := a.db.SelectContext(queryCtx, &users, query, queryArgs...); err != nil {
 			return nil, err
 		}
 
@@ -252,7 +275,7 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 	// so the assertion's ok value can never be false here.
 	response, _ := value.([]UserResponse)
 
-	setCacheControl(w, aggregateCacheTTL)
+	setCacheControl(w, aggregateCacheTTL, aggregateEdgeTTL)
 	logger.Debug(returnMessage,
 		zap.String("network", network.Name),
 		zap.String("sort", string(sort)),
@@ -295,7 +318,7 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 	a.cacheMu.RLock()
 	if cached, ok := a.breakdownCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		a.cacheMu.RUnlock()
-		setCacheControl(w, aggregateCacheTTL)
+		setCacheControl(w, aggregateCacheTTL, aggregateEdgeTTL)
 		a.respondSuccess(w, cached.response)
 		return
 	}
@@ -361,7 +384,7 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 	// so the assertion's ok value can never be false here.
 	response, _ := value.(UserBreakdownResponse)
 
-	setCacheControl(w, aggregateCacheTTL)
+	setCacheControl(w, aggregateCacheTTL, aggregateEdgeTTL)
 	a.respondSuccess(w, response)
 }
 
@@ -410,6 +433,6 @@ func (a *API) GetUserByAddress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setCacheControl(w, aggregateCacheTTL)
+	setCacheControl(w, aggregateCacheTTL, aggregateEdgeTTL)
 	a.respondSuccess(w, toUserResponse(user, network.ChainID, network.Name))
 }

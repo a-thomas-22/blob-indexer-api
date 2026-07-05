@@ -33,25 +33,65 @@ const statsCacheTTL = 15 * time.Second
 // mempoolPressureCacheTTL bounds mempool pressure staleness to under one block.
 const mempoolPressureCacheTTL = 10 * time.Second
 
-// pricingCacheMaxAge is the client/CDN cache hint for /blob/pricing, which is
-// cheap enough to serve uncached but identical across users within a block.
-const pricingCacheMaxAge = 10 * time.Second
+// pricingCacheTTL bounds the in-process cache and browser staleness for
+// /blob/pricing, which is identical across users within a block.
+const pricingCacheTTL = 5 * time.Second
 
-// latestBlobsCacheTTL bounds edge/browser caching of the hot /blob/latest list.
-// Kept well under the ~12s block time, and clients also receive live updates
-// over the WebSocket, so a few seconds of staleness on the polled list is fine
-// while letting Cloudflare coalesce polling bursts.
+// latestBlobsCacheTTL bounds the in-process cache and browser staleness of the
+// hot /blob/latest list. Kept well under the ~12s block time, and clients also
+// receive live updates over the WebSocket, so a few seconds of staleness on
+// the polled list is fine while letting Cloudflare coalesce polling bursts.
 const latestBlobsCacheTTL = 5 * time.Second
+
+// mempoolBlobsCacheTTL bounds the in-process cache and browser staleness of
+// the /blob/mempool list; the WebSocket feed carries the real-time diffs.
+const mempoolBlobsCacheTTL = 3 * time.Second
 
 // confirmedBlobCacheTTL caches a single confirmed blob lookup (/blob/{txHash}).
 // A confirmed blob at a tx hash is effectively immutable; the moderate TTL still
 // lets the entry self-heal after a (rare) reorg rather than being pinned.
 const confirmedBlobCacheTTL = 60 * time.Second
 
-// setCacheControl marks a response as publicly cacheable for ttl so browsers
-// and CDNs can absorb the dashboard's identical concurrent requests.
-func setCacheControl(w http.ResponseWriter, ttl time.Duration) {
-	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(ttl.Seconds())))
+// Edge (shared-cache) TTLs, sent as s-maxage so Cloudflare can serve the
+// blob-flow polling herd from cache while browsers revalidate sooner.
+// Staleness is additive across layers: the worst case is the SUM of
+// in-process TTL + s-maxage + max-age, not the largest term. The hot
+// block-cadence endpoints (latest/mempool/pricing) keep each term at or
+// under one ~12s block, bounding their stacked worst case to a few blocks —
+// and poller-driven invalidation plus ETag revalidation keep the typical
+// case well below that. Slower-moving aggregates (stats/users/charts)
+// deliberately trade more staleness for edge hit ratio.
+const (
+	latestBlobsEdgeTTL     = 5 * time.Second
+	mempoolBlobsEdgeTTL    = 5 * time.Second
+	pricingEdgeTTL         = 5 * time.Second
+	mempoolPressureEdgeTTL = 10 * time.Second
+	statsEdgeTTL           = 15 * time.Second
+	aggregateEdgeTTL       = 30 * time.Second
+	networkStatusEdgeTTL   = 10 * time.Second
+	// confirmedBlobEdgeTTL matches the browser TTL: the 60s bound is what lets
+	// a cached confirmed blob self-heal after a (rare) reorg, and that bound
+	// has to hold at shared caches too or the edge pins the pre-reorg copy.
+	confirmedBlobEdgeTTL = confirmedBlobCacheTTL
+)
+
+// networkStatusCacheTTL is the browser TTL for /networks and /status, which
+// change at most once per block.
+const networkStatusCacheTTL = 5 * time.Second
+
+// setCacheControl marks a response as publicly cacheable so browsers (maxAge)
+// and shared caches like Cloudflare (sMaxAge) can absorb the dashboard's
+// identical concurrent requests. Cloudflare only honors these directives once
+// a Cache Rule marks /api/v1/* GETs as eligible for cache.
+//
+// Deliberately NO stale-while-revalidate: blob-flow refetches the hot
+// endpoints on block cadence (~12s), so any SWR window reaching past
+// (poll interval - max-age) would make browsers serve every block-cadence
+// refetch from the stale previous entry and only revalidate in the
+// background — rendering the dashboard permanently one block behind.
+func setCacheControl(w http.ResponseWriter, maxAge, sMaxAge time.Duration) {
+	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d, s-maxage=%d",
+		int(maxAge.Seconds()), int(sMaxAge.Seconds())))
 }
 
 // dbQueryCanceled is the Postgres query_canceled error code, raised when the

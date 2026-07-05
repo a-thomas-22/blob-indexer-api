@@ -14,12 +14,21 @@ import (
 )
 
 const (
-	defaultPollInterval     = 3 * time.Second
-	defaultUsersThrottle    = 30 * time.Second
-	pollerQueryTimeout      = 5 * time.Second
-	maxNewBlobsPerPoll      = 1000
-	defaultMempoolPollLimit = 200
+	defaultPollInterval  = 3 * time.Second
+	defaultUsersThrottle = 30 * time.Second
+	pollerQueryTimeout   = 5 * time.Second
+	maxNewBlobsPerPoll   = 1000
 )
+
+// cacheInvalidator lets the poller drop origin response caches the moment it
+// detects new data — BEFORE broadcasting the WebSocket events that trigger the
+// dashboard's refetch herd. Without this, the herd arriving right after a
+// new_block broadcast would be served pre-block cache entries for up to a full
+// TTL, leaving pricing/stats one block behind for most of each block interval.
+type cacheInvalidator interface {
+	invalidateBlockCaches(chainID int)
+	invalidateMempoolCaches(chainID int)
+}
 
 // Poller periodically checks the database for new indexed blocks and mempool
 // changes, then broadcasts WebSocket events through the Hub.
@@ -29,6 +38,7 @@ type Poller struct {
 	networks        map[int]config.NetworkConfig
 	pollInterval    time.Duration
 	usersThrottle   time.Duration
+	invalidator     cacheInvalidator            // optional; set before Run starts
 	lastSeenBlocks  map[int]uint64              // chainID → last block number
 	lastUsersUpdate map[int]time.Time           // chainID → last users broadcast
 	lastPendingTxs  map[int]map[string]struct{} // chainID → set of pending tx hashes
@@ -99,6 +109,12 @@ func (p *Poller) pollNetwork(ctx context.Context, network config.NetworkConfig) 
 	lastSeen := p.lastSeenBlocks[chainID]
 
 	if currentBlock > lastSeen && lastSeen > 0 {
+		// Drop block-derived response caches before broadcasting so the
+		// refetch herd the broadcast triggers is served the new block.
+		if p.invalidator != nil {
+			p.invalidator.invalidateBlockCaches(chainID)
+		}
+
 		// New block(s) detected. Only advance lastSeenBlocks if
 		// broadcastNewBlocks succeeds, so we retry on next tick.
 		if p.broadcastNewBlocks(ctx, network, lastSeen) {
@@ -237,7 +253,7 @@ func (p *Poller) broadcastUsersUpdate(ctx context.Context, network config.Networ
 	defer cancel()
 
 	var users []models.BlobUserStats
-	if err := p.db.SelectContext(queryCtx, &users, queryTopBlobUsersAll, network.ChainID, 10, 0, string(userWindowAll), string(userSortCount)); err != nil {
+	if err := p.db.SelectContext(queryCtx, &users, queryTopBlobUsersAllByCount, network.ChainID, 10, 0, string(userWindowAll)); err != nil {
 		logger.Error("Poller: failed to query top users",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -255,40 +271,76 @@ func (p *Poller) broadcastUsersUpdate(ctx context.Context, network config.Networ
 	})
 }
 
-// pollMempool queries pending blobs and broadcasts add/remove diffs.
+// pollMempool diffs the pending tx-hash set and broadcasts add/remove events.
+// The steady-state probe is hash-only (an index-only scan of the partial
+// pending index); full rows are fetched just for hashes that are new since the
+// previous tick, which in steady state is zero or a handful per block. Diffing
+// the complete pending set — instead of a newest-N window — also avoids
+// spurious add/remove churn when rows slide across a window boundary.
 func (p *Poller) pollMempool(ctx context.Context, network config.NetworkConfig) {
 	queryCtx, cancel := context.WithTimeout(ctx, pollerQueryTimeout)
 	defer cancel()
 
 	chainID := network.ChainID
 
-	var blobs []models.Blob
-	if err := p.db.SelectContext(queryCtx, &blobs, queryMempoolBlobs, chainID, defaultMempoolPollLimit, 0); err != nil {
+	var hashes []string
+	if err := p.db.SelectContext(queryCtx, &hashes, queryPendingBlobTxHashes, chainID); err != nil {
 		logger.Error("Poller: failed to query mempool",
 			zap.String("network", network.Name),
 			zap.Error(err))
 		return
 	}
 
-	currentTxs := make(map[string]models.Blob, len(blobs))
-	for _, b := range blobs {
-		currentTxs[b.TxHash] = b
+	currentTxs := make(map[string]struct{}, len(hashes))
+	for _, hash := range hashes {
+		currentTxs[hash] = struct{}{}
 	}
 
 	prevTxs := p.lastPendingTxs[chainID]
 	if prevTxs == nil {
 		// First poll — set baseline without broadcasting.
-		newSet := make(map[string]struct{}, len(currentTxs))
-		for hash := range currentTxs {
-			newSet[hash] = struct{}{}
-		}
-		p.lastPendingTxs[chainID] = newSet
+		p.lastPendingTxs[chainID] = currentTxs
 		return
 	}
 
-	// Detect additions.
-	for hash, blob := range currentTxs {
+	// Detect additions and removals.
+	added := make([]string, 0)
+	for hash := range currentTxs {
 		if _, existed := prevTxs[hash]; !existed {
+			added = append(added, hash)
+		}
+	}
+	removed := make([]string, 0)
+	for hash := range prevTxs {
+		if _, exists := currentTxs[hash]; !exists {
+			removed = append(removed, hash)
+		}
+	}
+
+	// Drop mempool-derived response caches before broadcasting the diff, so
+	// clients reacting to the events read post-change data.
+	if (len(added) > 0 || len(removed) > 0) && p.invalidator != nil {
+		p.invalidator.invalidateMempoolCaches(chainID)
+	}
+
+	if len(added) > 0 {
+		var blobs []models.Blob
+		if err := p.db.SelectContext(queryCtx, &blobs, queryPendingBlobsByTxHashes, chainID, pq.Array(added)); err != nil {
+			logger.Error("Poller: failed to query new pending blobs",
+				zap.String("network", network.Name),
+				zap.Error(err))
+			// Keep the previous baseline so the additions are retried next tick.
+			return
+		}
+		// One add event per transaction: multi-blob txs store one row per blob,
+		// so keep only the first (lowest blob_index) row per hash — the diff is
+		// hash-keyed and removals are likewise emitted once per hash.
+		broadcast := make(map[string]struct{}, len(added))
+		for _, blob := range blobs {
+			if _, done := broadcast[blob.TxHash]; done {
+				continue
+			}
+			broadcast[blob.TxHash] = struct{}{}
 			p.hub.BroadcastEvent(network.Name, WSEvent{
 				Type: EventMempoolUpdate,
 				Data: MempoolUpdateData{
@@ -299,23 +351,15 @@ func (p *Poller) pollMempool(ctx context.Context, network config.NetworkConfig) 
 		}
 	}
 
-	// Detect removals.
-	for hash := range prevTxs {
-		if _, exists := currentTxs[hash]; !exists {
-			p.hub.BroadcastEvent(network.Name, WSEvent{
-				Type: EventMempoolUpdate,
-				Data: MempoolUpdateData{
-					Action: MempoolActionRemove,
-					Blob:   BlobResponse{TxHash: hash, NetworkName: network.Name, ChainID: chainID},
-				},
-			})
-		}
+	for _, hash := range removed {
+		p.hub.BroadcastEvent(network.Name, WSEvent{
+			Type: EventMempoolUpdate,
+			Data: MempoolUpdateData{
+				Action: MempoolActionRemove,
+				Blob:   BlobResponse{TxHash: hash, NetworkName: network.Name, ChainID: chainID},
+			},
+		})
 	}
 
-	// Update state.
-	newSet := make(map[string]struct{}, len(currentTxs))
-	for hash := range currentTxs {
-		newSet[hash] = struct{}{}
-	}
-	p.lastPendingTxs[chainID] = newSet
+	p.lastPendingTxs[chainID] = currentTxs
 }

@@ -504,8 +504,12 @@ func TestDropConfirmedMigration(t *testing.T) {
 		t.Fatalf("seed blobs: %v", err)
 	}
 
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		t.Fatalf("migrate to latest: %v", err)
+	// Pin to version 3: this test validates 000003's own contract, and later
+	// migrations legitimately change the index end-state (000004 drops the
+	// replacement indexes that are redundant against the UNIQUE key and the
+	// chart cover index).
+	if err := m.Migrate(3); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to 3: %v", err)
 	}
 
 	var columnExists bool
@@ -852,5 +856,105 @@ func assertRollupThresholdCounts(t *testing.T, db *sqlx.DB, bucketSeconds int, w
 			bucketSeconds, got.BlockCount, got.BlocksAboveTarget, got.BlocksAtMax,
 			wantBlocks, wantAbove, wantAtMax,
 		)
+	}
+}
+
+// TestWritePathCostsMigration validates 000004's end state: the redundant
+// indexes are gone, the load-bearing ones survive, and the delta-based
+// blob_user_stats triggers stay exact through update/delete/revocation.
+func TestWritePathCostsMigration(t *testing.T) {
+	db, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	resetSchema(t, db)
+
+	m := migrator(t, db)
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate up: %v", err)
+	}
+
+	assertIndexes(t, db, map[string]bool{
+		// Dropped as redundant.
+		"idx_blobs_chain_id":              false,
+		"idx_blobs_block_number":          false,
+		"idx_blobs_chain_block":           false,
+		"idx_blobs_from_address":          false,
+		"idx_blobs_timestamp":             false,
+		"idx_blobs_chain_timestamp":       false,
+		"idx_blobs_chain_timestamp_cover": false,
+		"idx_block_metrics_chain_block":   false,
+		"idx_blob_users_chain_id":         false,
+		"idx_blob_users_address":          false,
+		// Load-bearing survivors.
+		"idx_blobs_chain_txhash":                true,
+		"idx_blobs_chain_from_timestamp":        true,
+		"idx_blobs_chain_timestamp_chart_cover": true,
+		"idx_blobs_chain_lower_from_address":    true,
+	})
+
+	t0 := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES
+			(1, 200, 0, '0xd1', '0xdelta', 'RollupD', 131072, 10, 1, 100, $1, 11, 131072),
+			(1, 201, 0, '0xd2', '0xdelta', 'RollupD', 131072, 10, 1, 100, $1, 11, 131072)
+	`, t0); err != nil {
+		t.Fatalf("seed blobs: %v", err)
+	}
+	assertBlobUserStats(t, db, "0xdelta", 2, 200)
+
+	// Fee-only update takes the delta path exactly.
+	if _, err := db.Exec(`UPDATE blobs SET total_cost_wei = 120 WHERE chain_id = 1 AND from_address = '0xdelta'`); err != nil {
+		t.Fatalf("update blobs: %v", err)
+	}
+	assertBlobUserStats(t, db, "0xdelta", 2, 240)
+
+	// Attribution revocation (non-empty -> empty) clears the stored name.
+	if _, err := db.Exec(`UPDATE blobs SET user_attribution = '' WHERE chain_id = 1 AND from_address = '0xdelta'`); err != nil {
+		t.Fatalf("revoke attribution: %v", err)
+	}
+	var attribution string
+	if err := db.Get(&attribution, `SELECT user_attribution FROM blob_user_stats WHERE chain_id = 1 AND from_address = '0xdelta'`); err != nil {
+		t.Fatalf("read attribution: %v", err)
+	}
+	if attribution != "" {
+		t.Fatalf("expected cleared attribution after revocation, got %q", attribution)
+	}
+
+	// Reorg-style delete decrements; deleting the rest removes the row.
+	if _, err := db.Exec(`DELETE FROM blobs WHERE chain_id = 1 AND block_number = 201`); err != nil {
+		t.Fatalf("delete blob: %v", err)
+	}
+	assertBlobUserStats(t, db, "0xdelta", 1, 120)
+	if _, err := db.Exec(`DELETE FROM blobs WHERE chain_id = 1 AND block_number = 200`); err != nil {
+		t.Fatalf("delete last blob: %v", err)
+	}
+	var statsRows int
+	if err := db.Get(&statsRows, `SELECT COUNT(*) FROM blob_user_stats WHERE chain_id = 1 AND from_address = '0xdelta'`); err != nil {
+		t.Fatalf("count stats rows: %v", err)
+	}
+	if statsRows != 0 {
+		t.Fatalf("expected stats row removed at zero count, got %d rows", statsRows)
+	}
+
+	// Down restores the 000003 end-state indexes and the refresh triggers.
+	if err := m.Migrate(3); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate down to 3: %v", err)
+	}
+	assertIndexes(t, db, map[string]bool{
+		"idx_blobs_chain_block":           true,
+		"idx_blobs_chain_timestamp_cover": true,
+		"idx_blobs_chain_timestamp":       true,
+		"idx_block_metrics_chain_block":   true,
+	})
+
+	// Re-applying up must be a clean idempotent run.
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("re-apply up: %v", err)
 	}
 }

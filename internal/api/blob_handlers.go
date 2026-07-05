@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/blobparams"
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
@@ -337,6 +338,124 @@ func nullTimePtr(t sql.NullTime) *time.Time {
 	return &t.Time
 }
 
+// cachedBlobList serves a blob-list query through an in-process TTL cache,
+// collapsing concurrent identical requests via singleflight. Only the
+// offset=0, unfiltered request shape is cached — the only shape blob-flow
+// issues — which also keeps the key space bounded by limit (<= MaxQueryLimit)
+// per network.
+func (a *API) cachedBlobList(
+	r *http.Request,
+	cache map[string]blobListCacheEntry,
+	cachePrefix string,
+	ttl time.Duration,
+	network config.NetworkConfig,
+	limit int,
+	query string,
+) ([]BlobResponse, error) {
+	key := cachePrefix + ":" + strconv.Itoa(network.ChainID) + ":" + strconv.Itoa(limit)
+
+	a.cacheMu.RLock()
+	if cached, ok := cache[key]; ok && time.Now().Before(cached.expiresAt) {
+		a.cacheMu.RUnlock()
+		return cached.response, nil
+	}
+	a.cacheMu.RUnlock()
+
+	value, err, _ := a.aggregateGroup.Do(key, func() (interface{}, error) {
+		a.cacheMu.RLock()
+		if cached, ok := cache[key]; ok && time.Now().Before(cached.expiresAt) {
+			a.cacheMu.RUnlock()
+			return cached.response, nil
+		}
+		a.cacheMu.RUnlock()
+
+		queryCtx, cancel := context.WithTimeout(aggregateWorkContext(r), aggregateQueryTimeout)
+		defer cancel()
+
+		var blobs []models.Blob
+		if err := a.db.SelectContext(queryCtx, &blobs, query, network.ChainID, limit, 0); err != nil {
+			return nil, err
+		}
+
+		response := make([]BlobResponse, 0, len(blobs))
+		for _, blob := range blobs {
+			response = append(response, toBlobResponse(blob, network.Name))
+		}
+
+		a.cacheMu.Lock()
+		cache[key] = blobListCacheEntry{response: response, expiresAt: time.Now().Add(ttl)}
+		a.cacheMu.Unlock()
+		return response, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// The singleflight closure above always returns []BlobResponse or an error,
+	// so the assertion's ok value can never be false here.
+	response, _ := value.([]BlobResponse)
+	return response, nil
+}
+
+// blobList answers a latest/mempool list request: the hot cacheable shape goes
+// through cachedBlobList, everything else (address filter, pagination) queries
+// the database directly.
+func (a *API) blobList(
+	w http.ResponseWriter,
+	r *http.Request,
+	network config.NetworkConfig,
+	cache map[string]blobListCacheEntry,
+	cachePrefix string,
+	ttl time.Duration,
+	listQuery, byAddressQuery, errorMessage string,
+) ([]BlobResponse, bool) {
+	limit, offset, err := a.parsePagination(r, 10)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return nil, false
+	}
+
+	fromAddress := r.URL.Query().Get("from")
+
+	if fromAddress == "" && offset == 0 {
+		response, err := a.cachedBlobList(r, cache, cachePrefix, ttl, network, limit, listQuery)
+		if err != nil {
+			logger.Error(errorMessage,
+				zap.String("network", network.Name),
+				zap.Error(err))
+			a.respondAggregateError(w, err, errorMessage)
+			return nil, false
+		}
+		return response, true
+	}
+
+	var blobs []models.Blob
+	if fromAddress != "" {
+		if !common.IsHexAddress(fromAddress) {
+			a.respondError(w, http.StatusBadRequest, "Invalid address format")
+			return nil, false
+		}
+		fromAddress = common.HexToAddress(fromAddress).Hex()
+		err = a.db.SelectContext(r.Context(), &blobs, byAddressQuery, network.ChainID, fromAddress, limit, offset)
+	} else {
+		err = a.db.SelectContext(r.Context(), &blobs, listQuery, network.ChainID, limit, offset)
+	}
+	if err != nil {
+		logger.Error(errorMessage,
+			zap.String("network", network.Name),
+			zap.String("from", fromAddress),
+			zap.Error(err))
+		a.respondError(w, http.StatusInternalServerError, errorMessage)
+		return nil, false
+	}
+
+	response := make([]BlobResponse, 0, len(blobs))
+	for _, blob := range blobs {
+		response = append(response, toBlobResponse(blob, network.Name))
+	}
+	return response, true
+}
+
 // GetLatestBlobs godoc
 // @Summary Get latest confirmed blobs
 // @Description Retrieve the latest confirmed blob transactions from the blockchain
@@ -358,53 +477,19 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit, offset, err := a.parsePagination(r, 10)
-	if err != nil {
-		a.respondError(w, http.StatusBadRequest, err.Error())
+	logger.Debug("Getting latest blobs", zap.String("network", network.Name))
+
+	response, ok := a.blobList(w, r, network,
+		a.latestBlobsCache, "latest_blobs", latestBlobsCacheTTL,
+		queryLatestBlobs, queryLatestBlobsByAddress, "Failed to get latest blobs")
+	if !ok {
 		return
-	}
-
-	fromAddress := r.URL.Query().Get("from")
-
-	logger.Debug("Getting latest blobs",
-		zap.String("network", network.Name),
-		zap.Int("limit", limit),
-		zap.Int("offset", offset))
-
-	// Get the latest blobs, optionally filtered by sender address
-	var blobs []models.Blob
-	if fromAddress != "" {
-		if !common.IsHexAddress(fromAddress) {
-			a.respondError(w, http.StatusBadRequest, "Invalid address format")
-			return
-		}
-		fromAddress = common.HexToAddress(fromAddress).Hex()
-		if err := a.db.SelectContext(r.Context(), &blobs, queryLatestBlobsByAddress, network.ChainID, fromAddress, limit, offset); err != nil {
-			logger.Error("Failed to get latest blobs by address",
-				zap.String("network", network.Name),
-				zap.String("from", fromAddress),
-				zap.Error(err))
-			a.respondError(w, http.StatusInternalServerError, "Failed to get latest blobs")
-			return
-		}
-	} else if err := a.db.SelectContext(r.Context(), &blobs, queryLatestBlobs, network.ChainID, limit, offset); err != nil {
-		logger.Error("Failed to get latest blobs",
-			zap.String("network", network.Name),
-			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get latest blobs")
-		return
-	}
-
-	// Convert to response format
-	response := make([]BlobResponse, 0, len(blobs))
-	for _, blob := range blobs {
-		response = append(response, toBlobResponse(blob, network.Name))
 	}
 
 	logger.Debug("Returning latest blobs",
 		zap.String("network", network.Name),
 		zap.Int("count", len(response)))
-	setCacheControl(w, latestBlobsCacheTTL)
+	setCacheControl(w, latestBlobsCacheTTL, latestBlobsEdgeTTL)
 	a.respondSuccess(w, response)
 }
 
@@ -429,52 +514,19 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit, offset, err := a.parsePagination(r, 10)
-	if err != nil {
-		a.respondError(w, http.StatusBadRequest, err.Error())
+	logger.Debug("Getting mempool blobs", zap.String("network", network.Name))
+
+	response, ok := a.blobList(w, r, network,
+		a.mempoolBlobsCache, "mempool_blobs", mempoolBlobsCacheTTL,
+		queryMempoolBlobs, queryMempoolBlobsByAddress, "Failed to get pending blobs")
+	if !ok {
 		return
-	}
-
-	fromAddress := r.URL.Query().Get("from")
-
-	logger.Debug("Getting mempool blobs",
-		zap.String("network", network.Name),
-		zap.Int("limit", limit),
-		zap.Int("offset", offset))
-
-	// Get the pending blobs, optionally filtered by sender address
-	var blobs []models.Blob
-	if fromAddress != "" {
-		if !common.IsHexAddress(fromAddress) {
-			a.respondError(w, http.StatusBadRequest, "Invalid address format")
-			return
-		}
-		fromAddress = common.HexToAddress(fromAddress).Hex()
-		if err := a.db.SelectContext(r.Context(), &blobs, queryMempoolBlobsByAddress, network.ChainID, fromAddress, limit, offset); err != nil {
-			logger.Error("Failed to get pending blobs by address",
-				zap.String("network", network.Name),
-				zap.String("from", fromAddress),
-				zap.Error(err))
-			a.respondError(w, http.StatusInternalServerError, "Failed to get pending blobs")
-			return
-		}
-	} else if err := a.db.SelectContext(r.Context(), &blobs, queryMempoolBlobs, network.ChainID, limit, offset); err != nil {
-		logger.Error("Failed to get pending blobs",
-			zap.String("network", network.Name),
-			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get pending blobs")
-		return
-	}
-
-	// Convert to response format
-	response := make([]BlobResponse, 0, len(blobs))
-	for _, blob := range blobs {
-		response = append(response, toBlobResponse(blob, network.Name))
 	}
 
 	logger.Debug("Returning mempool blobs",
 		zap.String("network", network.Name),
 		zap.Int("count", len(response)))
+	setCacheControl(w, mempoolBlobsCacheTTL, mempoolBlobsEdgeTTL)
 	a.respondSuccess(w, response)
 }
 
@@ -502,7 +554,7 @@ func (a *API) GetMempoolPressure(w http.ResponseWriter, r *http.Request) {
 	a.cacheMu.RLock()
 	if cached, ok := a.mempoolCache[network.ChainID]; ok && time.Now().Before(cached.expiresAt) {
 		a.cacheMu.RUnlock()
-		setCacheControl(w, mempoolPressureCacheTTL)
+		setCacheControl(w, mempoolPressureCacheTTL, mempoolPressureEdgeTTL)
 		a.respondSuccess(w, cached.response)
 		return
 	}
@@ -534,7 +586,7 @@ func (a *API) GetMempoolPressure(w http.ResponseWriter, r *http.Request) {
 		zap.String("network", network.Name),
 		zap.Int("pending_blob_count", response.PendingBlobCount),
 		zap.Bool("pricing_available", response.Includability.PricingAvailable))
-	setCacheControl(w, mempoolPressureCacheTTL)
+	setCacheControl(w, mempoolPressureCacheTTL, mempoolPressureEdgeTTL)
 	a.respondSuccess(w, response)
 }
 
@@ -669,7 +721,7 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 	// A confirmed blob at a tx hash is immutable, so it is safely cacheable.
 	// Pending rows stay uncached since they change as the tx confirms/drops.
 	if blob.Confirmed {
-		setCacheControl(w, confirmedBlobCacheTTL)
+		setCacheControl(w, confirmedBlobCacheTTL, confirmedBlobEdgeTTL)
 	}
 	a.respondSuccess(w, toBlobResponse(blob, network.Name))
 }
@@ -707,14 +759,61 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 		blocks = b
 	}
 
-	// Query recent block metrics
-	var metrics []models.BlockMetrics
-	if err := a.db.SelectContext(r.Context(), &metrics, queryBlockMetrics, network.ChainID, blocks); err != nil {
+	// blob-flow refetches pricing on every WebSocket new_block broadcast, so
+	// all connected clients arrive nearly simultaneously; the cache plus
+	// singleflight collapses that herd to at most one query per TTL per
+	// (network, blocks) key. The key space is bounded: blocks <= MaxQueryLimit.
+	key := "pricing:" + strconv.Itoa(network.ChainID) + ":" + strconv.Itoa(blocks)
+
+	a.cacheMu.RLock()
+	if cached, ok := a.pricingCache[key]; ok && time.Now().Before(cached.expiresAt) {
+		a.cacheMu.RUnlock()
+		setCacheControl(w, pricingCacheTTL, pricingEdgeTTL)
+		a.respondSuccess(w, cached.response)
+		return
+	}
+	a.cacheMu.RUnlock()
+
+	value, err, _ := a.aggregateGroup.Do(key, func() (interface{}, error) {
+		a.cacheMu.RLock()
+		if cached, ok := a.pricingCache[key]; ok && time.Now().Before(cached.expiresAt) {
+			a.cacheMu.RUnlock()
+			return cached.response, nil
+		}
+		a.cacheMu.RUnlock()
+
+		resp, err := a.queryBlobPricing(aggregateWorkContext(r), network, blocks)
+		if err != nil {
+			return PricingResponse{}, err
+		}
+
+		a.cacheMu.Lock()
+		a.pricingCache[key] = pricingCacheEntry{response: resp, expiresAt: time.Now().Add(pricingCacheTTL)}
+		a.cacheMu.Unlock()
+		return resp, nil
+	})
+	if err != nil {
 		logger.Error("Failed to get block metrics",
 			zap.String("network", network.Name),
 			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get pricing data")
+		a.respondAggregateError(w, err, "Failed to get pricing data")
 		return
+	}
+
+	// The singleflight closure above always returns PricingResponse or an error,
+	// so the assertion's ok value can never be false here.
+	resp, _ := value.(PricingResponse)
+	setCacheControl(w, pricingCacheTTL, pricingEdgeTTL)
+	a.respondSuccess(w, resp)
+}
+
+func (a *API) queryBlobPricing(ctx context.Context, network config.NetworkConfig, blocks int) (PricingResponse, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, aggregateQueryTimeout)
+	defer cancel()
+
+	var metrics []models.BlockMetrics
+	if err := a.db.SelectContext(queryCtx, &metrics, queryBlockMetrics, network.ChainID, blocks); err != nil {
+		return PricingResponse{}, err
 	}
 
 	// Build response
@@ -759,8 +858,7 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 		resp.PredictedNextFeeGwei = formatWeiAsGwei(resp.PredictedNextFee)
 	}
 
-	setCacheControl(w, pricingCacheMaxAge)
-	a.respondSuccess(w, resp)
+	return resp, nil
 }
 
 // calcNextExcessBlobGas estimates the next block's excess blob gas using the EIP-4844 formula.
