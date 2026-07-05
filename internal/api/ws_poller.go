@@ -332,7 +332,15 @@ func (p *Poller) pollMempool(ctx context.Context, network config.NetworkConfig) 
 			// Keep the previous baseline so the additions are retried next tick.
 			return
 		}
+		// One add event per transaction: multi-blob txs store one row per blob,
+		// so keep only the first (lowest blob_index) row per hash — the diff is
+		// hash-keyed and removals are likewise emitted once per hash.
+		broadcast := make(map[string]struct{}, len(added))
 		for _, blob := range blobs {
+			if _, done := broadcast[blob.TxHash]; done {
+				continue
+			}
+			broadcast[blob.TxHash] = struct{}{}
 			p.hub.BroadcastEvent(network.Name, WSEvent{
 				Type: EventMempoolUpdate,
 				Data: MempoolUpdateData{

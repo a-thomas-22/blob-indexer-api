@@ -885,9 +885,11 @@ const (
 
 	// queryPendingBlobsByTxHashes fetches full pending rows for the (typically
 	// zero or few) tx hashes that are new since the poller's previous tick.
+	// blob_index ASC lets the caller keep the first blob per tx, mirroring
+	// queryBlobByTxHash's first-blob convention for multi-blob transactions.
 	queryPendingBlobsByTxHashes = `
 		SELECT ` + mempoolBlobSelectColumns + ` FROM mempool_blobs
 		WHERE chain_id = $1 AND tx_hash = ANY($2)
-		ORDER BY timestamp DESC
+		ORDER BY timestamp DESC, blob_index ASC
 	`
 )

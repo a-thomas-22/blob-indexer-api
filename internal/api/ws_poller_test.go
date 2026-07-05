@@ -859,3 +859,68 @@ func TestPoller_InvalidatesCachesOnNewBlockAndMempoolChange(t *testing.T) {
 		t.Fatalf("expected no additional invalidations, got %v / %v", inv.blockCalls, inv.mempoolCalls)
 	}
 }
+
+// TestPoller_MempoolDiff_MultiBlobTxSingleAdd verifies a pending transaction
+// carrying several blobs (one mempool row per blob) broadcasts exactly one
+// add event, mirroring the hash-keyed removals.
+func TestPoller_MempoolDiff_MultiBlobTxSingleAdd(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			switch query {
+			case queryPendingBlobTxHashes:
+				hashes := dest.(*[]string)
+				*hashes = []string{"0xmulti"}
+			case queryPendingBlobsByTxHashes:
+				blobs := dest.(*[]models.Blob)
+				*blobs = []models.Blob{
+					{ChainID: 11155111, TxHash: "0xmulti", BlobIndex: 0, BaseFeePerBlobGas: "0", TipPerBlobGas: "0", TotalCostWei: "0"},
+					{ChainID: 11155111, TxHash: "0xmulti", BlobIndex: 1, BaseFeePerBlobGas: "0", TipPerBlobGas: "0", TotalCostWei: "0"},
+					{ChainID: 11155111, TxHash: "0xmulti", BlobIndex: 2, BaseFeePerBlobGas: "0", TipPerBlobGas: "0", TotalCostWei: "0"},
+				}
+			}
+			return nil
+		},
+	}
+
+	network := config.NetworkConfig{Name: "sepolia", ChainID: 11155111}
+	poller := NewPoller(db, hub, testNetworks(), time.Second, time.Hour)
+	poller.lastPendingTxs[11155111] = map[string]struct{}{} // baseline established
+
+	client := &Client{
+		hub:         hub,
+		send:        make(chan []byte, 256),
+		networkName: "sepolia",
+	}
+	hub.register <- client
+	time.Sleep(20 * time.Millisecond)
+
+	poller.pollMempool(context.Background(), network)
+	time.Sleep(100 * time.Millisecond)
+
+	adds := 0
+	for {
+		select {
+		case msg := <-client.send:
+			var e WSEvent
+			if err := json.Unmarshal(msg, &e); err != nil {
+				continue
+			}
+			if e.Type != EventMempoolUpdate {
+				continue
+			}
+			data, ok := e.Data.(map[string]interface{})
+			if ok && data["action"] == string(MempoolActionAdd) {
+				adds++
+			}
+		default:
+			if adds != 1 {
+				t.Fatalf("expected exactly 1 add event for a multi-blob tx, got %d", adds)
+			}
+			return
+		}
+	}
+}
