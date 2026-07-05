@@ -142,6 +142,77 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		}
 	})
 
+	t.Run("queryBlobByVersionedHash", func(t *testing.T) {
+		// Temp rows scoped to this subtest: a second blob on the confirmed tx
+		// (multi-blob hash-list assembly) and a pending re-post of the
+		// confirmed blob's content (identical content produces the identical
+		// versioned hash, so the lookup must prefer the confirmed row). Both
+		// are removed on exit so later subtests keep their seeded counts; the
+		// blobs delete also rolls its trigger-maintained stats back.
+		if _, err := sqlxDB.Exec(`
+			INSERT INTO blobs (
+				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
+			) VALUES (1, 100, 1, '0xconfirmed', '0xfrom', 'Rollup', 131072, 10, 2, 100, $1, 12, 131072, '0xvhconfirmed2')
+		`, now); err != nil {
+			t.Fatalf("seed second confirmed blob: %v", err)
+		}
+		if _, err := sqlxDB.Exec(`
+			INSERT INTO mempool_blobs (
+				chain_id, tx_hash, blob_index, from_address, user_attribution,
+				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
+			) VALUES (1, '0xpendingdup', 0, '0xfrom', 'Rollup', 131072, 50, 10, 500, $1, 60, 131072, '0xvhconfirmed')
+		`, now); err != nil {
+			t.Fatalf("seed duplicate-content pending blob: %v", err)
+		}
+		defer func() {
+			if _, err := sqlxDB.Exec(`DELETE FROM blobs WHERE chain_id = 1 AND tx_hash = '0xconfirmed' AND blob_index = 1`); err != nil {
+				t.Fatalf("clean up second confirmed blob: %v", err)
+			}
+			if _, err := sqlxDB.Exec(`DELETE FROM mempool_blobs WHERE chain_id = 1 AND tx_hash = '0xpendingdup'`); err != nil {
+				t.Fatalf("clean up duplicate-content pending blob: %v", err)
+			}
+		}()
+
+		// A hash carried by both a confirmed and a pending transaction resolves
+		// to the confirmed row, and the matched row is the blob itself.
+		var blob models.Blob
+		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, "0xvhconfirmed", 1); err != nil {
+			t.Fatalf("queryBlobByVersionedHash confirmed: %v", err)
+		}
+		if !blob.Confirmed || blob.BlockNumber != 100 || blob.TxHash != "0xconfirmed" || blob.BlobIndex != 0 {
+			t.Fatalf("expected confirmed blob at index 0, got %+v", blob)
+		}
+		// The response carries the transaction's full ordered hash list,
+		// assembled from the sibling rows' scalar hashes.
+		want := pq.StringArray{"0xvhconfirmed", "0xvhconfirmed2"}
+		if len(blob.VersionedHashes) != 2 || blob.VersionedHashes[0] != want[0] || blob.VersionedHashes[1] != want[1] {
+			t.Fatalf("expected versioned hash list %v, got %v", want, blob.VersionedHashes)
+		}
+
+		// Matching the second blob of the tx returns that blob's own row.
+		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, "0xvhconfirmed2", 1); err != nil {
+			t.Fatalf("queryBlobByVersionedHash second blob: %v", err)
+		}
+		if blob.TxHash != "0xconfirmed" || blob.BlobIndex != 1 {
+			t.Fatalf("expected second blob of confirmed tx, got %+v", blob)
+		}
+
+		// A pending-only hash falls through to the mempool arm.
+		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, "0xvhpending", 1); err != nil {
+			t.Fatalf("queryBlobByVersionedHash pending: %v", err)
+		}
+		if blob.Confirmed || blob.BlockNumber != models.PendingBlockNumber || blob.TxHash != "0xpendingtx" {
+			t.Fatalf("expected pending blob, got %+v", blob)
+		}
+
+		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, "0xvhmissing", 1); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for missing versioned hash, got %v", err)
+		}
+	})
+
 	t.Run("queryBlobStats", func(t *testing.T) {
 		var stats models.BlobStatsAggregate
 		if err := sqlxDB.GetContext(ctx, &stats, queryBlobStats, 1); err != nil {

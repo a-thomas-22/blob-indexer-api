@@ -183,6 +183,25 @@ func TestCalculateBlobMetrics_UsesRealizedBlobBaseFeeCost(t *testing.T) {
 	}
 }
 
+func TestBuildPendingBlobs_PopulatesVersionedHash(t *testing.T) {
+	hashes := []common.Hash{{0x01, 0xaa}, {0x01, 0xbb}}
+	tx := types.NewTx(&types.BlobTx{
+		BlobFeeCap: uint256.NewInt(5),
+		BlobHashes: hashes,
+	})
+
+	rows := buildPendingBlobs(tx, big.NewInt(2), 42, "0xfrom", "alice")
+
+	if len(rows) != len(hashes) {
+		t.Fatalf("expected %d pending rows, got %d", len(hashes), len(rows))
+	}
+	for i, row := range rows {
+		if row.VersionedHash == nil || *row.VersionedHash != hashes[i].Hex() {
+			t.Fatalf("row %d versioned hash = %v, want %s", i, row.VersionedHash, hashes[i].Hex())
+		}
+	}
+}
+
 func TestDetermineStartBlock_NumericBlock(t *testing.T) {
 	idx := newTestIndexer()
 	idx.network.StartBlock = "12345"
