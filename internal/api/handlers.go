@@ -19,6 +19,17 @@ import (
 
 const MaxQueryLimit = 100
 
+// DefaultPricingBlocks is the /blob/pricing window when no blocks param is
+// given; out-of-range values below 1 also clamp here.
+const DefaultPricingBlocks = 20
+
+// MaxPricingBlocks caps the /blob/pricing blocks param. The frontend's 1h
+// view requests 300 (a full mainnet hour at 12s slots — missed slots only
+// shrink the block count, so 300 blocks always spans ≥ 1h of wall time); 512
+// leaves headroom for shorter slot times. The query is a single backward
+// range scan on the block_metrics primary key, so a larger cap is cheap.
+const MaxPricingBlocks = 512
+
 // MaxQueryOffset prevents very expensive deep pagination queries.
 const MaxQueryOffset = 10000
 
