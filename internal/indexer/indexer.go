@@ -1321,7 +1321,8 @@ func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID in
 	metrics := calculateBlobMetrics(tx, blobBaseFee)
 	now := time.Now()
 	rows := make([]models.Blob, 0, len(blobHashes))
-	for range blobHashes {
+	for _, blobHash := range blobHashes {
+		versionedHash := blobHash.Hex()
 		rows = append(rows, models.Blob{
 			ChainID:           networkID,
 			BlockNumber:       -1,
@@ -1336,6 +1337,7 @@ func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID in
 			Confirmed:         false,
 			MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
 			BlobGasUsed:       metrics.blobGasUsed,
+			VersionedHash:     &versionedHash,
 		})
 	}
 	return rows
@@ -1415,7 +1417,8 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 
 		metrics := calculateBlobMetrics(tx, blobBaseFee)
 
-		for range blobHashes {
+		for _, blobHash := range blobHashes {
+			versionedHash := blobHash.Hex()
 			blobs = append(blobs, models.Blob{
 				ChainID:           i.network.ChainID,
 				BlockNumber:       int64(blockNumber),
@@ -1431,6 +1434,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 				Confirmed:         true,
 				MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
 				BlobGasUsed:       metrics.blobGasUsed,
+				VersionedHash:     &versionedHash,
 			})
 			blobIndex++
 		}
@@ -1690,11 +1694,11 @@ func (i *Indexer) consumeReorgReset() (from, through uint64) {
 
 // blobInsertColumns is the number of columns written per row when inserting
 // into blobs.
-const blobInsertColumns = 13
+const blobInsertColumns = 14
 
 // mempoolBlobInsertColumns is the number of columns written per row when
 // upserting into mempool_blobs.
-const mempoolBlobInsertColumns = 12
+const mempoolBlobInsertColumns = 13
 
 // valuesPlaceholders builds a multi-row VALUES clause "($1,$2,...),($n,...),..."
 // for rows rows of width columns. casts, when non-nil, must have width entries
@@ -1797,7 +1801,7 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			INSERT INTO blobs (
 				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-				timestamp, max_fee_per_blob_gas, blob_gas_used
+				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
 			) VALUES ` + valuesPlaceholders(len(blobs), blobInsertColumns, nil) + `
 			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
 				tx_hash = EXCLUDED.tx_hash,
@@ -1809,14 +1813,15 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				total_cost_wei = EXCLUDED.total_cost_wei,
 				timestamp = EXCLUDED.timestamp,
 				max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
-				blob_gas_used = EXCLUDED.blob_gas_used
+				blob_gas_used = EXCLUDED.blob_gas_used,
+				versioned_hash = EXCLUDED.versioned_hash
 		`
 		insertArgs := make([]interface{}, 0, len(blobs)*blobInsertColumns)
 		for _, blob := range blobs {
 			insertArgs = append(insertArgs,
 				blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed)
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash)
 		}
 		if _, err := tx.ExecContext(i.ctx, insertQuery, insertArgs...); err != nil {
 			return fmt.Errorf("failed to insert blobs (block: %d): %w", indexedBlock.BlockNumber, err)
@@ -2094,7 +2099,7 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 		INSERT INTO mempool_blobs (
 			chain_id, tx_hash, blob_index, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
 		) VALUES ` + valuesPlaceholders(len(blobs), mempoolBlobInsertColumns, nil) + `
 		ON CONFLICT (chain_id, tx_hash, blob_index) DO UPDATE SET
 			from_address = EXCLUDED.from_address,
@@ -2105,14 +2110,15 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 			total_cost_wei = EXCLUDED.total_cost_wei,
 			timestamp = EXCLUDED.timestamp,
 			max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
-			blob_gas_used = EXCLUDED.blob_gas_used
+			blob_gas_used = EXCLUDED.blob_gas_used,
+			versioned_hash = EXCLUDED.versioned_hash
 	`
 	upsertArgs := make([]interface{}, 0, len(blobs)*mempoolBlobInsertColumns)
 	for offset, b := range blobs {
 		upsertArgs = append(upsertArgs,
 			b.ChainID, b.TxHash, offset, b.FromAddress, b.UserAttribution,
 			b.BlobSizeBytes, b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostWei,
-			b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed)
+			b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed, b.VersionedHash)
 	}
 	if _, err := tx.ExecContext(i.ctx, upsertQuery, upsertArgs...); err != nil {
 		return fmt.Errorf("failed to insert pending blobs (tx: %s): %w", txHash, err)
