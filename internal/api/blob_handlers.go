@@ -56,9 +56,15 @@ type BlobResponse struct {
 	MaxCostWei           *string   `json:"max_cost_wei,omitempty"`
 	HeadroomWei          *string   `json:"fee_cap_headroom_wei,omitempty"`
 	HeadroomPercent      *string   `json:"fee_cap_headroom_percent,omitempty"`
-	// VersionedHashes is the transaction's full ordered list of EIP-4844
-	// versioned blob hashes (0x01-prefixed). Omitted for rows indexed before
-	// versioned hashes were stored.
+	// VersionedHash is this blob's own EIP-4844 versioned hash
+	// (0x01-prefixed). blob_index cannot locate the blob within
+	// versioned_hashes — for confirmed rows it is the block-wide ordinal —
+	// so this field is what identifies the row's blob. Omitted for rows
+	// indexed before versioned hashes were stored.
+	VersionedHash *string `json:"versioned_hash,omitempty" example:"0x01a1f8730e4064f7dd90279b721b25e28c07fc3e16d5fd4a26e6d3d5e9e0dbeb"`
+	// VersionedHashes is the carrying transaction's full ordered list of
+	// EIP-4844 versioned blob hashes (0x01-prefixed). Omitted for rows
+	// indexed before versioned hashes were stored.
 	VersionedHashes []string `json:"versioned_hashes,omitempty" example:"0x01a1f8730e4064f7dd90279b721b25e28c07fc3e16d5fd4a26e6d3d5e9e0dbeb"`
 }
 
@@ -223,6 +229,7 @@ func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
 		MaxFeePerBlobGas:      blob.MaxFeePerBlobGas,
 		MaxFeePerBlobGasGwei:  formatOptionalWeiAsGwei(blob.MaxFeePerBlobGas),
 		BlobGasUsed:           blob.BlobGasUsed,
+		VersionedHash:         blob.VersionedHash,
 		VersionedHashes:       []string(blob.VersionedHashes),
 	}
 	response.RealizedCostWei, response.MaxCostWei, response.HeadroomWei, response.HeadroomPercent = deriveBlobCostFields(blob)
@@ -733,7 +740,7 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 
 // GetBlobByVersionedHash godoc
 // @Summary Get blob by EIP-4844 versioned hash
-// @Description Retrieve the blob transaction carrying the given versioned blob hash (0x01-prefixed, 32 bytes). The returned blob is the matching blob itself, so blob_index identifies its position within the carrying transaction, and versioned_hashes lists the transaction's full hash list. Confirmed inclusions win over pending ones; when identical blob content was posted more than once (same content means the same versioned hash), the newest inclusion by block is returned, with deterministic tie-breaking within a block.
+// @Description Retrieve the blob transaction carrying the given versioned blob hash (0x01-prefixed, 32 bytes). The returned blob is the matching blob row itself: versioned_hash echoes the matched hash and versioned_hashes lists the carrying transaction's full hash list (blob_index keeps its usual semantics — block-wide ordinal for confirmed rows, transaction-local for pending ones). Confirmed inclusions win over pending ones; when identical blob content was posted more than once (same content means the same versioned hash), the newest inclusion as of evaluation is returned — confirmed responses are briefly cacheable, so a repost may be reflected only after the cache TTL, and any cached answer remains a valid carrying transaction.
 // @Tags blobs
 // @Accept json
 // @Produce json
@@ -761,7 +768,8 @@ func (a *API) GetBlobByVersionedHash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The indexer stores hashes in go-ethereum's lowercase hex encoding, so
-	// normalize before the version check and the (case-sensitive) array match.
+	// normalize before the version check and the (case-sensitive) equality
+	// match on versioned_hash.
 	versionedHash = strings.ToLower(versionedHash)
 	// A versioned blob hash's first byte is the version — 0x01 is EIP-4844's
 	// VERSIONED_HASH_VERSION_KZG, the only version that exists.

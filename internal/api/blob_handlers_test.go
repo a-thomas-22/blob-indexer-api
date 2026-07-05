@@ -684,6 +684,7 @@ func TestGetBlobByVersionedHash_Success(t *testing.T) {
 			if len(args) != 2 || args[0] != validTestVersionedHash || args[1] != 42 {
 				t.Errorf("unexpected query args: %v", args)
 			}
+			versionedHash := validTestVersionedHash
 			blob := dest.(*models.Blob)
 			*blob = models.Blob{
 				ChainID:           42,
@@ -696,6 +697,7 @@ func TestGetBlobByVersionedHash_Success(t *testing.T) {
 				TotalCostWei:      "0.001",
 				Timestamp:         time.Now(),
 				Confirmed:         true,
+				VersionedHash:     &versionedHash,
 				VersionedHashes:   pq.StringArray{validTestVersionedHash},
 			}
 			return nil

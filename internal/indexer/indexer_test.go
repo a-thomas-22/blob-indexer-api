@@ -183,7 +183,7 @@ func TestCalculateBlobMetrics_UsesRealizedBlobBaseFeeCost(t *testing.T) {
 	}
 }
 
-func TestBuildPendingBlobs_PopulatesVersionedHashes(t *testing.T) {
+func TestBuildPendingBlobs_PopulatesVersionedHash(t *testing.T) {
 	hashes := []common.Hash{{0x01, 0xaa}, {0x01, 0xbb}}
 	tx := types.NewTx(&types.BlobTx{
 		BlobFeeCap: uint256.NewInt(5),
