@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.9.0...blob-indexer-api-v0.10.0) (2026-07-05)
+
+
+### Features
+
+* **api:** gap-free WebSocket block updates via LISTEN/NOTIFY, snapshot on connect ([#278](https://github.com/a-thomas-22/blob-indexer-api/issues/278)) ([5858574](https://github.com/a-thomas-22/blob-indexer-api/commit/5858574461185b10462b222d6cd604cf70c588e2))
+
 ## [0.9.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.8.1...blob-indexer-api-v0.9.0) (2026-07-05)
 
 
