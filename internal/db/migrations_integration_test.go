@@ -5,7 +5,6 @@ package db
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -14,18 +13,19 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/testdb"
 )
 
-// integrationDBURL returns the connection string for the test database, or
-// skips the test when it is not provided. CI sets TEST_DB_URL; developers may
-// set it locally to point at a throwaway Postgres instance.
+// integrationDBURL returns the connection string for this package's dedicated
+// test database (derived from TEST_DB_URL), or skips the test when
+// TEST_DB_URL is not provided. CI sets TEST_DB_URL; developers may set it
+// locally to point at a throwaway Postgres instance. The derived database
+// keeps this package's schema resets from racing other packages' test
+// binaries, which go test runs in parallel.
 func integrationDBURL(t *testing.T) string {
 	t.Helper()
-	url := os.Getenv("TEST_DB_URL")
-	if url == "" {
-		t.Skip("TEST_DB_URL not set; skipping integration test")
-	}
-	return url
+	return testdb.URL(t, "db")
 }
 
 // resetSchema drops every table in the public schema so the test starts from a

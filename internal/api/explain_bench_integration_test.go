@@ -15,10 +15,10 @@ import (
 
 // benchDB connects to TEST_DB_URL and skips unless the database holds seeded
 // mainnet (chain 1) data with fine rollups. These are measurement harnesses
-// for a production-scale seeded database, run manually and alone — they skip
-// on the empty schema the ./internal/db integration tests leave behind, and
-// must not share a TEST_DB_URL with a concurrently running schema-resetting
-// test.
+// for a production-scale seeded database, run manually and alone. Unlike the
+// schema-resetting integration tests, which run on per-package derived
+// databases (internal/testdb), this deliberately reads TEST_DB_URL itself:
+// that is where make seed-data puts the data, and nothing resets it anymore.
 func benchDB(t *testing.T) *sqlx.DB {
 	t.Helper()
 	url := os.Getenv("TEST_DB_URL")

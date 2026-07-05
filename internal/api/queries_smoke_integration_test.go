@@ -12,7 +12,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -21,13 +20,14 @@ import (
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
+	"github.com/a-thomas-22/blob-indexer-api/internal/testdb"
 )
 
 func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
-	url := os.Getenv("TEST_DB_URL")
-	if url == "" {
-		t.Skip("TEST_DB_URL not set; skipping integration test")
-	}
+	// This test resets its schema, so it runs on this package's dedicated
+	// database rather than TEST_DB_URL itself — parallel test binaries from
+	// other packages must never see the reset.
+	url := testdb.URL(t, "api")
 	sqlxDB, err := sqlx.Connect("postgres", url)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
