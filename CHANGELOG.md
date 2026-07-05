@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.9.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.8.1...blob-indexer-api-v0.9.0) (2026-07-05)
+
+
+### Features
+
+* add machine-readable error_code to API error responses ([#260](https://github.com/a-thomas-22/blob-indexer-api/issues/260)) ([ddf32a7](https://github.com/a-thomas-22/blob-indexer-api/commit/ddf32a77c248f112e2c84fed421d0c6c09b035ca))
+* add manual block reindex requests ([#235](https://github.com/a-thomas-22/blob-indexer-api/issues/235)) ([509b02b](https://github.com/a-thomas-22/blob-indexer-api/commit/509b02be13a56b2e8c3edf8f94ba2234e079e2ae))
+* **api:** /metrics endpoint + bounded rate-limiter visitor map ([#267](https://github.com/a-thomas-22/blob-indexer-api/issues/267)) ([1ece304](https://github.com/a-thomas-22/blob-indexer-api/commit/1ece304bf270445c03f6d59133bf67aaf5fe8023))
+* **api:** add /healthz and /readyz probe endpoints ([#250](https://github.com/a-thomas-22/blob-indexer-api/issues/250)) ([b7a8201](https://github.com/a-thomas-22/blob-indexer-api/commit/b7a8201b8e4e6e6467a26b866fca28af170caf1b))
+* **api:** cache /blob/latest and confirmed /blob/{txHash} ([#264](https://github.com/a-thomas-22/blob-indexer-api/issues/264)) ([522c7bf](https://github.com/a-thomas-22/blob-indexer-api/commit/522c7bfdbddf477df4cf18be88115ac35612f100))
+* **api:** error_code in rate-limit and middleware error responses ([#268](https://github.com/a-thomas-22/blob-indexer-api/issues/268)) ([b1aa498](https://github.com/a-thomas-22/blob-indexer-api/commit/b1aa498f4a580f32490fff1f3b4810eda4cf4f94))
+* serialize pending blob block_number as null on the wire ([#261](https://github.com/a-thomas-22/blob-indexer-api/issues/261)) ([96b1000](https://github.com/a-thomas-22/blob-indexer-api/commit/96b1000bdc85007c6e206277497a2c3dd3408523))
+
+
+### Bug Fixes
+
+* **api:** address [#239](https://github.com/a-thomas-22/blob-indexer-api/issues/239)/[#250](https://github.com/a-thomas-22/blob-indexer-api/issues/250) review comments + Cloudflare-aware WS client IP ([#251](https://github.com/a-thomas-22/blob-indexer-api/issues/251)) ([fc67285](https://github.com/a-thomas-22/blob-indexer-api/commit/fc67285ca839f8767de6ebe2cbd0c6dbdeaf6706))
+* **api:** harden config validation + deterministic default network ([#266](https://github.com/a-thomas-22/blob-indexer-api/issues/266)) ([5d92d24](https://github.com/a-thomas-22/blob-indexer-api/commit/5d92d2459983f617d4dafb6f5eb9b57239b3b46d))
+* harden mempool websocket subscriptions ([#237](https://github.com/a-thomas-22/blob-indexer-api/issues/237)) ([8794dcd](https://github.com/a-thomas-22/blob-indexer-api/commit/8794dcd4de9969f181517b3ba2a1bb10b2721b66))
+* **helm:** source RPC URLs from a Secret and add liveness probes ([#240](https://github.com/a-thomas-22/blob-indexer-api/issues/240)) ([a484db1](https://github.com/a-thomas-22/blob-indexer-api/commit/a484db1b575b65dce4a45eb3bf217efd1deaa7da))
+* **indexer:** reorg depth-cap metric + bounded pending-tx resubscribe backoff ([#265](https://github.com/a-thomas-22/blob-indexer-api/issues/265)) ([f3b3acc](https://github.com/a-thomas-22/blob-indexer-api/commit/f3b3acc313339a906d545f2236c8c65173d02b49))
+* speed up short-range chart endpoints ([2e201e2](https://github.com/a-thomas-22/blob-indexer-api/commit/2e201e207d1380c7c798fe1a595c3841f24b99c8))
+* **ws:** enforce origin policy and connection caps on WebSocket upgrades ([#239](https://github.com/a-thomas-22/blob-indexer-api/issues/239)) ([a9e90d1](https://github.com/a-thomas-22/blob-indexer-api/commit/a9e90d1a64eaf4ebb8e0bb953540b3cf354dab0a))
+
+
+### Performance Improvements
+
+* **api:** serve short rolling windows and sub-hour charts from 60s rollups ([#275](https://github.com/a-thomas-22/blob-indexer-api/issues/275)) ([4a7e67d](https://github.com/a-thomas-22/blob-indexer-api/commit/4a7e67ddb502c5b176f78b5ff9c4ec15abe82022))
+* **db:** drop the vestigial blobs.confirmed column and its indexes ([#274](https://github.com/a-thomas-22/blob-indexer-api/issues/274)) ([d827d13](https://github.com/a-thomas-22/blob-indexer-api/commit/d827d1361bb6e75298f2fb797cf88f7a379e9ec3))
+* **db:** move pending blobs to a dedicated UNLOGGED mempool_blobs table ([#273](https://github.com/a-thomas-22/blob-indexer-api/issues/273)) ([2aea8f7](https://github.com/a-thomas-22/blob-indexer-api/commit/2aea8f7d8963a5548b8be7e36fd7691c92b3cfdf))
+* heavy caching for blob-flow views + delta-based write-path triggers ([#272](https://github.com/a-thomas-22/blob-indexer-api/issues/272)) ([5edd091](https://github.com/a-thomas-22/blob-indexer-api/commit/5edd091675409e5f5153bfd09b207b179acd3bf1))
+* **indexer:** batch blob writes and metadata upserts into multi-row statements ([#271](https://github.com/a-thomas-22/blob-indexer-api/issues/271)) ([a906429](https://github.com/a-thomas-22/blob-indexer-api/commit/a906429f62737977bb337777e0325dfe8d508a03))
+
+
+### Dependencies
+
+* bump actions/checkout from 6 to 7 ([#270](https://github.com/a-thomas-22/blob-indexer-api/issues/270)) ([1fcd363](https://github.com/a-thomas-22/blob-indexer-api/commit/1fcd3631f0b133ed42569d15342c36f12e825aaf))
+* bump alpine from 3.23 to 3.24 ([#253](https://github.com/a-thomas-22/blob-indexer-api/issues/253)) ([6b329f1](https://github.com/a-thomas-22/blob-indexer-api/commit/6b329f12bdf31a671d0d5781053b37e4317459b2))
+* bump github.com/ethereum/go-ethereum from 1.17.3 to 1.17.4 ([#269](https://github.com/a-thomas-22/blob-indexer-api/issues/269)) ([5cec9ee](https://github.com/a-thomas-22/blob-indexer-api/commit/5cec9ee52803cd1b770f48706a8f3470bd452a0f))
+* bump golang.org/x/net to v0.55.0 for CVE fixes ([#276](https://github.com/a-thomas-22/blob-indexer-api/issues/276)) ([61b0693](https://github.com/a-thomas-22/blob-indexer-api/commit/61b06935f18d8169f697e7eed0cb9b26147af23d))
+* bump golang.org/x/sync from 0.20.0 to 0.21.0 ([#252](https://github.com/a-thomas-22/blob-indexer-api/issues/252)) ([d80f9c4](https://github.com/a-thomas-22/blob-indexer-api/commit/d80f9c4e19ea505b8759c0d313d53b9b30a28748))
+
 ## [0.8.1](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.8.0...blob-indexer-api-v0.8.1) (2026-06-14)
 
 
