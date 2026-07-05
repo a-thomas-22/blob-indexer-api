@@ -138,9 +138,9 @@ func TestPoller_NoChange_NoBroadcast(t *testing.T) {
 			return nil
 		},
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			if strings.Contains(query, "confirmed = false") {
-				blobs := dest.(*[]models.Blob)
-				*blobs = []models.Blob{}
+			if query == queryPendingBlobTxHashes {
+				hashes := dest.(*[]string)
+				*hashes = []string{}
 			}
 			return nil
 		},

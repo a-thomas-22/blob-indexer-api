@@ -2,12 +2,12 @@
 --
 -- 1. blob_user_stats UPDATE/DELETE triggers become delta-based. The original
 --    triggers called blob_user_stats_refresh — a COUNT/SUM over the sender's
---    ENTIRE blob history — for every affected sender. Mempool churn fires
---    those paths nearly every slot (pending rows are UPDATEd each re-poll and
---    DELETEd on promotion inside the block-insert transaction), so for
---    high-volume rollup batchers the refresh re-scanned millions of rows per
---    block, a cost that grew without bound and serialized block ingestion.
---    Deltas make both paths O(rows touched by the statement) instead.
+--    ENTIRE blob history — for every affected sender. Migration 000002 already
+--    moved the worst offender (per-slot mempool churn) out of blobs entirely;
+--    the remaining UPDATE/DELETE paths — attribution sync UPDATEs, which touch
+--    every row of a high-volume sender at once, and reorg deletes — still paid
+--    O(sender-history) per affected sender. Deltas make both paths
+--    O(rows touched by the statement) instead.
 --
 --    Accepted approximation, self-healing on the sender's next blob and
 --    correctable by blob_user_stats_refresh (kept for reconciliation):
@@ -20,15 +20,12 @@
 --    UPDATE blobs SET user_attribution = ''), which falls back to a full
 --    refresh for that sender: keep-existing precedence could otherwise never
 --    clear a stored name. Revocations are rare, per-address statements, so the
---    O(sender-history) refresh stays off the per-block hot path (mempool
---    re-polls rewrite pending rows with their current attribution, not '').
+--    O(sender-history) refresh stays off the hot path.
 --
 -- 2. Drop redundant indexes. The blobs table carried 15 indexes, roughly half
 --    subsumed by composite/covering siblings; every one is maintained on every
---    insert plus the pending-row churn (insert as pending, delete on confirm,
---    insert as confirmed). Kept indexes cover every read path in
---    internal/api/queries.go, the chart/attribution SQL, and the indexer's
---    write/reorg paths.
+--    insert. Kept indexes cover every read path in internal/api/queries.go,
+--    the chart/attribution SQL, and the indexer's write/reorg paths.
 
 -- ---------------------------------------------------------------------------
 -- 1. Delta-based blob_user_stats maintenance
@@ -164,7 +161,7 @@ $$ LANGUAGE plpgsql;
 -- blobs. Kept: UNIQUE(chain_id, block_number, blob_index) — serves every
 -- (chain_id, block_number) predicate incl. reorg deletes and per-block chart
 -- joins; idx_blobs_chain_confirmed_block; idx_blobs_chain_txhash;
--- idx_blobs_chain_from_timestamp; idx_blobs_pending_chain_tx_hash (partial);
+-- idx_blobs_chain_from_timestamp;
 -- idx_blobs_chain_confirmed_timestamp_chart_cover — its key columns and
 -- INCLUDE set are a superset of the dropped _cover variant, so it serves the
 -- rolling-stats and chart raw scans as well as all plain
