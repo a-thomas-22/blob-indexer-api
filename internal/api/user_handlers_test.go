@@ -117,10 +117,10 @@ func TestGetTopBlobUsers_DefaultAllUsesRollup(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	if gotQuery != queryTopBlobUsersAll {
+	if gotQuery != queryTopBlobUsersAllByCount {
 		t.Fatal("expected all-window rollup query to be used")
 	}
-	wantArgs := []interface{}{42, 10, 0, "all", "count"}
+	wantArgs := []interface{}{42, 10, 0, "all"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
 	}
@@ -197,7 +197,7 @@ func TestGetTopUnattributedBlobUsers_DefaultAllUsesRollup(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	if gotQuery != queryTopUnattributedBlobUsersAll {
+	if gotQuery != queryTopUnattributedBlobUsersAllByCount {
 		t.Fatal("expected unattributed all-window rollup query to be used")
 	}
 }
@@ -212,7 +212,7 @@ func TestTopUnattributedBlobUsersQueryUsesKnownUserRowExistence(t *testing.T) {
 }
 
 func TestTopUnattributedBlobUsersAllQueryUsesKnownUserRowExistence(t *testing.T) {
-	if !strings.Contains(queryTopUnattributedBlobUsersAll, "bu.id IS NULL") {
+	if !strings.Contains(queryTopUnattributedBlobUsersAllByCount, "bu.id IS NULL") {
 		t.Fatal("expected all-window unattributed query to filter by known user row existence")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,24 +24,27 @@ import (
 
 // API holds the API dependencies
 type API struct {
-	db             DBProvider
-	networks       map[int]config.NetworkConfig
-	config         *config.Config
-	clientIPs      clientIPResolver
-	wsOriginPolicy corsPolicy
-	startTime      time.Time
-	totalRequests  int64 // accessed via sync/atomic
-	activeRequests int64 // accessed via sync/atomic
-	cacheMu        sync.RWMutex
-	statsCache     map[int]statsCacheEntry
-	topUsersCache  map[string]topUsersCacheEntry
-	aggregateGroup singleflight.Group
-	breakdownCache map[string]userBreakdownCacheEntry
-	rollingCache   map[string]rollingStatsCacheEntry
-	mempoolCache   map[int]mempoolPressureCacheEntry
-	chartCache     map[string]chartCacheEntry
-	hub            *Hub
-	poller         *Poller
+	db                DBProvider
+	networks          map[int]config.NetworkConfig
+	config            *config.Config
+	clientIPs         clientIPResolver
+	wsOriginPolicy    corsPolicy
+	startTime         time.Time
+	totalRequests     int64 // accessed via sync/atomic
+	activeRequests    int64 // accessed via sync/atomic
+	cacheMu           sync.RWMutex
+	statsCache        map[int]statsCacheEntry
+	topUsersCache     map[string]topUsersCacheEntry
+	aggregateGroup    singleflight.Group
+	breakdownCache    map[string]userBreakdownCacheEntry
+	rollingCache      map[string]rollingStatsCacheEntry
+	mempoolCache      map[int]mempoolPressureCacheEntry
+	chartCache        map[string]chartCacheEntry
+	latestBlobsCache  map[string]blobListCacheEntry
+	mempoolBlobsCache map[string]blobListCacheEntry
+	pricingCache      map[string]pricingCacheEntry
+	hub               *Hub
+	poller            *Poller
 }
 
 type statsCacheEntry struct {
@@ -70,6 +74,16 @@ type mempoolPressureCacheEntry struct {
 
 type chartCacheEntry struct {
 	response  interface{}
+	expiresAt time.Time
+}
+
+type blobListCacheEntry struct {
+	response  []BlobResponse
+	expiresAt time.Time
+}
+
+type pricingCacheEntry struct {
+	response  PricingResponse
 	expiresAt time.Time
 }
 
@@ -143,7 +157,6 @@ func newAPI(ctx context.Context, db DBProvider, cfg *config.Config) *API {
 	go hub.Run()
 
 	poller := NewPoller(db, hub, networks, cfg.WebSocket.PollInterval, cfg.WebSocket.UsersThrottleInterval)
-	go poller.Run(ctx)
 
 	// Stop hub when context is canceled.
 	go func() {
@@ -152,23 +165,72 @@ func newAPI(ctx context.Context, db DBProvider, cfg *config.Config) *API {
 	}()
 
 	api := &API{
-		db:             db,
-		networks:       networks,
-		config:         cfg,
-		clientIPs:      newClientIPResolver(cfg.Server.TrustedIPHeaders),
-		wsOriginPolicy: newCORSPolicy(cfg.CORS),
-		startTime:      time.Now(),
-		statsCache:     make(map[int]statsCacheEntry),
-		topUsersCache:  make(map[string]topUsersCacheEntry),
-		breakdownCache: make(map[string]userBreakdownCacheEntry),
-		rollingCache:   make(map[string]rollingStatsCacheEntry),
-		mempoolCache:   make(map[int]mempoolPressureCacheEntry),
-		chartCache:     make(map[string]chartCacheEntry),
-		hub:            hub,
-		poller:         poller,
+		db:                db,
+		networks:          networks,
+		config:            cfg,
+		clientIPs:         newClientIPResolver(cfg.Server.TrustedIPHeaders),
+		wsOriginPolicy:    newCORSPolicy(cfg.CORS),
+		startTime:         time.Now(),
+		statsCache:        make(map[int]statsCacheEntry),
+		topUsersCache:     make(map[string]topUsersCacheEntry),
+		breakdownCache:    make(map[string]userBreakdownCacheEntry),
+		rollingCache:      make(map[string]rollingStatsCacheEntry),
+		mempoolCache:      make(map[int]mempoolPressureCacheEntry),
+		chartCache:        make(map[string]chartCacheEntry),
+		latestBlobsCache:  make(map[string]blobListCacheEntry),
+		mempoolBlobsCache: make(map[string]blobListCacheEntry),
+		pricingCache:      make(map[string]pricingCacheEntry),
+		hub:               hub,
+		poller:            poller,
 	}
 
+	// Wire the poller to the response caches before its goroutine starts, so
+	// cache entries are dropped the moment a new block or mempool change is
+	// detected — ahead of the WebSocket broadcast that triggers refetches.
+	poller.invalidator = api
+	go poller.Run(ctx)
+
 	return api
+}
+
+// invalidateBlockCaches drops cached responses derived from confirmed-block
+// data for one network so the refetch herd following a new_block broadcast is
+// served the new block instead of a pre-block entry aging out its TTL. Stats
+// are included: they change with every block and are also rebroadcast over the
+// WebSocket, but REST readers should converge on the same tick.
+func (a *API) invalidateBlockCaches(chainID int) {
+	chain := strconv.Itoa(chainID)
+	latestPrefix := "latest_blobs:" + chain + ":"
+	pricingPrefix := "pricing:" + chain + ":"
+
+	a.cacheMu.Lock()
+	defer a.cacheMu.Unlock()
+	for key := range a.latestBlobsCache {
+		if strings.HasPrefix(key, latestPrefix) {
+			delete(a.latestBlobsCache, key)
+		}
+	}
+	for key := range a.pricingCache {
+		if strings.HasPrefix(key, pricingPrefix) {
+			delete(a.pricingCache, key)
+		}
+	}
+	delete(a.statsCache, chainID)
+}
+
+// invalidateMempoolCaches drops cached mempool responses for one network when
+// the poller observes pending transactions entering or leaving the mempool.
+func (a *API) invalidateMempoolCaches(chainID int) {
+	prefix := "mempool_blobs:" + strconv.Itoa(chainID) + ":"
+
+	a.cacheMu.Lock()
+	defer a.cacheMu.Unlock()
+	for key := range a.mempoolBlobsCache {
+		if strings.HasPrefix(key, prefix) {
+			delete(a.mempoolBlobsCache, key)
+		}
+	}
+	delete(a.mempoolCache, chainID)
 }
 
 func (a *API) newRouter(opts routerOptions) http.Handler {
@@ -244,9 +306,14 @@ func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) 
 	// WebSocket endpoint — no request timeout so connections persist.
 	r.Get("/ws", a.HandleWebSocket)
 
-	// REST endpoints — with request timeout.
+	// REST endpoints — with request timeout. Responses are compressed on the
+	// origin-to-edge leg (Cloudflare re-compresses toward browsers on its own)
+	// and carry weak ETags so pollers revalidate instead of re-downloading;
+	// ETag runs inside Compress so it hashes the uncompressed body.
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Timeout(60 * time.Second))
+		r.Use(middleware.Compress(5))
+		r.Use(ETagMiddleware)
 
 		// Health probes. healthz is DB-independent (liveness); readyz pings the
 		// database (readiness). Per-IP rate limiting keys on the caller, so the
@@ -313,11 +380,17 @@ func (a *API) mountDevRoutes(r chi.Router) {
 }
 
 func mountLegacyAPIRedirects(r chi.Router) {
-	// Backward compatibility: redirect /api/* to /api/v1/* with 301 Moved Permanently
+	// Backward compatibility: redirect /api/* to /api/v1/* with 301 Moved Permanently.
+	// The redirects are deterministic and side-effect-free, so let browsers and
+	// the edge cache them for a day instead of paying two origin round-trips
+	// per legacy poll.
+	const redirectCacheControl = "public, max-age=86400"
+
 	r.HandleFunc("/api/*", func(w http.ResponseWriter, r *http.Request) {
 		// Strip the "/api" prefix and prepend "/api/v1"
 		location := (&url.URL{Path: "/api/v1" + r.URL.Path[len("/api"):], RawQuery: r.URL.RawQuery}).String()
 		w.Header().Set("Location", location)
+		w.Header().Set("Cache-Control", redirectCacheControl)
 		w.WriteHeader(http.StatusMovedPermanently)
 	})
 
@@ -325,6 +398,7 @@ func mountLegacyAPIRedirects(r chi.Router) {
 	r.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
 		location := (&url.URL{Path: "/api/v1", RawQuery: r.URL.RawQuery}).String()
 		w.Header().Set("Location", location)
+		w.Header().Set("Cache-Control", redirectCacheControl)
 		w.WriteHeader(http.StatusMovedPermanently)
 	})
 }
@@ -386,6 +460,7 @@ func (a *API) GetNetworks(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	setCacheControl(w, networkStatusCacheTTL, networkStatusEdgeTTL)
 	a.respondSuccess(w, networks)
 }
 
@@ -413,6 +488,7 @@ func (a *API) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 		FreshnessResponse: freshness.FreshnessResponse,
 	}
 
+	setCacheControl(w, networkStatusCacheTTL, networkStatusEdgeTTL)
 	a.respondSuccess(w, response)
 }
 
