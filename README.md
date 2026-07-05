@@ -46,8 +46,8 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 - `GET /api/v1/blob/{txHash}?network=mainnet` - Fetch a specific blob by transaction hash
 
 ### User Endpoints
-- `GET /api/v1/users?network=mainnet&limit=10` - Top blob users by blobs submitted
-- `GET /api/v1/users/unattributed?network=mainnet&limit=10` - Top unattributed blob senders by blobs submitted
+- `GET /api/v1/users?network=mainnet&limit=10&range=24h` - Top blob users by blobs submitted; `range` (`1h`, `24h`, `7d`, `30d`, `all`; default `all`) scopes counts, spend, and share percentages to a recent window and is echoed back as `meta.range`
+- `GET /api/v1/users/unattributed?network=mainnet&limit=10` - Top unattributed blob senders by blobs submitted (same `range` support)
 
 ### Stats Endpoints
 - `GET /api/v1/stats?network=mainnet` - Historical blob cost trends, base fee history
@@ -59,8 +59,11 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 - `GET /api/v1/ws?network=mainnet` - Subscribe to live blob, stats, and user updates
 
 WebSocket clients receive raw JSON text frames with a top-level `type` field
-and a type-specific `data` payload. The committed AsyncAPI contract is in
-`docs/asyncapi.yaml`, and the API serves it at `GET /asyncapi.yaml`.
+and a type-specific `data` payload. `users_update` events also carry a
+top-level `range` field naming the aggregation window they cover (currently
+always `all`), so clients viewing a different REST `range` can ignore them.
+The committed AsyncAPI contract is in `docs/asyncapi.yaml`, and the API serves
+it at `GET /asyncapi.yaml`.
 
 Clients may send an optional subscription filter after connecting:
 

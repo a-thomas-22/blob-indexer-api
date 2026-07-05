@@ -267,12 +267,21 @@ components:
       type: object
       required:
         - type
+        - range
         - data
       properties:
         type:
           type: string
           enum:
             - users_update
+        range:
+          type: string
+          description: |
+            Aggregation window the payload covers, matching the REST `range`
+            values on GET /users. Currently always `all`; clients viewing a
+            different range should drop events whose range does not match it.
+          enum:
+            - all
         data:
           type: array
           description: Top 10 users for all time, sorted by blob count.
