@@ -846,12 +846,13 @@ const (
 		LIMIT $3
 	`
 
-	// queryPendingBlobTxHashes lists the tx hashes of every pending blob for a
-	// network — an index-only scan of the partial pending index
+	// queryPendingBlobTxHashes lists the distinct tx hashes of every pending
+	// blob for a network — an index-only scan of the partial pending index
 	// (idx_blobs_pending_chain_tx_hash) — so the WebSocket poller can diff the
-	// mempool each tick without fetching full rows. The block_number sentinel
-	// predicate matches the partial index's WHERE clause.
-	queryPendingBlobTxHashes = "SELECT tx_hash FROM blobs WHERE chain_id = $1 AND block_number < 0"
+	// mempool each tick without fetching full rows. DISTINCT collapses
+	// multi-blob transactions (one pending row per blob) to one hash. The
+	// block_number sentinel predicate matches the partial index's WHERE clause.
+	queryPendingBlobTxHashes = "SELECT DISTINCT tx_hash FROM blobs WHERE chain_id = $1 AND block_number < 0"
 
 	// queryPendingBlobsByTxHashes fetches full pending rows for the (typically
 	// zero or few) tx hashes that are new since the poller's previous tick.

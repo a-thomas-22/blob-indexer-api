@@ -54,8 +54,13 @@ const confirmedBlobCacheTTL = 60 * time.Second
 
 // Edge (shared-cache) TTLs, sent as s-maxage so Cloudflare can serve the
 // blob-flow polling herd from cache while browsers revalidate sooner.
-// Worst-case client staleness stacks in-process TTL + s-maxage + max-age, so
-// the block-cadence endpoints keep every term under one ~12s block.
+// Staleness is additive across layers: the worst case is the SUM of
+// in-process TTL + s-maxage + max-age, not the largest term. The hot
+// block-cadence endpoints (latest/mempool/pricing) keep each term at or
+// under one ~12s block, bounding their stacked worst case to a few blocks —
+// and poller-driven invalidation plus ETag revalidation keep the typical
+// case well below that. Slower-moving aggregates (stats/users/charts)
+// deliberately trade more staleness for edge hit ratio.
 const (
 	latestBlobsEdgeTTL     = 5 * time.Second
 	mempoolBlobsEdgeTTL    = 5 * time.Second
