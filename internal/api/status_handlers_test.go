@@ -35,13 +35,21 @@ func TestGetIndexerStatus_IncludesFreshness(t *testing.T) {
 	lastBlobTime := time.Date(2026, 5, 24, 10, 0, 0, 0, time.UTC)
 	indexedAt := lastBlobTime.Add(5 * time.Second)
 	backfillUpdatedAt := indexedAt.Add(3 * time.Second)
+	earliestIndexed, latestIndexed := int64(100), int64(300)
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			if query != queryNetworkLastIndexedTime {
+			switch query {
+			case queryNetworkLastIndexedTime:
+				timestamp := dest.(*time.Time)
+				*timestamp = lastBlobTime
+			case queryIndexedBlockCoverage:
+				setStructResult(dest, indexedBlockCoverage{
+					EarliestIndexedBlock: &earliestIndexed,
+					LatestIndexedBlock:   &latestIndexed,
+				})
+			default:
 				t.Fatalf("unexpected status query: %s", query)
 			}
-			timestamp := dest.(*time.Time)
-			*timestamp = lastBlobTime
 			return nil
 		},
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
@@ -108,6 +116,60 @@ func TestGetIndexerStatus_IncludesFreshness(t *testing.T) {
 	}
 	if resp.Data.Backfill.UpdatedAt == nil || !resp.Data.Backfill.UpdatedAt.Equal(backfillUpdatedAt) {
 		t.Fatalf("expected backfill updated at %s, got %v", backfillUpdatedAt, resp.Data.Backfill.UpdatedAt)
+	}
+	if resp.Data.EarliestIndexedBlock == nil || *resp.Data.EarliestIndexedBlock != earliestIndexed {
+		t.Fatalf("expected earliest indexed block %d, got %v", earliestIndexed, resp.Data.EarliestIndexedBlock)
+	}
+	if resp.Data.LatestIndexedBlock == nil || *resp.Data.LatestIndexedBlock != latestIndexed {
+		t.Fatalf("expected latest indexed block %d, got %v", latestIndexed, resp.Data.LatestIndexedBlock)
+	}
+}
+
+func TestGetIndexerStatus_CoverageOmittedWhenEmpty(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			// Coverage dest is left untouched: MIN/MAX over zero indexed
+			// blocks scan as NULLs, so both bounds stay nil.
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetIndexerStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "earliest_indexed_block") || strings.Contains(body, "latest_indexed_block") {
+		t.Fatalf("expected coverage fields omitted for empty coverage, got: %s", body)
+	}
+}
+
+func TestGetIndexerStatus_CoverageQueryErrorDegrades(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if query == queryIndexedBlockCoverage {
+				return fmt.Errorf("coverage query failed")
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetIndexerStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 when coverage query fails, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"success":true`) {
+		t.Fatalf("expected success:true in response, got: %s", body)
+	}
+	if strings.Contains(body, "earliest_indexed_block") || strings.Contains(body, "latest_indexed_block") {
+		t.Fatalf("expected coverage fields omitted on query error, got: %s", body)
 	}
 }
 
