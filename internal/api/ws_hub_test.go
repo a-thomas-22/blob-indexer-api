@@ -435,3 +435,79 @@ func TestHub_BroadcastEvent_MultipleClients(t *testing.T) {
 		}
 	}
 }
+
+func TestHub_SendEventToClient_Delivered(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	client := &Client{
+		hub:         hub,
+		send:        make(chan []byte, 4),
+		networkName: "sepolia",
+	}
+	hub.register <- client
+
+	hub.SendEventToClient(client, WSEvent{Type: EventBlockSnapshot, Data: BlockSnapshotData{Blocks: []NewBlockData{{BlockNumber: 42}}}})
+
+	select {
+	case msg := <-client.send:
+		var e WSEvent
+		if err := json.Unmarshal(msg, &e); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if e.Type != EventBlockSnapshot {
+			t.Fatalf("got type %q, want %q", e.Type, EventBlockSnapshot)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("direct message not delivered")
+	}
+}
+
+func TestHub_SendEventToClient_UnregisteredIgnored(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	// Never registered — the hub must not touch its channel.
+	client := &Client{
+		hub:         hub,
+		send:        make(chan []byte, 4),
+		networkName: "sepolia",
+	}
+
+	hub.SendEventToClient(client, WSEvent{Type: EventBlockSnapshot})
+	time.Sleep(50 * time.Millisecond)
+
+	select {
+	case <-client.send:
+		t.Fatal("unregistered client must not receive direct messages")
+	default:
+	}
+}
+
+func TestHub_SendEventToClient_SlowClientDropped(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	client := &Client{
+		hub:         hub,
+		send:        make(chan []byte), // zero capacity: any send overflows
+		networkName: "sepolia",
+	}
+	hub.register <- client
+	for hub.ClientCount() != 1 {
+		time.Sleep(time.Millisecond)
+	}
+
+	hub.SendEventToClient(client, WSEvent{Type: EventBlockSnapshot})
+
+	deadline := time.Now().Add(time.Second)
+	for hub.ClientCount() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("slow client was not dropped on direct send overflow")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

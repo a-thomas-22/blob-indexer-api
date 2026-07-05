@@ -22,6 +22,7 @@ type Hub struct {
 	broadcast   chan broadcastMessage
 	register    chan *Client
 	unregister  chan *Client
+	direct      chan directMessage
 	done        chan struct{}
 	stopOnce    sync.Once
 	clientCount atomic.Int64
@@ -39,6 +40,14 @@ type broadcastMessage struct {
 	data        []byte // JSON-encoded WSEvent
 }
 
+// directMessage carries a pre-marshaled event addressed to a single client.
+// Routing it through the Run loop keeps client.send single-owner: only the
+// hub ever writes to or closes a registered client's channel.
+type directMessage struct {
+	client *Client
+	data   []byte // JSON-encoded WSEvent
+}
+
 // NewHub creates a new Hub.
 func NewHub() *Hub {
 	return &Hub{
@@ -46,6 +55,7 @@ func NewHub() *Hub {
 		broadcast:  make(chan broadcastMessage, 256),
 		register:   make(chan *Client, 16),
 		unregister: make(chan *Client, 16),
+		direct:     make(chan directMessage, 16),
 		done:       make(chan struct{}),
 		perIP:      make(map[string]int),
 	}
@@ -136,6 +146,20 @@ func (h *Hub) Run() {
 				}
 			}
 
+		case msg := <-h.direct:
+			// Only deliver to clients that are still registered; the channel
+			// of an unregistered client is closed.
+			if _, ok := h.clients[msg.client]; !ok {
+				continue
+			}
+			select {
+			case msg.client.send <- msg.data:
+			default:
+				h.removeClient(msg.client)
+				logger.Warn("Dropping slow WebSocket client on direct send",
+					zap.String("network", msg.client.networkName))
+			}
+
 		case <-h.done:
 			// Best-effort drain of queued admissions/removals so a client that
 			// was admitted (slot reserved) and sent to register/unregister but
@@ -181,6 +205,21 @@ func (h *Hub) BroadcastEvent(networkName string, event WSEvent) {
 		logger.Warn("WebSocket broadcast channel full, dropping event",
 			zap.String("type", string(event.Type)),
 			zap.String("network", networkName))
+	}
+}
+
+// SendEventToClient marshals an event and delivers it to one client through
+// the Run loop. It blocks briefly if the direct queue is full and gives up
+// when the hub shuts down.
+func (h *Hub) SendEventToClient(client *Client, event WSEvent) {
+	data, err := json.Marshal(event)
+	if err != nil {
+		logger.Error("Failed to marshal WebSocket event", zap.Error(err))
+		return
+	}
+	select {
+	case h.direct <- directMessage{client: client, data: data}:
+	case <-h.done:
 	}
 }
 

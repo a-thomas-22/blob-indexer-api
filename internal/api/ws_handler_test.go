@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
+	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
 
@@ -374,4 +375,115 @@ func TestHandleWebSocket_ViaFullRouter(t *testing.T) {
 		resp.Body.Close()
 	}
 	conn.Close()
+}
+
+func snapshotTestDB() *mockDB {
+	return &mockDB{
+		selectFn: func(_ context.Context, dest interface{}, query string, _ ...interface{}) error {
+			switch query {
+			case queryBlockMetrics:
+				*dest.(*[]models.BlockMetrics) = []models.BlockMetrics{
+					{ChainID: 11155111, BlockNumber: 102, BlockTimestamp: time.Unix(1700000024, 0).UTC(), BlobCount: 1, BlobBaseFee: "1000", UtilizationRatio: "0.5", BlobParamsTarget: 6, BlobParamsMax: 9},
+					{ChainID: 11155111, BlockNumber: 101, BlockTimestamp: time.Unix(1700000012, 0).UTC(), BlobCount: 0, BlobBaseFee: "900", UtilizationRatio: "0", BlobParamsTarget: 6, BlobParamsMax: 9},
+					{ChainID: 11155111, BlockNumber: 100, BlockTimestamp: time.Unix(1700000000, 0).UTC(), BlobCount: 2, BlobBaseFee: "800", UtilizationRatio: "1", BlobParamsTarget: 6, BlobParamsMax: 9},
+				}
+			case queryBlobsByBlockNumbers:
+				*dest.(*[]models.Blob) = []models.Blob{
+					{ChainID: 11155111, BlockNumber: 102, TxHash: "0xccc", BaseFeePerBlobGas: "1000", TipPerBlobGas: "0", TotalCostWei: "0"},
+					{ChainID: 11155111, BlockNumber: 100, TxHash: "0xaaa", BaseFeePerBlobGas: "800", TipPerBlobGas: "0", TotalCostWei: "0"},
+					{ChainID: 11155111, BlockNumber: 100, TxHash: "0xbbb", BaseFeePerBlobGas: "800", TipPerBlobGas: "0", TotalCostWei: "0"},
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func TestBuildBlockSnapshot(t *testing.T) {
+	api := newTestWSAPI(t)
+	api.db = snapshotTestDB()
+
+	network := config.NetworkConfig{Name: "sepolia", ChainID: 11155111}
+	snapshot, err := api.buildBlockSnapshot(context.Background(), network)
+	if err != nil {
+		t.Fatalf("buildBlockSnapshot: %v", err)
+	}
+
+	if len(snapshot.Blocks) != 3 {
+		t.Fatalf("expected 3 blocks, got %d", len(snapshot.Blocks))
+	}
+	// Newest first, straight from the metrics ordering.
+	for i, want := range []int64{102, 101, 100} {
+		if snapshot.Blocks[i].BlockNumber != want {
+			t.Fatalf("block %d: got %d, want %d", i, snapshot.Blocks[i].BlockNumber, want)
+		}
+		if snapshot.Blocks[i].Pricing == nil {
+			t.Fatalf("block %d missing pricing", want)
+		}
+	}
+	if got := len(snapshot.Blocks[0].Blobs); got != 1 {
+		t.Errorf("block 102: got %d blobs, want 1", got)
+	}
+	if snapshot.Blocks[1].Blobs == nil || len(snapshot.Blocks[1].Blobs) != 0 {
+		t.Errorf("zero-blob block must carry an empty (non-nil) blob list, got %#v", snapshot.Blocks[1].Blobs)
+	}
+	if got := len(snapshot.Blocks[2].Blobs); got != 2 {
+		t.Errorf("block 100: got %d blobs, want 2", got)
+	}
+}
+
+func TestBuildBlockSnapshot_Empty(t *testing.T) {
+	api := newTestWSAPI(t)
+	api.db = &mockDB{}
+
+	snapshot, err := api.buildBlockSnapshot(context.Background(), config.NetworkConfig{Name: "sepolia", ChainID: 11155111})
+	if err != nil {
+		t.Fatalf("buildBlockSnapshot: %v", err)
+	}
+	if snapshot.Blocks == nil || len(snapshot.Blocks) != 0 {
+		t.Fatalf("expected empty non-nil block list, got %#v", snapshot.Blocks)
+	}
+}
+
+func TestHandleWebSocket_SnapshotOnConnect(t *testing.T) {
+	api := newTestWSAPI(t)
+	api.db = snapshotTestDB()
+
+	r := chi.NewRouter()
+	r.Get("/ws", api.HandleWebSocket)
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws?network=sepolia"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event WSEvent
+	if err := json.Unmarshal(msg, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != EventBlockSnapshot {
+		t.Fatalf("first message: got type %q, want %q", event.Type, EventBlockSnapshot)
+	}
+	raw, _ := json.Marshal(event.Data)
+	var snapshot BlockSnapshotData
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Blocks) != 3 || snapshot.Blocks[0].BlockNumber != 102 {
+		t.Fatalf("unexpected snapshot payload: %s", raw)
+	}
 }

@@ -975,12 +975,38 @@ const (
 				)
 		`
 
-	// queryNewBlobsSinceBlock retrieves confirmed blobs after a given block number.
-	queryNewBlobsSinceBlock = `
-		SELECT ` + blobSelectColumns + ` FROM blobs
+	// queryMaxBlockMetricsNumber retrieves the newest block_metrics block for a
+	// network — the WebSocket broadcast baseline at startup.
+	queryMaxBlockMetricsNumber = `
+		SELECT COALESCE(MAX(block_number), 0) FROM block_metrics WHERE chain_id = $1
+	`
+
+	// queryBlockMetricsNumbersSince lists block numbers with a block_metrics row
+	// after a given block. The WebSocket poller's catch-up scan uses it to find
+	// committed blocks whose NOTIFY was missed (listener down or reconnecting),
+	// including late out-of-order commits behind the broadcast head.
+	queryBlockMetricsNumbersSince = `
+		SELECT block_number FROM block_metrics
 		WHERE chain_id = $1 AND block_number > $2
-		ORDER BY block_number ASC, blob_index ASC
+		ORDER BY block_number ASC
 		LIMIT $3
+	`
+
+	// queryBlobsByBlockNumber retrieves the confirmed blobs of a single block
+	// for a new_block WebSocket broadcast.
+	queryBlobsByBlockNumber = `
+		SELECT ` + blobSelectColumns + ` FROM blobs
+		WHERE chain_id = $1 AND block_number = $2
+		ORDER BY blob_index ASC
+	`
+
+	// queryBlobsByBlockNumbers retrieves confirmed blobs for a set of blocks —
+	// used to assemble the block_snapshot sent to newly connected WebSocket
+	// clients.
+	queryBlobsByBlockNumbers = `
+		SELECT ` + blobSelectColumns + ` FROM blobs
+		WHERE chain_id = $1 AND block_number = ANY($2::bigint[])
+		ORDER BY block_number DESC, blob_index ASC
 	`
 
 	// queryPendingBlobTxHashes lists the distinct tx hashes of every pending

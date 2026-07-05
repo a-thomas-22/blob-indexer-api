@@ -461,6 +461,61 @@ func (i *Indexer) resubscribeToPendingTransactions() (*ethereum.PendingTxSubscri
 	return i.ethClient.ResubscribeToPendingTransactions(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
 }
 
+func (i *Indexer) resubscribeToNewBlocks() (*ethereum.BlockSubscription, error) {
+	return i.ethClient.ResubscribeToNewHeads(i.ctx, fmt.Sprintf("indexer-%s", i.network.Name))
+}
+
+// resubscribeToNewBlocksWithBackoff retries the new-heads websocket resubscribe
+// with the same retry budget as the pending-transaction path. It returns the
+// live subscription on success, or the last error once the attempt budget is
+// exhausted (signaling the caller to fall back to batch polling).
+func (i *Indexer) resubscribeToNewBlocksWithBackoff() (*ethereum.BlockSubscription, error) {
+	var lastErr error
+	backoff := i.pendingTxResubBaseBackoff
+	if backoff <= 0 {
+		backoff = pendingTxResubscribeBaseBackoff
+	}
+	for attempt := 1; attempt <= pendingTxResubscribeMaxAttempts; attempt++ {
+		if i.ctx.Err() != nil {
+			return nil, i.ctx.Err()
+		}
+
+		sub, err := i.resubscribeToNewBlocks()
+		if err == nil {
+			if attempt > 1 {
+				logger.Info("Recovered new-heads subscription after retry",
+					zap.String("event", "new_heads_resubscribe_recovered"),
+					zap.String("network", i.network.Name),
+					zap.Int("attempt", attempt))
+			}
+			return sub, nil
+		}
+		lastErr = err
+
+		logger.Warn("New-heads resubscribe attempt failed",
+			zap.String("event", "new_heads_resubscribe_retry"),
+			zap.String("network", i.network.Name),
+			zap.Int("attempt", attempt),
+			zap.Int("max_attempts", pendingTxResubscribeMaxAttempts),
+			zap.Error(err))
+
+		if attempt == pendingTxResubscribeMaxAttempts {
+			break
+		}
+
+		select {
+		case <-i.ctx.Done():
+			return nil, i.ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > pendingTxResubscribeMaxBackoff {
+			backoff = pendingTxResubscribeMaxBackoff
+		}
+	}
+	return nil, fmt.Errorf("new-heads resubscribe exhausted %d attempts: %w", pendingTxResubscribeMaxAttempts, lastErr)
+}
+
 // resubscribeToPendingTransactionsWithBackoff retries the pending-transaction
 // websocket resubscribe up to pendingTxResubscribeMaxAttempts times with
 // exponential backoff. It returns the live subscription on success, or the last
@@ -955,8 +1010,10 @@ func (i *Indexer) handleNewBlockSubscription() {
 				zap.String("network", i.network.Name),
 				zap.Error(err))
 
-			// Try to resubscribe
-			blockSub, err := i.subscribeToNewBlocks()
+			// Try to resubscribe with a fresh subscription — SubscribeToNewHeads
+			// would hand back the cached dead one and leave head-following
+			// permanently degraded to batch polling.
+			blockSub, err := i.resubscribeToNewBlocksWithBackoff()
 			if err != nil {
 				logger.Error("Failed to resubscribe to new blocks, falling back to polling",
 					zap.String("network", i.network.Name),

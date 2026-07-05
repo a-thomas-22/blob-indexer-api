@@ -1,14 +1,24 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
 	"github.com/gorilla/websocket"
+	"github.com/lib/pq"
 	"go.uber.org/zap"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
+	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
+
+// blockSnapshotDepth is how many recent blocks a newly connected client
+// receives in its block_snapshot event. It covers reconnect gaps of up to
+// ~2 minutes of blocks; longer gaps are healed by the client refetching its
+// REST baselines on reconnect.
+const blockSnapshotDepth = 10
 
 // wsCheckOrigin returns a websocket.Upgrader CheckOrigin func that enforces the
 // same allowed-origins policy as the REST CORS layer. Requests without an
@@ -89,6 +99,11 @@ func (a *API) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	case a.hub.register <- client:
 		go client.writePump()
 		go client.readPump()
+		// Send the recent-blocks snapshot after registration so any block
+		// broadcast while the snapshot is being built is also delivered —
+		// the client deduplicates by block number, so overlap is harmless
+		// while a gap would not be.
+		go a.sendBlockSnapshot(client, network)
 	case <-a.hub.done:
 		// Hub is shutting down: release the slot and drop the connection. The
 		// client was never registered, so the hub will not release it for us.
@@ -97,4 +112,68 @@ func (a *API) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			zap.String("network", network.Name))
 		_ = conn.Close()
 	}
+}
+
+// buildBlockSnapshot assembles the most recent blocks (block_metrics plus
+// their blobs) for one network, newest first.
+func (a *API) buildBlockSnapshot(ctx context.Context, network config.NetworkConfig) (BlockSnapshotData, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, pollerQueryTimeout)
+	defer cancel()
+
+	snapshot := BlockSnapshotData{Blocks: []NewBlockData{}}
+
+	var metrics []models.BlockMetrics
+	if err := a.db.SelectContext(queryCtx, &metrics, queryBlockMetrics, network.ChainID, blockSnapshotDepth); err != nil {
+		return snapshot, err
+	}
+	if len(metrics) == 0 {
+		return snapshot, nil
+	}
+
+	blockNumbers := make([]int64, len(metrics))
+	for i, metric := range metrics {
+		blockNumbers[i] = metric.BlockNumber
+	}
+
+	var blobs []models.Blob
+	if err := a.db.SelectContext(queryCtx, &blobs, queryBlobsByBlockNumbers, network.ChainID, pq.Array(blockNumbers)); err != nil {
+		return snapshot, err
+	}
+	blobsByBlock := make(map[int64][]BlobResponse, len(metrics))
+	for _, blob := range blobs {
+		blobsByBlock[blob.BlockNumber] = append(blobsByBlock[blob.BlockNumber], toBlobResponse(blob, network.Name))
+	}
+
+	for _, metric := range metrics {
+		pricing := toBlockPricingResponse(metric)
+		brs := blobsByBlock[metric.BlockNumber]
+		if brs == nil {
+			brs = []BlobResponse{}
+		}
+		snapshot.Blocks = append(snapshot.Blocks, NewBlockData{
+			BlockNumber: metric.BlockNumber,
+			BlobCount:   metric.BlobCount,
+			Timestamp:   metric.BlockTimestamp,
+			Blobs:       brs,
+			Pricing:     &pricing,
+		})
+	}
+	return snapshot, nil
+}
+
+// sendBlockSnapshot builds and delivers the block_snapshot event for a newly
+// registered client. Failures are logged and dropped: the client still
+// receives live events, and its reconnect-refetch covers the missing history.
+func (a *API) sendBlockSnapshot(client *Client, network config.NetworkConfig) {
+	if a.db == nil {
+		return
+	}
+	snapshot, err := a.buildBlockSnapshot(context.Background(), network)
+	if err != nil {
+		logger.Warn("Failed to build WebSocket block snapshot",
+			zap.String("network", network.Name),
+			zap.Error(err))
+		return
+	}
+	a.hub.SendEventToClient(client, WSEvent{Type: EventBlockSnapshot, Data: snapshot})
 }

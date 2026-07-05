@@ -178,6 +178,15 @@ func (c *Client) ResubscribeToPendingTransactions(ctx context.Context, id string
 	return c.SubscribeToPendingTransactions(ctx, id)
 }
 
+// ResubscribeToNewHeads replaces any cached new-heads subscription for id with
+// a fresh websocket subscription. SubscribeToNewHeads returns the cached entry
+// when one exists — even after its upstream connection died — so error-path
+// recovery must evict the entry first or head-following silently stays dead.
+func (c *Client) ResubscribeToNewHeads(ctx context.Context, id string) (*BlockSubscription, error) {
+	c.UnsubscribeFromNewHeads(id)
+	return c.SubscribeToNewHeads(ctx, id)
+}
+
 // UnsubscribeFromNewHeads unsubscribes from new block headers
 func (c *Client) UnsubscribeFromNewHeads(id string) {
 	c.mu.Lock()
