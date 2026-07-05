@@ -217,6 +217,117 @@ func TestGetBlockByNumber_InvalidNumber(t *testing.T) {
 	}
 }
 
+// blockTestBlob returns a confirmed blob row for torn-read test scenarios.
+func blockTestBlob(blockNumber int64, blobIndex int) models.Blob {
+	return models.Blob{
+		ChainID:           42,
+		BlockNumber:       blockNumber,
+		BlobIndex:         blobIndex,
+		TxHash:            validTestTxHash,
+		FromAddress:       validTestAddress,
+		BlobSizeBytes:     131072,
+		BaseFeePerBlobGas: "1000000",
+		TipPerBlobGas:     "500",
+		TotalCostWei:      "131072000000",
+		Timestamp:         time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		Confirmed:         true,
+	}
+}
+
+func TestGetBlockByNumber_TornReadResolvesOnRetry(t *testing.T) {
+	// First read pair straddles a rewrite (blob_count=2, zero blob rows); the
+	// retry sees the settled state and the response is cached as usual.
+	selectCalls := 0
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setStructResult(dest, testBlockMetrics(100, 2))
+			return nil
+		},
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			selectCalls++
+			if selectCalls == 1 {
+				return nil // torn: zero rows against blob_count=2
+			}
+			setSliceResult(dest, []models.Blob{blockTestBlob(100, 0), blockTestBlob(100, 1)})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	w := httptest.NewRecorder()
+	a.GetBlockByNumber(w, newBlockRequest("100"))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if selectCalls != 2 {
+		t.Errorf("expected 2 blob reads (torn then settled), got %d", selectCalls)
+	}
+	var resp struct {
+		Data NewBlockData `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Data.Blobs) != 2 || resp.Data.BlobCount != 2 {
+		t.Errorf("expected settled 2-blob payload, got %+v", resp.Data)
+	}
+	if got := w.Header().Get("Cache-Control"); got == "" {
+		t.Error("expected consistent retry result to be cacheable")
+	}
+}
+
+func TestGetBlockByNumber_PersistentTornReadServedUncached(t *testing.T) {
+	// If both read pairs are torn, the payload is still served (transiently
+	// wrong at worst) but must not carry cache headers — the edge would pin a
+	// block state that never existed.
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setStructResult(dest, testBlockMetrics(100, 2))
+			return nil
+		},
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setSliceResult(dest, []models.Blob{blockTestBlob(100, 0)})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	w := httptest.NewRecorder()
+	a.GetBlockByNumber(w, newBlockRequest("100"))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "" {
+		t.Errorf("expected no Cache-Control on torn payload, got %q", got)
+	}
+}
+
+func TestGetBlockByNumber_BlockVanishesOnRetry(t *testing.T) {
+	// A reorg deletes the block between the torn first pair and the retry: the
+	// retry's metrics read hits ErrNoRows and the request resolves to 404.
+	getCalls := 0
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			getCalls++
+			if getCalls == 1 {
+				setStructResult(dest, testBlockMetrics(100, 2))
+				return nil
+			}
+			return sql.ErrNoRows
+		},
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return nil // zero rows: torn against blob_count=2
+		},
+	}
+	a := newTestAPIWithDB(db)
+	w := httptest.NewRecorder()
+	a.GetBlockByNumber(w, newBlockRequest("100"))
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
 func TestGetBlockByNumber_MetricsDBError(t *testing.T) {
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {

@@ -43,28 +43,45 @@ func (a *API) GetBlockByNumber(w http.ResponseWriter, r *http.Request) {
 		zap.String("network", network.Name),
 		zap.Int64("block", blockNumber))
 
-	var metric models.BlockMetrics
-	if err := a.db.GetContext(r.Context(), &metric, queryBlockMetricsForBlock, network.ChainID, blockNumber); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			a.respondError(w, http.StatusNotFound, "Block not found")
+	// The indexer commits a block's block_metrics row and its blobs rows in one
+	// transaction, and reorg cleanup deletes both transactionally, so every
+	// committed snapshot satisfies blob_count == count of blobs rows. The two
+	// point reads below each get their own snapshot, though: a reorg rewrite
+	// committing between them would yield a torn pair (e.g. blob_count=2 with
+	// zero blobs). A count mismatch therefore proves the reads straddled a
+	// rewrite — retry once to land on the settled state, and if the tear
+	// somehow persists, serve the response uncached so the edge never pins a
+	// payload that never existed.
+	var (
+		metric     models.BlockMetrics
+		blobs      []models.Blob
+		consistent bool
+	)
+	for attempt := 0; attempt < 2 && !consistent; attempt++ {
+		if err := a.db.GetContext(r.Context(), &metric, queryBlockMetricsForBlock, network.ChainID, blockNumber); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				a.respondError(w, http.StatusNotFound, "Block not found")
+				return
+			}
+			logger.Error("Failed to get block metrics",
+				zap.String("network", network.Name),
+				zap.Int64("block", blockNumber),
+				zap.Error(err))
+			a.respondError(w, http.StatusInternalServerError, "Failed to get block")
 			return
 		}
-		logger.Error("Failed to get block metrics",
-			zap.String("network", network.Name),
-			zap.Int64("block", blockNumber),
-			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get block")
-		return
-	}
 
-	var blobs []models.Blob
-	if err := a.db.SelectContext(r.Context(), &blobs, queryBlobsByBlockNumber, network.ChainID, blockNumber); err != nil {
-		logger.Error("Failed to get block blobs",
-			zap.String("network", network.Name),
-			zap.Int64("block", blockNumber),
-			zap.Error(err))
-		a.respondError(w, http.StatusInternalServerError, "Failed to get block")
-		return
+		blobs = nil
+		if err := a.db.SelectContext(r.Context(), &blobs, queryBlobsByBlockNumber, network.ChainID, blockNumber); err != nil {
+			logger.Error("Failed to get block blobs",
+				zap.String("network", network.Name),
+				zap.Int64("block", blockNumber),
+				zap.Error(err))
+			a.respondError(w, http.StatusInternalServerError, "Failed to get block")
+			return
+		}
+
+		consistent = len(blobs) == metric.BlobCount
 	}
 
 	brs := make([]BlobResponse, 0, len(blobs))
@@ -75,7 +92,15 @@ func (a *API) GetBlockByNumber(w http.ResponseWriter, r *http.Request) {
 
 	// An indexed block at a height is effectively immutable, so the response is
 	// safely cacheable — same reorg self-heal bound as a confirmed blob.
-	setCacheControl(w, indexedBlockCacheTTL, indexedBlockEdgeTTL)
+	if consistent {
+		setCacheControl(w, indexedBlockCacheTTL, indexedBlockEdgeTTL)
+	} else {
+		logger.Warn("Serving torn block read uncached",
+			zap.String("network", network.Name),
+			zap.Int64("block", blockNumber),
+			zap.Int("blob_count", metric.BlobCount),
+			zap.Int("blob_rows", len(blobs)))
+	}
 	a.respondSuccess(w, NewBlockData{
 		BlockNumber: metric.BlockNumber,
 		BlobCount:   metric.BlobCount,
