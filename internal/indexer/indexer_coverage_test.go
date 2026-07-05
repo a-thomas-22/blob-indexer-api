@@ -1219,7 +1219,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 		mock.ExpectExec("INSERT INTO mempool_blobs").
 			WithArgs(blob.ChainID, blob.TxHash, 0, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
@@ -1252,7 +1252,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 			upsertArgs = append(upsertArgs,
 				blob.ChainID, blob.TxHash, offset, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed)
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash)
 		}
 		mock.ExpectExec("INSERT INTO mempool_blobs").
 			WithArgs(upsertArgs...).
@@ -1358,7 +1358,7 @@ func TestInsertBlockData(t *testing.T) {
 		mock.ExpectExec("INSERT INTO blobs").
 			WithArgs(blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectExec("INSERT INTO indexed_blocks").
 			WithArgs(indexedBlock.ChainID, indexedBlock.BlockNumber, indexedBlock.BlockHash, indexedBlock.ParentHash).
@@ -1530,8 +1530,9 @@ func TestProcessBlock_WithBlobTransaction(t *testing.T) {
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
-			sqlmock.AnyArg(), // max_fee_per_blob_gas
-			sqlmock.AnyArg(), // blob_gas_used
+			sqlmock.AnyArg(),             // max_fee_per_blob_gas
+			sqlmock.AnyArg(),             // blob_gas_used
+			blobTx.BlobHashes()[0].Hex(), // versioned_hash
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO block_metrics").
