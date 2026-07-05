@@ -894,10 +894,11 @@ func TestSeedStartupGapRecovery_SeedsAndRequeuesMissingBlocks(t *testing.T) {
 	idxDB, mock := newMockIndexerDB(t)
 	idx.db = idxDB
 
-	// lastBlock 500 < window 1000, so the scan window clamps to [0, 500].
+	// lastBlock 500 < window 1000, so the scan window clamps to the numeric
+	// configured start: [100, 500], with no earliest-indexed floor.
 	rows := sqlmock.NewRows([]string{"block_number"}).AddRow(uint64(495)).AddRow(uint64(498))
-	mock.ExpectQuery("WITH bounds AS").
-		WithArgs(idx.network.ChainID, uint64(0), uint64(500), 1000).
+	mock.ExpectQuery("SELECT gs.block_number\\s+FROM generate_series").
+		WithArgs(idx.network.ChainID, uint64(100), uint64(500), 1000).
 		WillReturnRows(rows)
 
 	idx.seedStartupGapRecovery(500)
@@ -938,8 +939,9 @@ func TestSeedStartupGapRecovery_WindowClampedBelowWatermark(t *testing.T) {
 	idxDB, mock := newMockIndexerDB(t)
 	idx.db = idxDB
 
-	// lastBlock 10000 with a 1000-block window scans [9001, 10000] only.
-	mock.ExpectQuery("WITH bounds AS").
+	// lastBlock 10000 with a 1000-block window scans [9001, 10000] only —
+	// the numeric configured start (100) is below the window and irrelevant.
+	mock.ExpectQuery("SELECT gs.block_number\\s+FROM generate_series").
 		WithArgs(idx.network.ChainID, uint64(9001), uint64(10_000), 1000).
 		WillReturnRows(sqlmock.NewRows([]string{"block_number"}))
 
@@ -992,8 +994,8 @@ func TestSeedStartupGapRecovery_QueryErrorIsNonFatal(t *testing.T) {
 	idxDB, mock := newMockIndexerDB(t)
 	idx.db = idxDB
 
-	mock.ExpectQuery("WITH bounds AS").
-		WithArgs(idx.network.ChainID, uint64(0), uint64(500), 1000).
+	mock.ExpectQuery("SELECT gs.block_number\\s+FROM generate_series").
+		WithArgs(idx.network.ChainID, uint64(100), uint64(500), 1000).
 		WillReturnError(errors.New("scan failed"))
 
 	idx.seedStartupGapRecovery(500)
@@ -1001,6 +1003,82 @@ func TestSeedStartupGapRecovery_QueryErrorIsNonFatal(t *testing.T) {
 	if len(idx.failedBlocks) != 0 {
 		t.Fatalf("expected no seeds on query error, got %v", idx.failedBlocks)
 	}
+}
+
+// Regression test for the bootstrap-crash review finding: with a knowable
+// intended start there must be no earliest-indexed floor, or a crash that
+// commits only the highest queued block would hide the missing prefix behind
+// MIN(block_number) forever.
+func TestSeedStartupGapRecovery_FloorSelection(t *testing.T) {
+	t.Run("empty start block scans from zero unfloored", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.network.StartBlock = ""
+		idx.startupGapScanBlocks = 1000
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectQuery("SELECT gs.block_number\\s+FROM generate_series").
+			WithArgs(idx.network.ChainID, uint64(0), uint64(500), 1000).
+			WillReturnRows(sqlmock.NewRows([]string{"block_number"}).AddRow(uint64(0)))
+
+		idx.seedStartupGapRecovery(500)
+
+		idx.failedBlocksMu.Lock()
+		seeded := idx.failedBlocks[0]
+		idx.failedBlocksMu.Unlock()
+		if seeded != 1 {
+			t.Fatalf("expected genesis-adjacent gap seeded, got %v", idx.failedBlocks)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	t.Run("latest start block floors at earliest indexed row", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.network.StartBlock = "LATEST-20"
+		idx.startupGapScanBlocks = 1000
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		// The tip LATEST resolved to at first boot is not persisted, so the
+		// scan must keep the earliest-indexed floor.
+		mock.ExpectQuery("WITH bounds AS").
+			WithArgs(idx.network.ChainID, uint64(0), uint64(500), 1000).
+			WillReturnRows(sqlmock.NewRows([]string{"block_number"}).AddRow(uint64(495)))
+
+		idx.seedStartupGapRecovery(500)
+
+		idx.failedBlocksMu.Lock()
+		seeded := idx.failedBlocks[495]
+		idx.failedBlocksMu.Unlock()
+		if seeded != 1 {
+			t.Fatalf("expected block 495 seeded, got %v", idx.failedBlocks)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	t.Run("configured start above window clamps scan away entirely", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.network.StartBlock = "600"
+		idx.startupGapScanBlocks = 1000
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		// windowStart clamps to 600 > lastBlock 500: nothing at or above the
+		// configured start can be missing below the watermark, and no query
+		// is issued.
+		idx.seedStartupGapRecovery(500)
+
+		if len(idx.failedBlocks) != 0 {
+			t.Fatalf("expected no seeds, got %v", idx.failedBlocks)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unexpected query: %v", err)
+		}
+	})
 }
 
 // Regression test for the crash-recovery hole where updateLastIndexedBlock
@@ -1029,9 +1107,9 @@ func TestStart_SteadyStateResumeSeedsOrphanedBlocks(t *testing.T) {
 		WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
 		WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).AddRow(models.MetadataBackfillActive, "false"))
 	// Block 497 committed nothing before the crash even though the watermark
-	// reached 500.
-	mock.ExpectQuery("WITH bounds AS").
-		WithArgs(idx.network.ChainID, uint64(0), uint64(500), 1000).
+	// reached 500. Numeric start 100 clamps the window and drops the floor.
+	mock.ExpectQuery("SELECT gs.block_number\\s+FROM generate_series").
+		WithArgs(idx.network.ChainID, uint64(100), uint64(500), 1000).
 		WillReturnRows(sqlmock.NewRows([]string{"block_number"}).AddRow(uint64(497)))
 
 	if err := idx.Start(); err != nil {

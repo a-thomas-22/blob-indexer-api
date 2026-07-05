@@ -377,6 +377,24 @@ func TestIntegrationStartupGapRecovery(t *testing.T) {
 	idx, database := newIntegrationIndexer(t)
 	ctx := context.Background()
 
+	// Empty table: with the earliest-indexed floor, min_indexed is NULL and
+	// the scan must yield nothing rather than flagging the whole window as
+	// missing; without the floor, every block in the range is missing.
+	empty, err := database.GetUnindexedBlocksInRange(ctx, integrationChainID, 57, 106, 50, true)
+	if err != nil {
+		t.Fatalf("GetUnindexedBlocksInRange floored on empty table: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("expected no floored gaps for a network with no indexed rows, got %v", empty)
+	}
+	all, err := database.GetUnindexedBlocksInRange(ctx, integrationChainID, 57, 106, 50, false)
+	if err != nil {
+		t.Fatalf("GetUnindexedBlocksInRange unfloored on empty table: %v", err)
+	}
+	if len(all) != 50 || all[0] != 57 || all[49] != 106 {
+		t.Fatalf("expected the full 57-106 range unfloored, got %d blocks %v", len(all), all)
+	}
+
 	for _, blockNumber := range []uint64{100, 101, 102, 104, 106} {
 		if _, err := database.ExecContext(ctx,
 			"INSERT INTO indexed_blocks (chain_id, block_number, block_hash, parent_hash) VALUES ($1, $2, $3, $4)",
@@ -385,8 +403,29 @@ func TestIntegrationStartupGapRecovery(t *testing.T) {
 		}
 	}
 
-	// The 50-block window starts at 57, well below the earliest indexed block
-	// (100). The never-indexed prefix 57-99 must not be reported as a gap.
+	// Floored (LATEST-style callers): the never-indexed prefix 57-99 is
+	// suppressed; only the interior gaps surface.
+	floored, err := database.GetUnindexedBlocksInRange(ctx, integrationChainID, 57, 106, 50, true)
+	if err != nil {
+		t.Fatalf("GetUnindexedBlocksInRange floored: %v", err)
+	}
+	if len(floored) != 2 || floored[0] != 103 || floored[1] != 105 {
+		t.Fatalf("expected floored gaps [103 105], got %v", floored)
+	}
+
+	// Unfloored (knowable start): the missing prefix is a real gap — the
+	// bootstrap-crash case where only the highest queued block committed.
+	unfloored, err := database.GetUnindexedBlocksInRange(ctx, integrationChainID, 57, 106, 50, false)
+	if err != nil {
+		t.Fatalf("GetUnindexedBlocksInRange unfloored: %v", err)
+	}
+	if len(unfloored) != 45 || unfloored[0] != 57 || unfloored[42] != 99 || unfloored[43] != 103 || unfloored[44] != 105 {
+		t.Fatalf("expected 57-99 plus 103 and 105 unfloored, got %d blocks %v", len(unfloored), unfloored)
+	}
+
+	// Indexer path with a numeric configured start: the window clamps to the
+	// start and seeds exactly the crash-orphaned interior blocks.
+	idx.network.StartBlock = "100"
 	idx.startupGapScanBlocks = 50
 	idx.seedStartupGapRecovery(106)
 

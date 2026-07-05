@@ -986,7 +986,22 @@ func (i *Indexer) seedStartupGapRecovery(lastBlock uint64) {
 		windowStart = lastBlock - window + 1
 	}
 
-	missing, err := i.db.GetUnindexedBlocksInRange(i.ctx, i.network.ChainID, windowStart, lastBlock, i.startupGapScanBlocks)
+	// When the intended start of coverage is knowable, gaps right down to it
+	// are real — a bootstrap crash can persist a watermark before any lower
+	// block commits, leaving no indexed row at the start. Only LATEST-style
+	// start blocks fall back to flooring at the earliest indexed row, because
+	// the tip they resolved to at first boot is not persisted anywhere.
+	floorAtEarliestIndexed := true
+	if i.network.StartBlock == "" {
+		floorAtEarliestIndexed = false
+	} else if configuredStart, parseErr := strconv.ParseUint(i.network.StartBlock, 10, 64); parseErr == nil {
+		floorAtEarliestIndexed = false
+		if configuredStart > windowStart {
+			windowStart = configuredStart
+		}
+	}
+
+	missing, err := i.db.GetUnindexedBlocksInRange(i.ctx, i.network.ChainID, windowStart, lastBlock, i.startupGapScanBlocks, floorAtEarliestIndexed)
 	if err != nil {
 		// Best-effort: startup must not fail on a recovery scan. The blocks
 		// stay orphaned exactly as they would without it.
