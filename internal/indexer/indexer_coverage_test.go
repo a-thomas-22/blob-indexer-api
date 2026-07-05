@@ -354,6 +354,11 @@ func TestDetermineStartBlock_ResumesActiveBackfillCursor(t *testing.T) {
 	mock.ExpectQuery("SELECT key, value").
 		WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
 		WillReturnRows(rows)
+	// Coverage below the cursor is complete, so the verified resume point is
+	// cursor+1 — the same block the old blind cursor+1 fast path used.
+	mock.ExpectQuery("WITH indexed AS").
+		WithArgs(idx.network.ChainID, uint64(100), uint64(250)).
+		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(251)))
 
 	start, err := idx.determineStartBlock()
 	if err != nil {
@@ -361,6 +366,44 @@ func TestDetermineStartBlock_ResumesActiveBackfillCursor(t *testing.T) {
 	}
 	if start != 251 {
 		t.Fatalf("expected backfill resume block 251, got %d", start)
+	}
+}
+
+// Regression test for the 2026-07-05 mainnet incident: the tip-gap catch-up
+// shares the backfill_* metadata keys with the historical backfill, so a
+// restart can observe a cursor that jumped from the historical range
+// (~19.56M) to the tip (25,465,056). Resume must continue from the first
+// unindexed block above the configured start, not trust the tip cursor —
+// trusting it orphaned ~97% of the historical range.
+func TestDetermineStartBlock_CursorJumpedToTipResumesFromFirstGap(t *testing.T) {
+	idx := newTestIndexer()
+	idx.network.StartBlock = "19426587"
+	atomic.StoreUint64(&idx.lastIndexedBlock, 25_465_060)
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	rows := sqlmock.NewRows([]string{"key", "value"}).
+		AddRow(models.MetadataBackfillActive, "true").
+		AddRow(models.MetadataBackfillCurrentBlock, "25465056").
+		AddRow(models.MetadataBackfillTargetBlock, "25465060")
+	mock.ExpectQuery("SELECT key, value").
+		WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
+		WillReturnRows(rows)
+	// indexed_blocks covers the configured start up to 19,562,586 plus a band
+	// at the tip; the first gap is where the historical backfill really was.
+	mock.ExpectQuery("WITH indexed AS").
+		WithArgs(idx.network.ChainID, uint64(19_426_587), uint64(25_465_056)).
+		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(19_562_587)))
+
+	start, err := idx.determineStartBlock()
+	if err != nil {
+		t.Fatalf("determineStartBlock() error = %v", err)
+	}
+	if start != 19_562_587 {
+		t.Fatalf("expected resume from first unindexed block 19562587, got %d", start)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
 	}
 }
 
@@ -517,6 +560,27 @@ func TestBackfillResumeBlock_Branches(t *testing.T) {
 		}
 	})
 
+	t.Run("cursor coverage check error", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		rows := sqlmock.NewRows([]string{"key", "value"}).
+			AddRow(models.MetadataBackfillActive, "true").
+			AddRow(models.MetadataBackfillCurrentBlock, "150")
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
+			WillReturnRows(rows)
+		mock.ExpectQuery("WITH indexed AS").
+			WithArgs(idx.network.ChainID, uint64(100), uint64(150)).
+			WillReturnError(errors.New("coverage scan failed"))
+
+		_, _, err := idx.backfillResumeBlock(100, 200, true)
+		if err == nil || !strings.Contains(err.Error(), "failed to get first unindexed block") {
+			t.Fatalf("expected coverage scan error, got %v", err)
+		}
+	})
+
 	t.Run("metadata lookup error", func(t *testing.T) {
 		idx := newTestIndexer()
 		idxDB, mock := newMockIndexerDB(t)
@@ -634,37 +698,99 @@ func TestRunBlockIndexer_QueuesBlocks(t *testing.T) {
 }
 
 func TestRunBlockIndexer_ResetsOnReorgSignal(t *testing.T) {
-	client, _ := newMockEthClient(t, 10)
-	idx := newTestIndexer()
-	idx.ethClient = client
-	idx.pollingInterval = 5 * time.Millisecond
-	idx.batchSize = 2
-	idx.blockTaskCh = make(chan BlockTask, 10)
-	atomic.StoreUint64(&idx.lastIndexedBlock, 8)
-	atomic.StoreUint32(&idx.reorgDetected, 1)
-
-	done := make(chan struct{})
-	go func() {
-		idx.runBlockIndexer(1)
-		close(done)
-	}()
-
-	got := make([]uint64, 0, 2)
-	timeout := time.After(300 * time.Millisecond)
-	for len(got) < 2 {
-		select {
-		case task := <-idx.blockTaskCh:
-			got = append(got, task.BlockNumber)
-		case <-timeout:
-			t.Fatalf("timed out waiting for reorg-queued blocks; got %v", got)
+	collectTasks := func(t *testing.T, idx *Indexer, n int) []uint64 {
+		t.Helper()
+		got := make([]uint64, 0, n)
+		timeout := time.After(300 * time.Millisecond)
+		for len(got) < n {
+			select {
+			case task := <-idx.blockTaskCh:
+				got = append(got, task.BlockNumber)
+			case <-timeout:
+				t.Fatalf("timed out waiting for reorg-queued blocks; got %v", got)
+			}
 		}
+		return got
 	}
 
-	idx.cancel()
-	<-done
+	t.Run("rewinds when fork point is below walker position", func(t *testing.T) {
+		client, _ := newMockEthClient(t, 10)
+		idx := newTestIndexer()
+		idx.ethClient = client
+		idx.pollingInterval = 5 * time.Millisecond
+		idx.batchSize = 2
+		idx.blockTaskCh = make(chan BlockTask, 10)
+		atomic.StoreUint64(&idx.lastIndexedBlock, 8)
+		idx.signalReorgReset(9, 10)
 
-	if got[0] != 9 || got[1] != 10 {
-		t.Fatalf("expected blocks [9 10], got %v", got)
+		done := make(chan struct{})
+		go func() {
+			// The walker had already caught up past the fork point.
+			idx.runBlockIndexer(11)
+			close(done)
+		}()
+
+		got := collectTasks(t, idx, 2)
+
+		idx.cancel()
+		<-done
+
+		if got[0] != 9 || got[1] != 10 {
+			t.Fatalf("expected blocks [9 10], got %v", got)
+		}
+	})
+
+	t.Run("heals tip reorg above walker without abandoning historical walk", func(t *testing.T) {
+		client, _ := newMockEthClient(t, 10)
+		idx := newTestIndexer()
+		idx.ethClient = client
+		idx.pollingInterval = 5 * time.Millisecond
+		idx.batchSize = 2
+		idx.blockTaskCh = make(chan BlockTask, 10)
+		atomic.StoreUint64(&idx.lastIndexedBlock, 8)
+		idx.signalReorgReset(9, 10)
+
+		done := make(chan struct{})
+		go func() {
+			// The walker is deep in a historical backfill, far below the fork
+			// point. It must re-queue the invalidated tip range directly and
+			// keep walking from its own position — teleporting to the tip is
+			// what orphaned the historical range in the 2026-07-05 incident.
+			idx.runBlockIndexer(1)
+			close(done)
+		}()
+
+		got := collectTasks(t, idx, 4)
+
+		idx.cancel()
+		<-done
+
+		want := []uint64{9, 10, 1, 2}
+		for i, w := range want {
+			if got[i] != w {
+				t.Fatalf("expected tasks %v, got %v", want, got)
+			}
+		}
+	})
+}
+
+func TestSignalReorgReset_MergesPendingRanges(t *testing.T) {
+	idx := newTestIndexer()
+
+	idx.signalReorgReset(50, 60)
+	// A second reorg lands before the main loop consumes the first — the
+	// invalidated ranges must merge, not clobber each other.
+	idx.signalReorgReset(40, 55)
+
+	if atomic.LoadUint32(&idx.reorgDetected) != 1 {
+		t.Fatal("expected reorgDetected flag to be set")
+	}
+	from, through := idx.consumeReorgReset()
+	if from != 40 || through != 60 {
+		t.Fatalf("expected merged range [40 60], got [%d %d]", from, through)
+	}
+	if atomic.LoadUint32(&idx.reorgDetected) != 0 {
+		t.Fatal("expected reorgDetected flag to be cleared after consume")
 	}
 }
 
@@ -1471,6 +1597,9 @@ func TestCheckForReorg_DetectsMismatchAndRewinds(t *testing.T) {
 		WithArgs(idx.network.ChainID, uint64(4)).
 		WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(forkBlockHash.Hash().Hex()))
 	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(block_number) FROM indexed_blocks WHERE chain_id = $1")).
+		WithArgs(idx.network.ChainID).
+		WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(int64(8)))
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2")).
 		WithArgs(idx.network.ChainID, int64(5)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -1509,6 +1638,9 @@ func TestHandleReorg_SuccessAndError(t *testing.T) {
 			WithArgs(idx.network.ChainID, forkBlock).
 			WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(expectedHash))
 		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(block_number) FROM indexed_blocks WHERE chain_id = $1")).
+			WithArgs(idx.network.ChainID).
+			WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(int64(7)))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2")).
 			WithArgs(idx.network.ChainID, int64(forkBlock+1)).
 			WillReturnResult(sqlmock.NewResult(0, 2))
@@ -1532,6 +1664,35 @@ func TestHandleReorg_SuccessAndError(t *testing.T) {
 		}
 		if atomic.LoadUint32(&idx.reorgDetected) != 1 {
 			t.Fatal("expected reorgDetected flag to be set")
+		}
+		from, through := idx.consumeReorgReset()
+		if from != forkBlock+1 || through != 7 {
+			t.Fatalf("expected invalidated range [%d 7], got [%d %d]", forkBlock+1, from, through)
+		}
+	})
+
+	t.Run("invalidated range lookup error", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+		idx.ethClient, _ = newMockEthClient(t, 10)
+
+		forkBlock := uint64(4)
+		block, _ := idx.ethClient.GetBlockByNumber(context.Background(), forkBlock)
+		expectedHash := block.Hash().Hex()
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE chain_id = $1 AND block_number = $2")).
+			WithArgs(idx.network.ChainID, forkBlock).
+			WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(expectedHash))
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(block_number) FROM indexed_blocks WHERE chain_id = $1")).
+			WithArgs(idx.network.ChainID).
+			WillReturnError(errors.New("max lookup failed"))
+		mock.ExpectRollback()
+
+		err := idx.handleReorg(5)
+		if err == nil || !strings.Contains(err.Error(), "failed to determine reorg invalidated range") {
+			t.Fatalf("expected invalidated range error, got %v", err)
 		}
 	})
 
@@ -1563,6 +1724,9 @@ func TestHandleReorg_SuccessAndError(t *testing.T) {
 			WithArgs(idx.network.ChainID, forkBlock).
 			WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(expectedHash))
 		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(block_number) FROM indexed_blocks WHERE chain_id = $1")).
+			WithArgs(idx.network.ChainID).
+			WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(int64(7)))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2")).
 			WithArgs(idx.network.ChainID, int64(forkBlock+1)).
 			WillReturnResult(sqlmock.NewResult(0, 2))
@@ -1596,6 +1760,10 @@ func TestHandleReorg_DepthCapExhausted(t *testing.T) {
 	}
 	forkBlock := fromBlock - 1 - uint64(idx.maxReorgDepth) // 7
 	mock.ExpectBegin()
+	// NULL MAX (no indexed rows) must clamp the invalidated range to empty.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(block_number) FROM indexed_blocks WHERE chain_id = $1")).
+		WithArgs(idx.network.ChainID).
+		WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(nil))
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2")).
 		WithArgs(idx.network.ChainID, int64(forkBlock+1)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -1616,6 +1784,9 @@ func TestHandleReorg_DepthCapExhausted(t *testing.T) {
 	}
 	if got := idx.GetLastIndexedBlock(); got != forkBlock {
 		t.Fatalf("expected lastIndexedBlock=%d after depth-cap truncation, got %d", forkBlock, got)
+	}
+	if from, through := idx.consumeReorgReset(); from != forkBlock+1 || through != forkBlock {
+		t.Fatalf("expected empty invalidated range [%d %d], got [%d %d]", forkBlock+1, forkBlock, from, through)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sqlmock expectations: %v", err)
