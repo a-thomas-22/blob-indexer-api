@@ -54,8 +54,8 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		INSERT INTO blobs (
 			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used
-		) VALUES (1, 100, 0, '0xconfirmed', '0xfrom', 'Rollup', 131072, 10, 2, 100, $1, 12, 131072)
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
+		) VALUES (1, 100, 0, '0xconfirmed', '0xfrom', 'Rollup', 131072, 10, 2, 100, $1, 12, 131072, '0xvhconfirmed')
 	`, now); err != nil {
 		t.Fatalf("seed confirmed blob: %v", err)
 	}
@@ -63,10 +63,25 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		INSERT INTO mempool_blobs (
 			chain_id, tx_hash, blob_index, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used
-		) VALUES (1, '0xpendingtx', 0, '0xfrom', 'Rollup', 131072, 50, 10, 500, $1, 60, 131072)
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
+		) VALUES (1, '0xpendingtx', 0, '0xfrom', 'Rollup', 131072, 50, 10, 500, $1, 60, 131072, '0xvhpending')
 	`, now); err != nil {
 		t.Fatalf("seed mempool blob: %v", err)
+	}
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO block_metrics (chain_id, block_number, block_timestamp)
+		VALUES (1, 100, $1)
+	`, now); err != nil {
+		t.Fatalf("seed block metrics: %v", err)
+	}
+	// Known-rollup row for a sender with no blob history: exercises the /search
+	// rollup-name arm without disturbing the blob_user_stats-derived
+	// assertions above.
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO blob_users (chain_id, address, name, description, category, first_seen, last_seen)
+		VALUES (1, '0xbase', 'Base', '', 'rollup', $1, $1)
+	`, now); err != nil {
+		t.Fatalf("seed blob user: %v", err)
 	}
 	// Block 99 is deliberately missing: the coverage bounds are documented as
 	// sparse extremes, so an interior gap (a failed block awaiting retry) must
@@ -200,6 +215,89 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 			t.Fatalf("unexpected counts: %+v", counts)
 		}
 	})
+
+	t.Run("querySearchBlockByNumber", func(t *testing.T) {
+		var blockNumber int64
+		if err := sqlxDB.GetContext(ctx, &blockNumber, querySearchBlockByNumber, 1, 100); err != nil {
+			t.Fatalf("querySearchBlockByNumber: %v", err)
+		}
+		if blockNumber != 100 {
+			t.Fatalf("expected block 100, got %d", blockNumber)
+		}
+		if err := sqlxDB.GetContext(ctx, &blockNumber, querySearchBlockByNumber, 1, 999); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for unindexed block, got %v", err)
+		}
+	})
+
+	t.Run("querySearchTxByHash", func(t *testing.T) {
+		var tx searchTxRow
+		if err := sqlxDB.GetContext(ctx, &tx, querySearchTxByHash, 1, "0xconfirmed"); err != nil {
+			t.Fatalf("querySearchTxByHash confirmed: %v", err)
+		}
+		if tx.TxHash != "0xconfirmed" || tx.BlockNumber != 100 {
+			t.Fatalf("unexpected confirmed tx match: %+v", tx)
+		}
+		if err := sqlxDB.GetContext(ctx, &tx, querySearchTxByHash, 1, "0xpendingtx"); err != nil {
+			t.Fatalf("querySearchTxByHash pending: %v", err)
+		}
+		if tx.TxHash != "0xpendingtx" || tx.BlockNumber != models.PendingBlockNumber {
+			t.Fatalf("unexpected pending tx match: %+v", tx)
+		}
+		if err := sqlxDB.GetContext(ctx, &tx, querySearchTxByHash, 1, "0xmissing"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for missing tx, got %v", err)
+		}
+	})
+
+	t.Run("querySearchBlobByVersionedHash", func(t *testing.T) {
+		var blob searchBlobRow
+		if err := sqlxDB.GetContext(ctx, &blob, querySearchBlobByVersionedHash, 1, "0xvhconfirmed"); err != nil {
+			t.Fatalf("querySearchBlobByVersionedHash confirmed: %v", err)
+		}
+		if blob.VersionedHash != "0xvhconfirmed" || blob.TxHash != "0xconfirmed" || blob.BlockNumber != 100 {
+			t.Fatalf("unexpected confirmed blob match: %+v", blob)
+		}
+		if err := sqlxDB.GetContext(ctx, &blob, querySearchBlobByVersionedHash, 1, "0xvhpending"); err != nil {
+			t.Fatalf("querySearchBlobByVersionedHash pending: %v", err)
+		}
+		if blob.VersionedHash != "0xvhpending" || blob.TxHash != "0xpendingtx" || blob.BlockNumber != models.PendingBlockNumber {
+			t.Fatalf("unexpected pending blob match: %+v", blob)
+		}
+		if err := sqlxDB.GetContext(ctx, &blob, querySearchBlobByVersionedHash, 1, "0xmissing"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for missing versioned hash, got %v", err)
+		}
+	})
+
+	t.Run("querySearchSenderByAddress", func(t *testing.T) {
+		var sender searchSenderRow
+		if err := sqlxDB.GetContext(ctx, &sender, querySearchSenderByAddress, 1, "0xfrom"); err != nil {
+			t.Fatalf("querySearchSenderByAddress: %v", err)
+		}
+		if sender.FromAddress != "0xfrom" || sender.UserAttribution != "Rollup" {
+			t.Fatalf("unexpected sender match: %+v", sender)
+		}
+		if err := sqlxDB.GetContext(ctx, &sender, querySearchSenderByAddress, 1, "0xnothere"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for unknown sender, got %v", err)
+		}
+	})
+
+	t.Run("querySearchRollupsByName", func(t *testing.T) {
+		var rollups []searchRollupRow
+		if err := sqlxDB.SelectContext(ctx, &rollups, querySearchRollupsByName, 1, escapeLikePattern("ba")+"%", maxSearchRollupMatches); err != nil {
+			t.Fatalf("querySearchRollupsByName: %v", err)
+		}
+		if len(rollups) != 1 || rollups[0].Name != "Base" || len(rollups[0].Addresses) != 1 || rollups[0].Addresses[0] != "0xbase" {
+			t.Fatalf("unexpected rollup matches: %+v", rollups)
+		}
+		// LIKE metacharacters in user input must match literally, not as
+		// wildcards: "_ase" would otherwise match "Base".
+		rollups = nil
+		if err := sqlxDB.SelectContext(ctx, &rollups, querySearchRollupsByName, 1, escapeLikePattern("_ase")+"%", maxSearchRollupMatches); err != nil {
+			t.Fatalf("querySearchRollupsByName escaped: %v", err)
+		}
+		if len(rollups) != 0 {
+			t.Fatalf("expected no matches for escaped pattern, got %+v", rollups)
+		}
+	})
 }
 
 // TestUserWindowQueriesAgainstRealPostgres validates the windowed /users query
@@ -321,7 +419,8 @@ func TestUserWindowQueriesAgainstRealPostgres(t *testing.T) {
 
 // TestWSPollerQueriesAgainstRealPostgres validates the WebSocket poller's and
 // snapshot builder's query text against a real schema, including type
-// unification of block_number scans into uint64 slices.
+// unification of block_number scans into uint64 slices. The /block/{number}
+// endpoint's single-block lookup shares the seeded data.
 func TestWSPollerQueriesAgainstRealPostgres(t *testing.T) {
 	url := testdb.URL(t, "api")
 	sqlxDB, err := sqlx.Connect("postgres", url)
@@ -387,6 +486,19 @@ func TestWSPollerQueriesAgainstRealPostgres(t *testing.T) {
 		}
 		if len(numbers) != 2 || numbers[0] != 100 || numbers[1] != 101 {
 			t.Fatalf("got %v, want [100 101]", numbers)
+		}
+	})
+
+	t.Run("queryBlockMetricsForBlock", func(t *testing.T) {
+		var metric models.BlockMetrics
+		if err := sqlxDB.GetContext(ctx, &metric, queryBlockMetricsForBlock, 1, int64(100)); err != nil {
+			t.Fatalf("queryBlockMetricsForBlock: %v", err)
+		}
+		if metric.BlockNumber != 100 || metric.BlobCount != 1 {
+			t.Fatalf("unexpected metric: %+v", metric)
+		}
+		if err := sqlxDB.GetContext(ctx, &metric, queryBlockMetricsForBlock, 1, int64(999)); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for unindexed block, got %v", err)
 		}
 	})
 

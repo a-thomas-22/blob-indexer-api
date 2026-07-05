@@ -342,6 +342,9 @@ func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) 
 			r.Get("/{txHash}", a.GetBlobByTxHash)
 		})
 
+		// Block endpoint
+		r.Get("/block/{number}", a.GetBlockByNumber)
+
 		// User endpoints
 		r.Route("/users", func(r chi.Router) {
 			r.With(aggregateLimit).Get("/", a.GetTopBlobUsers)
@@ -363,6 +366,11 @@ func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) 
 			r.With(aggregateLimit).Get("/cost-comparison", a.GetCostComparisonChart)
 			r.With(aggregateLimit).Get("/rolling-stats", a.GetRollingStatsChart)
 		})
+
+		// Search endpoint — debounced type-ahead lookups from the blob-flow
+		// search modal. Every arm is a primary-key or index probe, so it takes
+		// the standard per-IP rate limit rather than the aggregate one.
+		r.Get("/search", a.Search)
 
 		// Status endpoint
 		r.Get("/status", a.GetIndexerStatus)

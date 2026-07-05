@@ -1185,6 +1185,9 @@ func TestReindex(t *testing.T) {
 		if err := idx.Reindex(5, 7); err != nil {
 			t.Fatalf("Reindex() error = %v", err)
 		}
+		if got := atomic.LoadUint64(&idx.reorgEpoch); got != 1 {
+			t.Fatalf("expected reindex cleanup to bump reorgEpoch to 1, got %d", got)
+		}
 
 		var got []uint64
 		for {
@@ -1378,7 +1381,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 		mock.ExpectExec("INSERT INTO mempool_blobs").
 			WithArgs(blob.ChainID, blob.TxHash, 0, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
@@ -1411,7 +1414,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 			upsertArgs = append(upsertArgs,
 				blob.ChainID, blob.TxHash, offset, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed)
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash)
 		}
 		mock.ExpectExec("INSERT INTO mempool_blobs").
 			WithArgs(upsertArgs...).
@@ -1511,21 +1514,60 @@ func TestInsertBlockData(t *testing.T) {
 		idx.db = idxDB
 
 		mock.ExpectBegin()
-		// Expect pending blob promotion cleanup before confirmed insert
+		// Expect surplus-row trim for the block, then pending blob promotion
+		// cleanup before the confirmed insert
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number = $2 AND blob_index >= $3")).
+			WithArgs(indexedBlock.ChainID, indexedBlock.BlockNumber, 1).
+			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec("DELETE FROM mempool_blobs WHERE").
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec("INSERT INTO blobs").
 			WithArgs(blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectExec("INSERT INTO indexed_blocks").
 			WithArgs(indexedBlock.ChainID, indexedBlock.BlockNumber, indexedBlock.BlockHash, indexedBlock.ParentHash).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
-		if err := idx.insertBlockData([]models.Blob{blob}, indexedBlock, nil); err != nil {
+		if err := idx.insertBlockData([]models.Blob{blob}, indexedBlock, nil, 0); err != nil {
 			t.Fatalf("insertBlockData() error = %v", err)
+		}
+	})
+
+	t.Run("surplus trim error", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number = $2 AND blob_index >= $3")).
+			WithArgs(indexedBlock.ChainID, indexedBlock.BlockNumber, 1).
+			WillReturnError(errors.New("trim failed"))
+		mock.ExpectRollback()
+
+		err := idx.insertBlockData([]models.Blob{blob}, indexedBlock, nil, 0)
+		if err == nil || !strings.Contains(err.Error(), "failed to trim surplus blob rows") {
+			t.Fatalf("expected surplus trim error, got %v", err)
+		}
+	})
+
+	t.Run("stale fetch rejected after reorg cleanup", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		// A cleanup committed after the caller fetched its block.
+		atomic.StoreUint64(&idx.reorgEpoch, 1)
+
+		err := idx.insertBlockData([]models.Blob{blob}, indexedBlock, nil, 0)
+		if !errors.Is(err, errStaleBlockFetch) {
+			t.Fatalf("expected errStaleBlockFetch, got %v", err)
+		}
+		// The fence must reject before any statement reaches the database.
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("stale insert touched the database: %v", err)
 		}
 	})
 
@@ -1535,13 +1577,15 @@ func TestInsertBlockData(t *testing.T) {
 		idx.db = idxDB
 
 		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number = $2 AND blob_index >= $3")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec("DELETE FROM mempool_blobs WHERE").
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec("INSERT INTO blobs").
 			WillReturnError(errors.New("insert failed"))
 		mock.ExpectRollback()
 
-		err := idx.insertBlockData([]models.Blob{blob}, indexedBlock, nil)
+		err := idx.insertBlockData([]models.Blob{blob}, indexedBlock, nil, 0)
 		if err == nil || !strings.Contains(err.Error(), "failed to insert blob") {
 			t.Fatalf("expected blob insert error, got %v", err)
 		}
@@ -1553,12 +1597,17 @@ func TestInsertBlockData(t *testing.T) {
 		idx.db = idxDB
 
 		mock.ExpectBegin()
+		// A zero-blob block still trims: the canonical block may have replaced
+		// a stale-fork version that carried blobs.
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number = $2 AND blob_index >= $3")).
+			WithArgs(indexedBlock.ChainID, indexedBlock.BlockNumber, 0).
+			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec("INSERT INTO indexed_blocks").
 			WithArgs(indexedBlock.ChainID, indexedBlock.BlockNumber, indexedBlock.BlockHash, indexedBlock.ParentHash).
 			WillReturnError(errors.New("indexed insert failed"))
 		mock.ExpectRollback()
 
-		err := idx.insertBlockData(nil, indexedBlock, nil)
+		err := idx.insertBlockData(nil, indexedBlock, nil, 0)
 		if err == nil || !strings.Contains(err.Error(), "failed to record indexed block") {
 			t.Fatalf("expected indexed block error, got %v", err)
 		}
@@ -1570,13 +1619,15 @@ func TestInsertBlockData(t *testing.T) {
 		idx.db = idxDB
 
 		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number = $2 AND blob_index >= $3")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec("INSERT INTO indexed_blocks").
 			WithArgs(indexedBlock.ChainID, indexedBlock.BlockNumber, indexedBlock.BlockHash, indexedBlock.ParentHash).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
 		mock.ExpectRollback()
 
-		err := idx.insertBlockData(nil, indexedBlock, nil)
+		err := idx.insertBlockData(nil, indexedBlock, nil, 0)
 		if err == nil {
 			t.Fatal("expected commit error")
 		}
@@ -1604,6 +1655,8 @@ func TestInsertBlockData(t *testing.T) {
 		}
 
 		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number = $2 AND blob_index >= $3")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec("INSERT INTO block_metrics").
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectExec("INSERT INTO indexed_blocks").
@@ -1611,7 +1664,7 @@ func TestInsertBlockData(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
-		if err := idx.insertBlockData(nil, indexedBlock, metrics); err != nil {
+		if err := idx.insertBlockData(nil, indexedBlock, metrics, 0); err != nil {
 			t.Fatalf("insertBlockData() error = %v", err)
 		}
 	})
@@ -1627,11 +1680,13 @@ func TestInsertBlockData(t *testing.T) {
 		}
 
 		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number = $2 AND blob_index >= $3")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec("INSERT INTO block_metrics").
 			WillReturnError(errors.New("metrics insert failed"))
 		mock.ExpectRollback()
 
-		err := idx.insertBlockData(nil, indexedBlock, metrics)
+		err := idx.insertBlockData(nil, indexedBlock, metrics, 0)
 		if err == nil || !strings.Contains(err.Error(), "failed to insert block metrics") {
 			t.Fatalf("expected block metrics error, got %v", err)
 		}
@@ -1648,6 +1703,9 @@ func TestProcessBlock_NoBlobTransactions(t *testing.T) {
 		WithArgs(idx.network.ChainID, uint64(0)).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number = $2 AND blob_index >= $3")).
+		WithArgs(idx.network.ChainID, int64(1), 0).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("INSERT INTO block_metrics").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO indexed_blocks").
@@ -1673,6 +1731,10 @@ func TestProcessBlock_WithBlobTransaction(t *testing.T) {
 		WithArgs(idx.network.ChainID, uint64(0)).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectBegin()
+	// Expect surplus-row trim for the block
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number = $2 AND blob_index >= $3")).
+		WithArgs(idx.network.ChainID, int64(1), 1).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	// Expect pending blob promotion cleanup
 	mock.ExpectExec("DELETE FROM mempool_blobs WHERE").
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -1689,8 +1751,9 @@ func TestProcessBlock_WithBlobTransaction(t *testing.T) {
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
-			sqlmock.AnyArg(), // max_fee_per_blob_gas
-			sqlmock.AnyArg(), // blob_gas_used
+			sqlmock.AnyArg(),             // max_fee_per_blob_gas
+			sqlmock.AnyArg(),             // blob_gas_used
+			blobTx.BlobHashes()[0].Hex(), // versioned_hash
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO block_metrics").
@@ -1830,6 +1893,9 @@ func TestHandleReorg_SuccessAndError(t *testing.T) {
 		if atomic.LoadUint32(&idx.reorgDetected) != 1 {
 			t.Fatal("expected reorgDetected flag to be set")
 		}
+		if got := atomic.LoadUint64(&idx.reorgEpoch); got != 1 {
+			t.Fatalf("expected reorgEpoch=1 after cleanup, got %d", got)
+		}
 		from, through := idx.consumeReorgReset()
 		if from != forkBlock+1 || through != 7 {
 			t.Fatalf("expected invalidated range [%d 7], got [%d %d]", forkBlock+1, from, through)
@@ -1905,6 +1971,67 @@ func TestHandleReorg_SuccessAndError(t *testing.T) {
 			t.Fatalf("expected block metrics delete error, got %v", err)
 		}
 	})
+}
+
+// Regression test for the fetch/cleanup race: worker A fetches a soon-to-be-
+// orphaned fork block via RPC, worker B's handleReorg then deletes every row
+// past the fork point, and A's insertBlockData lands only after the cleanup.
+// checkForReorg cannot catch A's late insert — the deleted parent row reads as
+// a benign gap — so the reorg-epoch fence must reject it. The interleaving is
+// serialized here: each step below is one side of the race in commit order.
+func TestInsertBlockData_ReorgFencesStaleFetch(t *testing.T) {
+	idx := newTestIndexer()
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+	idx.ethClient, _ = newMockEthClient(t, 10)
+
+	// Worker A samples the epoch and fetches block 6 from the old fork.
+	fetchEpoch := atomic.LoadUint64(&idx.reorgEpoch)
+	staleBlob := newBlobFixture()
+	staleBlob.BlockNumber = 6
+	staleBlock := models.IndexedBlock{ChainID: 42, BlockNumber: 6, BlockHash: "0xforkhash", ParentHash: "0xforkparent"}
+
+	// Worker B hits the reorg at block 5 and rewinds to fork point 4,
+	// deleting everything >= 5 — including the rows block 6 would join.
+	forkBlock := uint64(4)
+	canonical, err := idx.ethClient.GetBlockByNumber(context.Background(), forkBlock)
+	if err != nil {
+		t.Fatalf("failed to get canonical fork block: %v", err)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE chain_id = $1 AND block_number = $2")).
+		WithArgs(idx.network.ChainID, forkBlock).
+		WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(canonical.Hash().Hex()))
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(block_number) FROM indexed_blocks WHERE chain_id = $1")).
+		WithArgs(idx.network.ChainID).
+		WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(int64(8)))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, int64(forkBlock+1)).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM block_metrics WHERE chain_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, int64(forkBlock+1)).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, forkBlock+1).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(forkBlock, 10)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	if err := idx.handleReorg(5); !errors.Is(err, errReorgDetected) {
+		t.Fatalf("expected errReorgDetected from handleReorg, got %v", err)
+	}
+
+	// Worker A's insert lands after the cleanup: the fence must reject it
+	// before any statement reaches the database.
+	err = idx.insertBlockData([]models.Blob{staleBlob}, staleBlock, nil, fetchEpoch)
+	if !errors.Is(err, errStaleBlockFetch) {
+		t.Fatalf("expected errStaleBlockFetch for post-cleanup insert, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("stale insert touched the database: %v", err)
+	}
 }
 
 func TestHandleReorg_DepthCapExhausted(t *testing.T) {
@@ -1995,6 +2122,9 @@ func TestBlockProcessingWorker_ProcessesTask(t *testing.T) {
 		WithArgs(idx.network.ChainID, uint64(0)).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number = $2 AND blob_index >= $3")).
+		WithArgs(idx.network.ChainID, int64(1), 0).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("INSERT INTO block_metrics").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO indexed_blocks").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()

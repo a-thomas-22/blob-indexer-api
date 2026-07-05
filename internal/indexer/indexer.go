@@ -92,6 +92,12 @@ const (
 // errReorgDetected is returned when a chain reorganization is detected and handled
 var errReorgDetected = errors.New("chain reorganization detected")
 
+// errStaleBlockFetch is returned when a block's RPC fetch predates a reorg or
+// reindex cleanup that committed while the fetch was in flight. The data in
+// hand may describe the abandoned fork, so the insert is refused; the worker
+// retry loop re-runs processBlock, which refetches the now-canonical block.
+var errStaleBlockFetch = errors.New("block fetched before reorg cleanup")
+
 // BlockTask represents a task to process a block
 type BlockTask struct {
 	BlockNumber uint64
@@ -197,9 +203,17 @@ type Indexer struct {
 	// only meaningful while reorgDetected == 1. Reorgs signaled before the main
 	// loop consumes the flag merge into the widest invalidated range.
 	reorgRangeMu            sync.Mutex
-	reorgRewindFrom         uint64              // first invalidated block (fork point + 1)
-	reorgInvalidatedThrough uint64              // highest block deleted by the reorg
-	chainConfig             *params.ChainConfig // go-ethereum chain config for fork-aware blob math
+	reorgRewindFrom         uint64 // first invalidated block (fork point + 1)
+	reorgInvalidatedThrough uint64 // highest block deleted by the reorg
+	// reorgEpoch counts destructive block-range cleanups (reorg rewinds,
+	// reindex deletes). processBlock samples it before fetching a block via
+	// RPC and insertBlockData rejects the insert if it changed: a worker
+	// holding a block fetched before the cleanup's DELETEs committed would
+	// otherwise re-insert abandoned-fork data, and checkForReorg cannot catch
+	// that (the deleted parent row reads as a benign gap). Incremented under
+	// dbWriteMu; accessed atomically because the sample happens outside it.
+	reorgEpoch  uint64
+	chainConfig *params.ChainConfig // go-ethereum chain config for fork-aware blob math
 }
 
 // New creates a new indexer
@@ -1365,7 +1379,8 @@ func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID in
 	metrics := calculateBlobMetrics(tx, blobBaseFee)
 	now := time.Now()
 	rows := make([]models.Blob, 0, len(blobHashes))
-	for range blobHashes {
+	for _, blobHash := range blobHashes {
+		versionedHash := blobHash.Hex()
 		rows = append(rows, models.Blob{
 			ChainID:           networkID,
 			BlockNumber:       -1,
@@ -1380,6 +1395,7 @@ func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID in
 			Confirmed:         false,
 			MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
 			BlobGasUsed:       metrics.blobGasUsed,
+			VersionedHash:     &versionedHash,
 		})
 	}
 	return rows
@@ -1387,6 +1403,10 @@ func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID in
 
 // processBlock processes a single block with reorg detection and batch inserts
 func (i *Indexer) processBlock(blockNumber uint64) error {
+	// Sample the cleanup epoch before the RPC fetch so insertBlockData can
+	// tell whether a reorg/reindex cleanup invalidated this fetch in flight.
+	fetchEpoch := atomic.LoadUint64(&i.reorgEpoch)
+
 	// Get the block
 	block, err := i.ethClient.GetBlockByNumber(i.ctx, blockNumber)
 	if err != nil {
@@ -1455,7 +1475,8 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 
 		metrics := calculateBlobMetrics(tx, blobBaseFee)
 
-		for range blobHashes {
+		for _, blobHash := range blobHashes {
+			versionedHash := blobHash.Hex()
 			blobs = append(blobs, models.Blob{
 				ChainID:           i.network.ChainID,
 				BlockNumber:       int64(blockNumber),
@@ -1471,6 +1492,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 				Confirmed:         true,
 				MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
 				BlobGasUsed:       metrics.blobGasUsed,
+				VersionedHash:     &versionedHash,
 			})
 			blobIndex++
 		}
@@ -1506,7 +1528,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		ParentHash:  block.ParentHash().Hex(),
 	}
 
-	if err := i.insertBlockData(blobs, indexedBlock, blockMetrics); err != nil {
+	if err := i.insertBlockData(blobs, indexedBlock, blockMetrics, fetchEpoch); err != nil {
 		return fmt.Errorf("failed to insert block data for block %d: %w", blockNumber, err)
 	}
 
@@ -1683,6 +1705,11 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 		return fmt.Errorf("failed to commit reorg transaction: %w", err)
 	}
 
+	// Invalidate in-flight fetches while dbWriteMu is still held: a worker
+	// that fetched an old-fork block before the DELETEs above committed would
+	// otherwise land it as soon as it acquires the lock.
+	atomic.AddUint64(&i.reorgEpoch, 1)
+
 	// Signal the main indexer loop to re-index the invalidated range
 	i.signalReorgReset(forkBlock+1, invalidatedThrough)
 
@@ -1725,11 +1752,11 @@ func (i *Indexer) consumeReorgReset() (from, through uint64) {
 
 // blobInsertColumns is the number of columns written per row when inserting
 // into blobs.
-const blobInsertColumns = 13
+const blobInsertColumns = 14
 
 // mempoolBlobInsertColumns is the number of columns written per row when
 // upserting into mempool_blobs.
-const mempoolBlobInsertColumns = 12
+const mempoolBlobInsertColumns = 13
 
 // valuesPlaceholders builds a multi-row VALUES clause "($1,$2,...),($n,...),..."
 // for rows rows of width columns. casts, when non-nil, must have width entries
@@ -1765,15 +1792,32 @@ func valuesPlaceholders(rows, width int, casts []string) string {
 
 // insertBlockData inserts all blobs, block metrics, and records the indexed block in a single
 // database transaction. This ensures atomicity — either the entire block is recorded or nothing is.
-func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.IndexedBlock, blockMetrics *models.BlockMetrics) error {
+// fetchEpoch is the reorgEpoch value sampled before the block was fetched via
+// RPC; the insert is refused if a cleanup committed in between.
+func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.IndexedBlock, blockMetrics *models.BlockMetrics, fetchEpoch uint64) error {
 	unlockWrites := i.lockDBWrites()
 	defer unlockWrites()
+
+	if atomic.LoadUint64(&i.reorgEpoch) != fetchEpoch {
+		return fmt.Errorf("discarding block %d: %w", indexedBlock.BlockNumber, errStaleBlockFetch)
+	}
 
 	tx, err := i.db.BeginTxx(i.ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// Remove blob rows this block no longer has. The upsert below overwrites
+	// blob_index 0..n-1, but if a stale-fork version of the block landed with
+	// more blobs, its surplus rows would survive every reprocess — nothing
+	// else deletes them and the stats triggers keep counting them.
+	if _, err := tx.ExecContext(i.ctx,
+		"DELETE FROM blobs WHERE chain_id = $1 AND block_number = $2 AND blob_index >= $3",
+		indexedBlock.ChainID, indexedBlock.BlockNumber, len(blobs),
+	); err != nil {
+		return fmt.Errorf("failed to trim surplus blob rows (block: %d): %w", indexedBlock.BlockNumber, err)
+	}
 
 	// Insert blobs using a prepared statement within the transaction
 	if len(blobs) > 0 {
@@ -1815,7 +1859,7 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			INSERT INTO blobs (
 				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-				timestamp, max_fee_per_blob_gas, blob_gas_used
+				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
 			) VALUES ` + valuesPlaceholders(len(blobs), blobInsertColumns, nil) + `
 			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
 				tx_hash = EXCLUDED.tx_hash,
@@ -1827,14 +1871,15 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				total_cost_wei = EXCLUDED.total_cost_wei,
 				timestamp = EXCLUDED.timestamp,
 				max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
-				blob_gas_used = EXCLUDED.blob_gas_used
+				blob_gas_used = EXCLUDED.blob_gas_used,
+				versioned_hash = EXCLUDED.versioned_hash
 		`
 		insertArgs := make([]interface{}, 0, len(blobs)*blobInsertColumns)
 		for _, blob := range blobs {
 			insertArgs = append(insertArgs,
 				blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed)
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash)
 		}
 		if _, err := tx.ExecContext(i.ctx, insertQuery, insertArgs...); err != nil {
 			return fmt.Errorf("failed to insert blobs (block: %d): %w", indexedBlock.BlockNumber, err)
@@ -2112,7 +2157,7 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 		INSERT INTO mempool_blobs (
 			chain_id, tx_hash, blob_index, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
 		) VALUES ` + valuesPlaceholders(len(blobs), mempoolBlobInsertColumns, nil) + `
 		ON CONFLICT (chain_id, tx_hash, blob_index) DO UPDATE SET
 			from_address = EXCLUDED.from_address,
@@ -2123,14 +2168,15 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 			total_cost_wei = EXCLUDED.total_cost_wei,
 			timestamp = EXCLUDED.timestamp,
 			max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
-			blob_gas_used = EXCLUDED.blob_gas_used
+			blob_gas_used = EXCLUDED.blob_gas_used,
+			versioned_hash = EXCLUDED.versioned_hash
 	`
 	upsertArgs := make([]interface{}, 0, len(blobs)*mempoolBlobInsertColumns)
 	for offset, b := range blobs {
 		upsertArgs = append(upsertArgs,
 			b.ChainID, b.TxHash, offset, b.FromAddress, b.UserAttribution,
 			b.BlobSizeBytes, b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostWei,
-			b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed)
+			b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed, b.VersionedHash)
 	}
 	if _, err := tx.ExecContext(i.ctx, upsertQuery, upsertArgs...); err != nil {
 		return fmt.Errorf("failed to insert pending blobs (tx: %s): %w", txHash, err)
@@ -2204,6 +2250,10 @@ func (i *Indexer) deleteReindexRange(startBlock, endBlock uint64) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit reindex cleanup: %w", err)
 	}
+
+	// Same fence as handleReorg: a worker mid-flight with a pre-cleanup fetch
+	// must not repopulate the range with the data this delete just purged.
+	atomic.AddUint64(&i.reorgEpoch, 1)
 
 	return nil
 }

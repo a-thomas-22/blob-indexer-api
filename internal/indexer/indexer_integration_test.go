@@ -97,7 +97,7 @@ func TestIntegrationInsertBlockDataMultiRow(t *testing.T) {
 	}
 	indexedBlock := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 100, BlockHash: "0xhash", ParentHash: "0xparent"}
 
-	if err := idx.insertBlockData(blobs, indexedBlock, nil); err != nil {
+	if err := idx.insertBlockData(blobs, indexedBlock, nil, 0); err != nil {
 		t.Fatalf("insertBlockData() error = %v", err)
 	}
 
@@ -137,7 +137,7 @@ func TestIntegrationInsertBlockDataMultiRow(t *testing.T) {
 
 	// Re-inserting the same block takes the ON CONFLICT DO UPDATE path; the
 	// update trigger's net delta must be zero.
-	if err := idx.insertBlockData(blobs, indexedBlock, nil); err != nil {
+	if err := idx.insertBlockData(blobs, indexedBlock, nil, 0); err != nil {
 		t.Fatalf("insertBlockData() reinsert error = %v", err)
 	}
 	if err := database.GetContext(ctx, &stats.TotalConfirmedBlobs,
@@ -146,6 +146,88 @@ func TestIntegrationInsertBlockDataMultiRow(t *testing.T) {
 	}
 	if stats.TotalConfirmedBlobs != 3 {
 		t.Fatalf("expected total_confirmed_blobs=3 after reinsert, got %d", stats.TotalConfirmedBlobs)
+	}
+}
+
+// Regression test for the reorg fetch/cleanup race fallout: a stale-fork
+// version of a block can land after handleReorg's cleanup with MORE blobs than
+// the canonical block. The canonical reprocess upserts blob_index 0..n-1, so
+// without the in-transaction trim the surplus rows would survive forever and
+// the statement-level stats triggers would keep counting them.
+func TestIntegrationInsertBlockDataTrimsStaleBlobRows(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+
+	// Stale-fork block 100 landed with three blobs from 0xaaa.
+	stale := []models.Blob{
+		integrationBlob(100, 0, "0xstale", "0xaaa", true),
+		integrationBlob(100, 1, "0xstale", "0xaaa", true),
+		integrationBlob(100, 2, "0xstale", "0xaaa", true),
+	}
+	staleIndexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 100, BlockHash: "0xstalehash", ParentHash: "0xstaleparent"}
+	if err := idx.insertBlockData(stale, staleIndexed, nil, 0); err != nil {
+		t.Fatalf("insertBlockData() stale insert error = %v", err)
+	}
+
+	// The canonical reprocess of block 100 carries a single blob from 0xbbb.
+	canonical := []models.Blob{integrationBlob(100, 0, "0xcanon", "0xbbb", true)}
+	canonicalIndexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 100, BlockHash: "0xcanonhash", ParentHash: "0xcanonparent"}
+	if err := idx.insertBlockData(canonical, canonicalIndexed, nil, 0); err != nil {
+		t.Fatalf("insertBlockData() canonical reprocess error = %v", err)
+	}
+
+	// Only the canonical row set may survive.
+	var rows []struct {
+		BlobIndex int    `db:"blob_index"`
+		TxHash    string `db:"tx_hash"`
+	}
+	if err := database.SelectContext(ctx, &rows,
+		"SELECT blob_index, tx_hash FROM blobs WHERE chain_id = $1 AND block_number = 100 ORDER BY blob_index", integrationChainID); err != nil {
+		t.Fatalf("read blobs: %v", err)
+	}
+	if len(rows) != 1 || rows[0].BlobIndex != 0 || rows[0].TxHash != "0xcanon" {
+		t.Fatalf("expected single canonical blob row [0 0xcanon], got %+v", rows)
+	}
+
+	// The trim ran inside the same transaction, so the stats triggers must
+	// have net-counted it: one confirmed blob total, the stale sender zeroed.
+	var totalConfirmed int64
+	if err := database.GetContext(ctx, &totalConfirmed,
+		"SELECT COALESCE((SELECT total_confirmed_blobs FROM network_blob_stats WHERE chain_id = $1), 0)", integrationChainID); err != nil {
+		t.Fatalf("read network_blob_stats: %v", err)
+	}
+	if totalConfirmed != 1 {
+		t.Fatalf("expected total_confirmed_blobs=1 after trim, got %d", totalConfirmed)
+	}
+	var staleSenderBlobs int64
+	if err := database.GetContext(ctx, &staleSenderBlobs,
+		"SELECT COALESCE(SUM(blob_count), 0) FROM blob_user_stats WHERE chain_id = $1 AND from_address = $2", integrationChainID, "0xaaa"); err != nil {
+		t.Fatalf("read blob_user_stats for stale sender: %v", err)
+	}
+	if staleSenderBlobs != 0 {
+		t.Fatalf("expected stale sender 0xaaa to hold 0 blobs after trim, got %d", staleSenderBlobs)
+	}
+
+	// A canonical block with no blobs at all must clear every stale row too —
+	// the trim has to run even when the insert loop is skipped entirely.
+	emptyIndexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 100, BlockHash: "0xemptyhash", ParentHash: "0xemptyparent"}
+	if err := idx.insertBlockData(nil, emptyIndexed, nil, 0); err != nil {
+		t.Fatalf("insertBlockData() empty reprocess error = %v", err)
+	}
+	var blobCount int
+	if err := database.GetContext(ctx, &blobCount,
+		"SELECT COUNT(*) FROM blobs WHERE chain_id = $1 AND block_number = 100", integrationChainID); err != nil {
+		t.Fatalf("count blobs after empty reprocess: %v", err)
+	}
+	if blobCount != 0 {
+		t.Fatalf("expected 0 blob rows after zero-blob reprocess, got %d", blobCount)
+	}
+	if err := database.GetContext(ctx, &totalConfirmed,
+		"SELECT COALESCE((SELECT total_confirmed_blobs FROM network_blob_stats WHERE chain_id = $1), 0)", integrationChainID); err != nil {
+		t.Fatalf("re-read network_blob_stats: %v", err)
+	}
+	if totalConfirmed != 0 {
+		t.Fatalf("expected total_confirmed_blobs=0 after zero-blob reprocess, got %d", totalConfirmed)
 	}
 }
 
@@ -236,7 +318,7 @@ func TestIntegrationInsertPendingBlobsUpsert(t *testing.T) {
 	// resurrect pending rows.
 	confirmedBlob := integrationBlob(200, 0, "0xpending", "0xccc", true)
 	indexedBlock := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 200, BlockHash: "0xhash200", ParentHash: "0xparent200"}
-	if err := idx.insertBlockData([]models.Blob{confirmedBlob}, indexedBlock, nil); err != nil {
+	if err := idx.insertBlockData([]models.Blob{confirmedBlob}, indexedBlock, nil, 0); err != nil {
 		t.Fatalf("insertBlockData() promote error = %v", err)
 	}
 	var pendingLeft int
