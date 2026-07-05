@@ -6,8 +6,13 @@ import "time"
 type WSEventType string
 
 const (
-	// EventNewBlock is emitted when a new block with blobs is indexed.
+	// EventNewBlock is emitted when a new block is indexed — including blocks
+	// with zero blob transactions, which still carry pricing data.
 	EventNewBlock WSEventType = "new_block"
+	// EventBlockSnapshot is sent once to every newly connected client and
+	// carries the most recent blocks, so reconnecting clients recover blocks
+	// broadcast while they were away without refetching.
+	EventBlockSnapshot WSEventType = "block_snapshot"
 	// EventMempoolUpdate is emitted when a blob tx enters or leaves the mempool.
 	EventMempoolUpdate WSEventType = "mempool_update"
 	// EventStatsUpdate is emitted when aggregate stats change.
@@ -44,6 +49,12 @@ type NewBlockData struct {
 	Timestamp   time.Time             `json:"timestamp"`
 	Blobs       []BlobResponse        `json:"blobs"`
 	Pricing     *BlockPricingResponse `json:"pricing,omitempty"`
+}
+
+// BlockSnapshotData is the payload for EventBlockSnapshot. Blocks are ordered
+// newest first.
+type BlockSnapshotData struct {
+	Blocks []NewBlockData `json:"blocks"`
 }
 
 // MempoolUpdateData is the payload for EventMempoolUpdate.

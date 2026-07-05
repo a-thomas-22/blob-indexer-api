@@ -4,6 +4,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -12,7 +13,7 @@ import (
 	migratepg "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/testdb"
 )
@@ -1133,5 +1134,92 @@ func TestWritePathCostsMigration(t *testing.T) {
 	// Re-applying up must be a clean idempotent run.
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("re-apply up: %v", err)
+	}
+}
+
+// TestBlockMetricsNotifyTrigger verifies migration 6: every committed
+// block_metrics INSERT or UPDATE posts a blob_indexer_new_block notification
+// carrying the chain and block number, delivered on commit.
+func TestBlockMetricsNotifyTrigger(t *testing.T) {
+	url := integrationDBURL(t)
+	db, err := sqlx.Connect("postgres", url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	resetSchema(t, db)
+
+	m := migrator(t, db)
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate up: %v", err)
+	}
+
+	listener := pq.NewListener(url, time.Second, 10*time.Second, nil)
+	defer listener.Close()
+	if err := listener.Listen("blob_indexer_new_block"); err != nil {
+		t.Fatalf("LISTEN: %v", err)
+	}
+
+	waitNotification := func(wantChain int, wantBlock int64) {
+		t.Helper()
+		for {
+			select {
+			case n := <-listener.Notify:
+				if n == nil {
+					continue // reconnect marker
+				}
+				var payload struct {
+					ChainID     int   `json:"chain_id"`
+					BlockNumber int64 `json:"block_number"`
+				}
+				if err := json.Unmarshal([]byte(n.Extra), &payload); err != nil {
+					t.Fatalf("unmarshal payload %q: %v", n.Extra, err)
+				}
+				if payload.ChainID != wantChain || payload.BlockNumber != wantBlock {
+					t.Fatalf("notification = %+v, want chain %d block %d", payload, wantChain, wantBlock)
+				}
+				return
+			case <-time.After(5 * time.Second):
+				t.Fatalf("no notification received for chain %d block %d", wantChain, wantBlock)
+			}
+		}
+	}
+
+	// INSERT path — the baseline seeds network chain 1.
+	if _, err := db.Exec(`
+		INSERT INTO block_metrics (chain_id, block_number, block_timestamp, blob_count)
+		VALUES (1, 12345, NOW() AT TIME ZONE 'UTC', 3)
+	`); err != nil {
+		t.Fatalf("insert block_metrics: %v", err)
+	}
+	waitNotification(1, 12345)
+
+	// UPDATE path (the indexer's ON CONFLICT DO UPDATE on re-index/reorg).
+	if _, err := db.Exec(`UPDATE block_metrics SET blob_count = 4 WHERE chain_id = 1 AND block_number = 12345`); err != nil {
+		t.Fatalf("update block_metrics: %v", err)
+	}
+	waitNotification(1, 12345)
+
+	// Rolled-back writes must not notify.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO block_metrics (chain_id, block_number, block_timestamp, blob_count)
+		VALUES (1, 99999, NOW() AT TIME ZONE 'UTC', 1)
+	`); err != nil {
+		t.Fatalf("insert in tx: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	select {
+	case n := <-listener.Notify:
+		if n != nil {
+			t.Fatalf("rolled-back insert must not notify, got %s", n.Extra)
+		}
+	case <-time.After(time.Second):
+		// Expected: silence.
 	}
 }

@@ -35,6 +35,11 @@ type Client struct {
 	send           chan []byte
 	networkChainID int
 	networkName    string
+	// registered is closed by the hub's Run loop once the client is in the
+	// clients map. Direct sends (SendEventToClient) are dropped for
+	// unregistered clients, so senders must wait on it first. May be nil for
+	// clients that never use direct sends.
+	registered chan struct{}
 	// remoteIP is the resolved client IP used for the per-IP connection cap.
 	// It must match the value passed to Hub.admit so the slot is released on
 	// disconnect.

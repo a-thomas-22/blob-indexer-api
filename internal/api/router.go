@@ -188,6 +188,11 @@ func newAPI(ctx context.Context, db DBProvider, cfg *config.Config) *API {
 	// cache entries are dropped the moment a new block or mempool change is
 	// detected — ahead of the WebSocket broadcast that triggers refetches.
 	poller.invalidator = api
+	// Primary block detection is LISTEN/NOTIFY on block_metrics commits; the
+	// poller degrades to scan-only detection if the listener cannot connect.
+	if cfg.Database.URL != "" {
+		poller.listenerFactory = pqListenerFactory(cfg.Database.URL)
+	}
 	go poller.Run(ctx)
 
 	return api

@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
@@ -166,6 +166,98 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		}
 		if counts.Confirmed != 1 || counts.Pending != 1 {
 			t.Fatalf("unexpected counts: %+v", counts)
+		}
+	})
+}
+
+// TestWSPollerQueriesAgainstRealPostgres validates the WebSocket poller's and
+// snapshot builder's query text against a real schema, including type
+// unification of block_number scans into uint64 slices.
+func TestWSPollerQueriesAgainstRealPostgres(t *testing.T) {
+	url := testdb.URL(t, "api")
+	sqlxDB, err := sqlx.Connect("postgres", url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer sqlxDB.Close()
+
+	for _, stmt := range []string{
+		"DROP SCHEMA IF EXISTS public CASCADE",
+		"CREATE SCHEMA public",
+		"GRANT ALL ON SCHEMA public TO PUBLIC",
+	} {
+		if _, err := sqlxDB.Exec(stmt); err != nil {
+			t.Fatalf("reset schema (%s): %v", stmt, err)
+		}
+	}
+	if err := db.RunMigrations(url); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO block_metrics (chain_id, block_number, block_timestamp, blob_count)
+		VALUES (1, 100, $1, 1), (1, 101, $1, 0)
+	`, now); err != nil {
+		t.Fatalf("seed block_metrics: %v", err)
+	}
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES (1, 100, 0, '0xws', '0xfrom', 'Rollup', 131072, 10, 2, 100, $1, 12, 131072)
+	`, now); err != nil {
+		t.Fatalf("seed blob: %v", err)
+	}
+
+	t.Run("queryRecentBlockMetricsNumbers", func(t *testing.T) {
+		var numbers []uint64
+		if err := sqlxDB.SelectContext(ctx, &numbers, queryRecentBlockMetricsNumbers, 1, 32); err != nil {
+			t.Fatalf("queryRecentBlockMetricsNumbers: %v", err)
+		}
+		if len(numbers) != 2 || numbers[0] != 101 || numbers[1] != 100 {
+			t.Fatalf("got %v, want [101 100]", numbers)
+		}
+		// Empty network yields an empty (non-error) result.
+		numbers = nil
+		if err := sqlxDB.SelectContext(ctx, &numbers, queryRecentBlockMetricsNumbers, 424242, 32); err != nil {
+			t.Fatalf("queryRecentBlockMetricsNumbers empty: %v", err)
+		}
+		if len(numbers) != 0 {
+			t.Fatalf("got %v for empty network, want none", numbers)
+		}
+	})
+
+	t.Run("queryBlockMetricsNumbersSince", func(t *testing.T) {
+		var numbers []uint64
+		if err := sqlxDB.SelectContext(ctx, &numbers, queryBlockMetricsNumbersSince, 1, uint64(99), 10); err != nil {
+			t.Fatalf("queryBlockMetricsNumbersSince: %v", err)
+		}
+		if len(numbers) != 2 || numbers[0] != 100 || numbers[1] != 101 {
+			t.Fatalf("got %v, want [100 101]", numbers)
+		}
+	})
+
+	t.Run("queryBlobsByBlockNumber", func(t *testing.T) {
+		var blobs []models.Blob
+		if err := sqlxDB.SelectContext(ctx, &blobs, queryBlobsByBlockNumber, 1, uint64(100)); err != nil {
+			t.Fatalf("queryBlobsByBlockNumber: %v", err)
+		}
+		if len(blobs) != 1 || blobs[0].TxHash != "0xws" {
+			t.Fatalf("unexpected blobs: %+v", blobs)
+		}
+	})
+
+	t.Run("queryBlobsByBlockNumbers", func(t *testing.T) {
+		var blobs []models.Blob
+		if err := sqlxDB.SelectContext(ctx, &blobs, queryBlobsByBlockNumbers, 1, pq.Array([]int64{100, 101})); err != nil {
+			t.Fatalf("queryBlobsByBlockNumbers: %v", err)
+		}
+		if len(blobs) != 1 || blobs[0].BlockNumber != 100 {
+			t.Fatalf("unexpected blobs: %+v", blobs)
 		}
 	})
 }
