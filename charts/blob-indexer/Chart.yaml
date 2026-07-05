@@ -2,5 +2,5 @@ apiVersion: v2
 name: blob-indexer
 description: Ethereum blob transaction indexer and REST API
 type: application
-version: 0.6.5
+version: 0.6.6
 appVersion: 0.9.0
