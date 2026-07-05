@@ -285,3 +285,32 @@ func TestIntegrationSetNetworkMetadataBatch(t *testing.T) {
 		t.Fatalf("expected last_indexed_block=124, got %q", got)
 	}
 }
+
+// TestIntegrationStartupGapRecovery exercises the generate_series anti-join
+// behind GetUnindexedBlocksInRange against real Postgres — sqlmock cannot
+// validate that SQL. It simulates the post-crash state where parallel workers
+// committed out of order: the watermark reached 106 while 103 and 105 never
+// committed.
+func TestIntegrationStartupGapRecovery(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+
+	for _, blockNumber := range []uint64{100, 101, 102, 104, 106} {
+		if _, err := database.ExecContext(ctx,
+			"INSERT INTO indexed_blocks (chain_id, block_number, block_hash, parent_hash) VALUES ($1, $2, $3, $4)",
+			integrationChainID, blockNumber, "0xhash", "0xparent"); err != nil {
+			t.Fatalf("insert indexed block %d: %v", blockNumber, err)
+		}
+	}
+
+	// The 50-block window starts at 57, well below the earliest indexed block
+	// (100). The never-indexed prefix 57-99 must not be reported as a gap.
+	idx.startupGapScanBlocks = 50
+	idx.seedStartupGapRecovery(106)
+
+	idx.failedBlocksMu.Lock()
+	defer idx.failedBlocksMu.Unlock()
+	if len(idx.failedBlocks) != 2 || idx.failedBlocks[103] != 1 || idx.failedBlocks[105] != 1 {
+		t.Fatalf("expected exactly blocks 103 and 105 seeded, got %v", idx.failedBlocks)
+	}
+}

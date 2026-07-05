@@ -373,6 +373,67 @@ func TestGetFirstUnindexedBlock(t *testing.T) {
 	})
 }
 
+func TestGetUnindexedBlocksInRange(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		rows := sqlmock.NewRows([]string{"block_number"}).AddRow(uint64(102)).AddRow(uint64(105))
+		mock.ExpectQuery("WITH bounds AS").
+			WithArgs(1, uint64(100), uint64(200), 500).
+			WillReturnRows(rows)
+
+		blocks, err := db.GetUnindexedBlocksInRange(context.Background(), 1, 100, 200, 500)
+		if err != nil {
+			t.Fatalf("GetUnindexedBlocksInRange() error = %v", err)
+		}
+		if len(blocks) != 2 || blocks[0] != 102 || blocks[1] != 105 {
+			t.Fatalf("expected [102 105], got %v", blocks)
+		}
+	})
+
+	t.Run("empty range skips query", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		blocks, err := db.GetUnindexedBlocksInRange(context.Background(), 1, 200, 100, 500)
+		if err != nil {
+			t.Fatalf("GetUnindexedBlocksInRange() error = %v", err)
+		}
+		if blocks != nil {
+			t.Fatalf("expected nil for empty range, got %v", blocks)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unexpected query for empty range: %v", err)
+		}
+	})
+
+	t.Run("non-positive limit skips query", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		blocks, err := db.GetUnindexedBlocksInRange(context.Background(), 1, 100, 200, 0)
+		if err != nil {
+			t.Fatalf("GetUnindexedBlocksInRange() error = %v", err)
+		}
+		if blocks != nil {
+			t.Fatalf("expected nil for non-positive limit, got %v", blocks)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unexpected query for non-positive limit: %v", err)
+		}
+	})
+
+	t.Run("query error", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectQuery("WITH bounds AS").
+			WithArgs(1, uint64(100), uint64(200), 500).
+			WillReturnError(errors.New("query failed"))
+
+		_, err := db.GetUnindexedBlocksInRange(context.Background(), 1, 100, 200, 500)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "failed to get unindexed blocks") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
 func TestDeleteFromBlockMethods(t *testing.T) {
 	db, mock := newMockDB(t)
 

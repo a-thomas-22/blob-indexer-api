@@ -169,6 +169,7 @@ type Indexer struct {
 	maxBlockRetries        int
 	gapScanInterval        time.Duration
 	maxReorgDepth          int
+	startupGapScanBlocks   int
 	// pendingTxResubBaseBackoff is the initial resubscribe backoff; a field so
 	// tests can shrink it. Defaults to pendingTxResubscribeBaseBackoff.
 	pendingTxResubBaseBackoff time.Duration
@@ -239,6 +240,7 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		maxBlockRetries:           cfg.Indexer.MaxBlockRetries,
 		gapScanInterval:           cfg.Indexer.GapScanInterval,
 		maxReorgDepth:             cfg.Indexer.MaxReorgDepth,
+		startupGapScanBlocks:      cfg.Indexer.StartupGapScanBlocks,
 		pendingTxResubBaseBackoff: pendingTxResubscribeBaseBackoff,
 		fineRollupPruneInterval:   defaultFineRollupPruneInterval,
 		ctx:                       indexerCtx,
@@ -351,6 +353,16 @@ func (i *Indexer) Start() error {
 	startBlock, err := i.determineStartBlock()
 	if err != nil {
 		return fmt.Errorf("failed to determine start block: %w", err)
+	}
+
+	// Parallel workers commit out of order, so a crash can persist a
+	// last_indexed_block watermark above blocks that never committed. When
+	// the resume point skips past the watermark those blocks would stay
+	// orphaned forever — the gap scanner only tracks in-memory failures. A
+	// resume at or below the watermark (active backfill) re-walks through any
+	// gaps on its own.
+	if lastBlock > 0 && startBlock > lastBlock {
+		i.seedStartupGapRecovery(lastBlock)
 	}
 
 	// Pending rows live in mempool_blobs; purge any legacy block_number < 0
@@ -940,6 +952,52 @@ func (i *Indexer) trackFailedBlock(blockNumber uint64) {
 	}
 	i.failedBlocks[blockNumber]++
 	i.failedBlocksMu.Unlock()
+}
+
+// seedStartupGapRecovery hands blocks orphaned below the persisted
+// last_indexed_block watermark to the gap scanner. Parallel workers commit
+// out of order, so a crash can leave the watermark above blocks that never
+// committed; a steady-state resume from watermark+1 would skip them forever.
+// Only a bounded recent window is scanned: crash fallout sits close to the
+// watermark (task channel capacity plus lingering failed-block retries),
+// while older gaps are operator territory (manual reindex requests).
+func (i *Indexer) seedStartupGapRecovery(lastBlock uint64) {
+	if i.db == nil || i.startupGapScanBlocks <= 0 {
+		return
+	}
+
+	window := uint64(i.startupGapScanBlocks)
+	var windowStart uint64
+	if lastBlock >= window {
+		windowStart = lastBlock - window + 1
+	}
+
+	missing, err := i.db.GetUnindexedBlocksInRange(i.ctx, i.network.ChainID, windowStart, lastBlock, i.startupGapScanBlocks)
+	if err != nil {
+		// Best-effort: startup must not fail on a recovery scan. The blocks
+		// stay orphaned exactly as they would without it.
+		logger.Error("Failed to scan for blocks orphaned below the watermark",
+			zap.String("network", i.network.Name),
+			zap.Uint64("window_start", windowStart),
+			zap.Uint64("last_indexed_block", lastBlock),
+			zap.Error(err))
+		return
+	}
+	if len(missing) == 0 {
+		return
+	}
+
+	logger.Warn("Recovering blocks orphaned below the persisted watermark",
+		zap.String("event", "startup_gap_recovery"),
+		zap.String("network", i.network.Name),
+		zap.Int("chain_id", i.network.ChainID),
+		zap.Int("count", len(missing)),
+		zap.Uint64("first_block", missing[0]),
+		zap.Uint64("last_block", missing[len(missing)-1]),
+		zap.Uint64("watermark", lastBlock))
+	for _, blockNumber := range missing {
+		i.trackFailedBlock(blockNumber)
+	}
 }
 
 // backfillRangeFullyIndexed reports whether indexed_blocks covers
