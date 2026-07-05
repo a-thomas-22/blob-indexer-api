@@ -101,7 +101,13 @@ type IndexerConfig struct {
 	MaxBlockRetries        int           `mapstructure:"max_block_retries" yaml:"max_block_retries"`
 	GapScanInterval        time.Duration `mapstructure:"gap_scan_interval" yaml:"gap_scan_interval"`
 	MaxReorgDepth          int           `mapstructure:"max_reorg_depth" yaml:"max_reorg_depth"`
-	RPCRateLimit           float64       `mapstructure:"rpc_rate_limit" yaml:"rpc_rate_limit"` // requests per second; 0 = no proactive limiting
+	// StartupGapScanBlocks is how many blocks below the persisted
+	// last_indexed_block watermark are scanned for indexed_blocks gaps at
+	// startup. Parallel workers commit out of order, so a crash can persist a
+	// watermark above blocks that never committed; the scan re-queues them.
+	// Zero or negative disables the scan.
+	StartupGapScanBlocks int     `mapstructure:"startup_gap_scan_blocks" yaml:"startup_gap_scan_blocks"`
+	RPCRateLimit         float64 `mapstructure:"rpc_rate_limit" yaml:"rpc_rate_limit"` // requests per second; 0 = no proactive limiting
 }
 
 // AttributionConfig holds dynamic attribution registry configuration.
@@ -201,6 +207,7 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("indexer.max_block_retries", 3)
 	v.SetDefault("indexer.gap_scan_interval", "5m")
 	v.SetDefault("indexer.max_reorg_depth", 64)
+	v.SetDefault("indexer.startup_gap_scan_blocks", 10000)
 	v.SetDefault("indexer.rpc_rate_limit", 0)
 	v.SetDefault("attribution.blob_list_enabled", true)
 	v.SetDefault("attribution.blob_list_base_url", "https://raw.githubusercontent.com/ahkc4/blob-list/main/artifacts/by-chain")

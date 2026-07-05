@@ -262,6 +262,58 @@ func (db *DB) GetFirstUnindexedBlock(ctx context.Context, networkID int, startBl
 	return blockNumber, nil
 }
 
+// GetUnindexedBlocksInRange returns the block numbers in the inclusive range
+// that have no indexed_blocks row, capped at limit. When
+// floorAtEarliestIndexed is true, blocks below the network's earliest indexed
+// row are never reported and a network with no indexed rows yields nothing —
+// for callers that cannot resolve where coverage was meant to begin (LATEST
+// start blocks), so a never-indexed prefix is not misread as a gap. Callers
+// that know the intended start pass false and clamp startBlock to it, since
+// a missing prefix above that start is a real gap (a crash can persist a
+// watermark before any lower block commits).
+func (db *DB) GetUnindexedBlocksInRange(ctx context.Context, networkID int, startBlock, endBlock uint64, limit int, floorAtEarliestIndexed bool) ([]uint64, error) {
+	if startBlock > endBlock || limit <= 0 {
+		return nil, nil
+	}
+
+	query := `
+		SELECT gs.block_number
+		FROM generate_series($2::bigint, $3::bigint) AS gs(block_number)
+		WHERE NOT EXISTS (
+			SELECT 1 FROM indexed_blocks
+			WHERE chain_id = $1 AND block_number = gs.block_number
+		)
+		ORDER BY gs.block_number
+		LIMIT $4
+	`
+	if floorAtEarliestIndexed {
+		query = `
+			WITH bounds AS (
+				SELECT MIN(block_number) AS min_indexed
+				FROM indexed_blocks
+				WHERE chain_id = $1
+			)
+			SELECT gs.block_number
+			FROM bounds,
+				generate_series(GREATEST($2::bigint, bounds.min_indexed), $3::bigint) AS gs(block_number)
+			WHERE bounds.min_indexed IS NOT NULL
+				AND NOT EXISTS (
+					SELECT 1 FROM indexed_blocks
+					WHERE chain_id = $1 AND block_number = gs.block_number
+				)
+			ORDER BY gs.block_number
+			LIMIT $4
+		`
+	}
+
+	var blocks []uint64
+	if err := db.SelectContext(ctx, &blocks, query, networkID, startBlock, endBlock, limit); err != nil {
+		return nil, fmt.Errorf("failed to get unindexed blocks for network %d range %d-%d: %w", networkID, startBlock, endBlock, err)
+	}
+
+	return blocks, nil
+}
+
 // DeleteBlobsFromBlock deletes all blobs at or above the given block number for a network.
 func (db *DB) DeleteBlobsFromBlock(ctx context.Context, networkID int, fromBlock int64) error {
 	query := "DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2"
