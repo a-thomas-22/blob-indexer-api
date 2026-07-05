@@ -78,7 +78,6 @@ func TestGetRollingStatsWindows_Success(t *testing.T) {
 			for _, want := range []string{
 				"WITH requested_windows AS",
 				"FROM blobs b",
-				"b.confirmed = true",
 				"FROM block_metrics bm",
 				"blocks_above_target",
 				"blocks_at_max",

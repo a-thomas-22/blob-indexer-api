@@ -1168,7 +1168,6 @@ const queryBlobMarketTimeChart = `
 		FROM blobs bl
 		CROSS JOIN bounds b
 		WHERE bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
 	),
@@ -1258,7 +1257,6 @@ const queryBlobMarketBlockChart = `
 		FROM selected_blocks sb
 		LEFT JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.block_number = sb.block_number
 		GROUP BY sb.block_number
 	),
@@ -1279,7 +1277,6 @@ const queryBlobMarketBlockChart = `
 		FROM bounds b
 		LEFT JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
 	),
@@ -1334,7 +1331,7 @@ const queryCostComparisonTimeChart = `
 			END AS range_start,
 			$4::timestamp AS range_end
 		FROM blobs
-		WHERE chain_id = $1 AND confirmed = true
+		WHERE chain_id = $1
 	),
 	buckets AS (
 		SELECT
@@ -1362,7 +1359,6 @@ const queryCostComparisonTimeChart = `
 		FROM bounds b
 		JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
 	),
@@ -1433,7 +1429,6 @@ const queryCostComparisonBlockChart = `
 		FROM selected_blocks sb
 		LEFT JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.block_number = sb.block_number
 		GROUP BY sb.block_number
 	),
@@ -1444,7 +1439,6 @@ const queryCostComparisonBlockChart = `
 		FROM bounds b
 		LEFT JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
 	)
@@ -1582,7 +1576,7 @@ var queryAttributionUsageTimeChart = `
 			END AS range_start,
 			$4::timestamp AS range_end
 		FROM blobs
-		WHERE chain_id = $1 AND confirmed = true
+		WHERE chain_id = $1
 	),
 	buckets AS (
 		SELECT
@@ -1613,7 +1607,6 @@ var queryAttributionUsageTimeChart = `
 		FROM bounds b
 		JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
 		LEFT JOIN blob_users known
@@ -1666,7 +1659,6 @@ var queryAttributionUsageBlockChart = `
 		FROM buckets bu
 		JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.block_number = bu.block_number
 		LEFT JOIN blob_users known
 			ON known.chain_id = bl.chain_id

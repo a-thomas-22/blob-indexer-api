@@ -13,6 +13,12 @@ import (
 // whether a blob is included.
 const PendingBlockNumber int64 = -1
 
+// Confirmed is not a stored column: blobs holds confirmed rows only and
+// mempool_blobs holds pending rows, so API queries project a literal
+// (true/false AS confirmed) matching the source table. The flag stays on the
+// struct because it is exposed on the wire and drives serialization
+// (explorer URLs, cache TTLs).
+
 // Blob represents a blob transaction in the database
 type Blob struct {
 	ID                int64     `db:"id"`

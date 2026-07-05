@@ -159,23 +159,23 @@ $$ LANGUAGE plpgsql;
 -- ---------------------------------------------------------------------------
 
 -- blobs. Kept: UNIQUE(chain_id, block_number, blob_index) — serves every
--- (chain_id, block_number) predicate incl. reorg deletes and per-block chart
--- joins; idx_blobs_chain_confirmed_block; idx_blobs_chain_txhash;
--- idx_blobs_chain_from_timestamp;
--- idx_blobs_chain_confirmed_timestamp_chart_cover — its key columns and
--- INCLUDE set are a superset of the dropped _cover variant, so it serves the
+-- (chain_id, block_number) predicate and ordering incl. /blob/latest keyset
+-- reads, reorg deletes, and per-block chart joins;
+-- idx_blobs_chain_txhash; idx_blobs_chain_from_timestamp;
+-- idx_blobs_chain_timestamp_chart_cover (000003) — its key columns and
+-- INCLUDE set are a superset of the _cover variant, so it serves the
 -- rolling-stats and chart raw scans as well as all plain
--- (chain_id, confirmed, timestamp) orderings; and
+-- (chain_id, timestamp) orderings; and
 -- idx_blobs_chain_lower_from_address — required by the attribution refresher's
 -- LOWER(from_address) UPDATE statements (internal/attribution/blob_list.go).
-DROP INDEX IF EXISTS idx_blobs_chain_id;                       -- prefix of six composites
-DROP INDEX IF EXISTS idx_blobs_block_number;                   -- subsumed by UNIQUE(chain_id, block_number, blob_index)
-DROP INDEX IF EXISTS idx_blobs_from_address;                   -- no cross-chain address query exists
-DROP INDEX IF EXISTS idx_blobs_timestamp;                      -- no cross-chain timestamp query exists
-DROP INDEX IF EXISTS idx_blobs_confirmed;                      -- single-column boolean, never selective
-DROP INDEX IF EXISTS idx_blobs_chain_timestamp;                -- every timestamp predicate also filters confirmed
-DROP INDEX IF EXISTS idx_blobs_chain_confirmed_timestamp;      -- key-duplicate of the chart cover index
-DROP INDEX IF EXISTS idx_blobs_chain_confirmed_timestamp_cover; -- INCLUDE subset of the chart cover index
+-- The confirmed-keyed indexes were already dropped with the column (000003).
+DROP INDEX IF EXISTS idx_blobs_chain_id;               -- prefix of the remaining composites
+DROP INDEX IF EXISTS idx_blobs_block_number;           -- subsumed by UNIQUE(chain_id, block_number, blob_index)
+DROP INDEX IF EXISTS idx_blobs_chain_block;            -- 000003 replacement, also subsumed by the UNIQUE index
+DROP INDEX IF EXISTS idx_blobs_from_address;           -- no cross-chain address query exists
+DROP INDEX IF EXISTS idx_blobs_timestamp;              -- no cross-chain timestamp query exists
+DROP INDEX IF EXISTS idx_blobs_chain_timestamp;        -- key-duplicate of the chart cover index
+DROP INDEX IF EXISTS idx_blobs_chain_timestamp_cover;  -- INCLUDE subset of the chart cover index
 
 -- block_metrics: (chain_id, block_number DESC) duplicates the primary key,
 -- which a btree scans backwards at identical cost.
