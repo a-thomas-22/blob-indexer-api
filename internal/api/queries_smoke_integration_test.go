@@ -173,7 +173,10 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 // TestUserWindowQueriesAgainstRealPostgres validates the windowed /users query
 // text against a real schema: the 1h tier reading trigger-maintained fine
 // (60s) rollup buckets, the hourly tier's 24h/30d bounds, and the
-// deterministic ordering of count ties.
+// deterministic ordering of count ties. It runs on a deliberately non-UTC
+// session so a window bound computed in session-local time (instead of UTC
+// wall time, matching the naive bucket_start timestamps) shifts by the UTC
+// offset and fails the bounds assertions.
 func TestUserWindowQueriesAgainstRealPostgres(t *testing.T) {
 	url := testdb.URL(t, "api")
 	sqlxDB, err := sqlx.Connect("postgres", url)
@@ -193,6 +196,15 @@ func TestUserWindowQueriesAgainstRealPostgres(t *testing.T) {
 	}
 	if err := db.RunMigrations(url); err != nil {
 		t.Fatalf("migrate: %v", err)
+	}
+
+	// Pin the pool to one connection so the session TimeZone below applies to
+	// every query in this test. Tokyo is UTC+9: far enough that any
+	// session-local window bound moves by hours in the direction that changes
+	// which seeded blobs fall inside each window.
+	sqlxDB.SetMaxOpenConns(1)
+	if _, err := sqlxDB.Exec("SET TIME ZONE 'Asia/Tokyo'"); err != nil {
+		t.Fatalf("set session time zone: %v", err)
 	}
 
 	ctx := context.Background()

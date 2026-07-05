@@ -167,11 +167,14 @@ const (
 		WITH window_params AS (
 			SELECT
 				CASE WHEN $4 = '1h' THEN 60 ELSE 3600 END AS bucket_seconds,
+				-- bucket_start is a naive UTC timestamp, so the bound must be
+				-- computed in UTC wall time; bare NOW() would shift the window
+				-- by the session TimeZone offset.
 				CASE
-					WHEN $4 = '1h' THEN date_trunc('minute', NOW() - INTERVAL '1 hour')
-					WHEN $4 = '24h' THEN date_trunc('hour', NOW() - INTERVAL '24 hours')
-					WHEN $4 = '30d' THEN date_trunc('hour', NOW() - INTERVAL '30 days')
-					ELSE date_trunc('hour', NOW() - INTERVAL '7 days')
+					WHEN $4 = '1h' THEN date_trunc('minute', (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 hour')
+					WHEN $4 = '24h' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours')
+					WHEN $4 = '30d' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days')
+					ELSE date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days')
 				END AS start_time
 		),
 		user_totals AS (
@@ -291,11 +294,14 @@ const (
 		WITH window_params AS (
 			SELECT
 				CASE WHEN $4 = '1h' THEN 60 ELSE 3600 END AS bucket_seconds,
+				-- bucket_start is a naive UTC timestamp, so the bound must be
+				-- computed in UTC wall time; bare NOW() would shift the window
+				-- by the session TimeZone offset.
 				CASE
-					WHEN $4 = '1h' THEN date_trunc('minute', NOW() - INTERVAL '1 hour')
-					WHEN $4 = '24h' THEN date_trunc('hour', NOW() - INTERVAL '24 hours')
-					WHEN $4 = '30d' THEN date_trunc('hour', NOW() - INTERVAL '30 days')
-					ELSE date_trunc('hour', NOW() - INTERVAL '7 days')
+					WHEN $4 = '1h' THEN date_trunc('minute', (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 hour')
+					WHEN $4 = '24h' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours')
+					WHEN $4 = '30d' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days')
+					ELSE date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days')
 				END AS start_time
 		),
 		user_totals AS (
@@ -410,11 +416,14 @@ const (
 		WITH window_params AS (
 			SELECT
 				CASE WHEN $2 = '1h' THEN 60 ELSE 3600 END AS bucket_seconds,
+				-- bucket_start is a naive UTC timestamp, so the bound must be
+				-- computed in UTC wall time; bare NOW() would shift the window
+				-- by the session TimeZone offset.
 				CASE
-					WHEN $2 = '1h' THEN date_trunc('minute', NOW() - INTERVAL '1 hour')
-					WHEN $2 = '24h' THEN date_trunc('hour', NOW() - INTERVAL '24 hours')
-					WHEN $2 = '30d' THEN date_trunc('hour', NOW() - INTERVAL '30 days')
-					ELSE date_trunc('hour', NOW() - INTERVAL '7 days')
+					WHEN $2 = '1h' THEN date_trunc('minute', (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 hour')
+					WHEN $2 = '24h' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours')
+					WHEN $2 = '30d' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days')
+					ELSE date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days')
 				END AS start_time
 		),
 		category_totals AS (
