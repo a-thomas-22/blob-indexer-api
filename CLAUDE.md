@@ -55,7 +55,7 @@ Canonical routes are under `/api/v1`. Legacy `/api/*` paths redirect to `/api/v1
 
 - `/api/v1/ws` — WebSocket updates
 - `/api/v1/networks`, `/api/v1/networks/{chainId}` — network listing and status
-- `/api/v1/blob/latest`, `/api/v1/blob/mempool`, `/api/v1/blob/pricing`, `/api/v1/blob/{txHash}` — blob queries
+- `/api/v1/blob/latest`, `/api/v1/blob/mempool`, `/api/v1/blob/pricing`, `/api/v1/blob/by-hash/{versionedHash}`, `/api/v1/blob/{txHash}` — blob queries
 - `/api/v1/block/{number}` — single indexed block with its blobs (matches the WebSocket `new_block` payload)
 - `/api/v1/users` — top blob users
 - `/api/v1/stats` — historical stats
