@@ -877,6 +877,14 @@ const (
 		WHERE chain_id = $1 AND block_number = ANY($2::bigint[])
 	`
 
+	// queryBlockMetricsForBlock retrieves the block_metrics row of a single
+	// block for /block/{number}; every indexed block has a row, so no row
+	// means the block is not indexed.
+	queryBlockMetricsForBlock = `
+		SELECT ` + blockMetricsSelectColumns + ` FROM block_metrics
+		WHERE chain_id = $1 AND block_number = $2
+	`
+
 	// queryLatestBlobsByAddress retrieves confirmed blobs for a specific sender
 	// address. Ordered by timestamp — for confirmed rows block-timestamp order
 	// is block order — so idx_blobs_chain_from_timestamp serves the top-N
