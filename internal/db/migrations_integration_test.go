@@ -353,9 +353,9 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 	})
 }
 
-// TestMigrationsDownThenUp validates that reversible migrations round-trip.
-// Migration 9 is intentionally irreversible (its down is a no-op), so we only
-// step back to the most recent reversible boundary.
+// TestMigrationsDownThenUp validates that the newest migration round-trips:
+// step down one version from the latest and re-apply it, ending clean at the
+// latest bundled version.
 func TestMigrationsDownThenUp(t *testing.T) {
 	db, err := sqlx.Connect("postgres", integrationDBURL(t))
 	if err != nil {
@@ -368,10 +368,8 @@ func TestMigrationsDownThenUp(t *testing.T) {
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("migrate up: %v", err)
 	}
-	// Step back to 7 (before the per-blob migrations). 8.down restores the
-	// unique pending index; 9.down is a no-op marker.
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		t.Fatalf("migrate down to 7: %v", err)
+	if err := m.Steps(-1); err != nil {
+		t.Fatalf("migrate down one: %v", err)
 	}
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("migrate up again: %v", err)
@@ -383,8 +381,12 @@ func TestMigrationsDownThenUp(t *testing.T) {
 	if dirty {
 		t.Fatal("schema dirty after down/up")
 	}
-	if v != 1 {
-		t.Fatalf("expected version 1, got %d", v)
+	latest, err := LatestMigrationVersion()
+	if err != nil {
+		t.Fatalf("LatestMigrationVersion: %v", err)
+	}
+	if v != latest {
+		t.Fatalf("expected version %d after down/up round-trip, got %d", latest, v)
 	}
 }
 
