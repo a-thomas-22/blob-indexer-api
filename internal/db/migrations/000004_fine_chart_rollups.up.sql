@@ -1,12 +1,62 @@
--- Revert the fine (60-second) chart rollup bucket: restore the baseline
--- trigger functions and bucket list, drop the retention helpers, and remove
--- the per-minute rows (bounded by the ~48h retention window, so this delete
--- stays small). Idempotent, no explicit transaction control — see README.md.
+-- Fine-grained (60-second) chart rollup bucket with bounded retention.
+--
+-- The API serves rolling-stats windows of 24h and shorter, and sub-hour chart
+-- granularities, from raw blobs/block_metrics scans today. A per-minute rollup
+-- bucket lets those reads stay O(buckets) like the wider windows already
+-- served from hourly rollups. Unlike the coarse buckets, per-minute rows are
+-- only useful for ~2 days of history, so they carry a retention window:
+--   * chart_rollup_bucket_seconds_for(ts) hands the statement triggers the
+--     bucket sizes applicable to a row timestamp — fine buckets are skipped
+--     for rows older than chart_rollup_fine_retention(), so reindexes of deep
+--     history neither create per-minute rows nor loop over per-minute buckets
+--     on delete/update.
+--   * The indexer prunes expired fine buckets on a timer and backfills the
+--     retention window in bucket-aligned chunks on startup (heavy backfills
+--     stay out of schema migrations; see README.md). Until that backfill
+--     completes, the API detects missing fine coverage and falls back to raw
+--     scans.
+--
+-- The trigger bodies below are the 000003 versions (blobs holds confirmed
+-- rows only, so there are no confirmed predicates) with the static bucket
+-- list swapped for the retention-aware per-timestamp list.
+--
+-- DDL only, idempotent, no explicit transaction control — see README.md.
+
+-- ---------------------------------------------------------------------------
+-- Bucket catalogue
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION chart_rollup_fine_bucket_seconds()
+RETURNS INTEGER AS $$
+    SELECT 60;
+$$ LANGUAGE sql IMMUTABLE;
+
+-- Mirrored by db.FineChartRollupRetention in Go (prune cutoff and backfill
+-- span); keep the two in sync.
+CREATE OR REPLACE FUNCTION chart_rollup_fine_retention()
+RETURNS INTERVAL AS $$
+    SELECT INTERVAL '48 hours';
+$$ LANGUAGE sql IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION chart_rollup_bucket_seconds()
 RETURNS TABLE (bucket_seconds INTEGER) AS $$
-    VALUES (3600), (21600), (86400);
+    VALUES (60), (3600), (21600), (86400);
 $$ LANGUAGE sql IMMUTABLE;
+
+-- Bucket sizes the triggers maintain for a row with the given timestamp: all
+-- coarse buckets always, the fine bucket only within its retention window.
+CREATE OR REPLACE FUNCTION chart_rollup_bucket_seconds_for(p_timestamp TIMESTAMP)
+RETURNS TABLE (bucket_seconds INTEGER) AS $$
+    SELECT g.bucket_seconds
+    FROM chart_rollup_bucket_seconds() g
+    WHERE g.bucket_seconds <> chart_rollup_fine_bucket_seconds()
+        OR p_timestamp >= NOW() - chart_rollup_fine_retention();
+$$ LANGUAGE sql STABLE;
+
+-- ---------------------------------------------------------------------------
+-- block_metrics trigger functions: swap the static bucket list for the
+-- retention-aware per-timestamp list. Bodies otherwise match the baseline.
+-- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION block_metrics_rollups_insert_statement_trigger()
 RETURNS trigger AS $$
@@ -19,7 +69,7 @@ BEGIN
             g.bucket_seconds,
             chart_rollup_bucket_start(r.block_timestamp, g.bucket_seconds) AS bucket_start
         FROM new_rows r
-        CROSS JOIN chart_rollup_bucket_seconds() g
+        CROSS JOIN LATERAL chart_rollup_bucket_seconds_for(r.block_timestamp) g
     LOOP
         PERFORM block_metrics_rollups_refresh(affected.chain_id, affected.bucket_seconds, affected.bucket_start);
     END LOOP;
@@ -38,7 +88,7 @@ BEGIN
             g.bucket_seconds,
             chart_rollup_bucket_start(r.block_timestamp, g.bucket_seconds) AS bucket_start
         FROM old_rows r
-        CROSS JOIN chart_rollup_bucket_seconds() g
+        CROSS JOIN LATERAL chart_rollup_bucket_seconds_for(r.block_timestamp) g
     LOOP
         PERFORM block_metrics_rollups_refresh(affected.chain_id, affected.bucket_seconds, affected.bucket_start);
     END LOOP;
@@ -61,13 +111,17 @@ BEGIN
             UNION
             SELECT chain_id, block_timestamp FROM new_rows
         ) r
-        CROSS JOIN chart_rollup_bucket_seconds() g
+        CROSS JOIN LATERAL chart_rollup_bucket_seconds_for(r.block_timestamp) g
     LOOP
         PERFORM block_metrics_rollups_refresh(affected.chain_id, affected.bucket_seconds, affected.bucket_start);
     END LOOP;
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
+
+-- ---------------------------------------------------------------------------
+-- blobs trigger functions: same swap, on the 000003 bodies.
+-- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION blob_chart_rollups_insert_statement_trigger()
 RETURNS trigger AS $$
@@ -89,8 +143,7 @@ BEGIN
         COALESCE(SUM(r.blob_size_bytes::numeric * r.base_fee_per_blob_gas::numeric), 0),
         NOW()
     FROM new_blobs r
-    CROSS JOIN chart_rollup_bucket_seconds() g
-    WHERE r.confirmed = true
+    CROSS JOIN LATERAL chart_rollup_bucket_seconds_for(r.timestamp) g
     GROUP BY r.chain_id, g.bucket_seconds, chart_rollup_bucket_start(r.timestamp, g.bucket_seconds), r.from_address
     ON CONFLICT (chain_id, bucket_seconds, bucket_start, from_address) DO UPDATE SET
         user_attribution = COALESCE(
@@ -120,8 +173,7 @@ BEGIN
             chart_rollup_bucket_start(r.timestamp, g.bucket_seconds) AS bucket_start,
             r.from_address
         FROM old_blobs r
-        CROSS JOIN chart_rollup_bucket_seconds() g
-        WHERE r.confirmed = true
+        CROSS JOIN LATERAL chart_rollup_bucket_seconds_for(r.timestamp) g
     LOOP
         PERFORM blob_chart_rollups_refresh(
             affected.chain_id, affected.bucket_seconds, affected.bucket_start, affected.from_address);
@@ -142,11 +194,11 @@ BEGIN
             chart_rollup_bucket_start(r.timestamp, g.bucket_seconds) AS bucket_start,
             r.from_address
         FROM (
-            SELECT chain_id, timestamp, from_address FROM old_blobs WHERE confirmed = true
+            SELECT chain_id, timestamp, from_address FROM old_blobs
             UNION
-            SELECT chain_id, timestamp, from_address FROM new_blobs WHERE confirmed = true
+            SELECT chain_id, timestamp, from_address FROM new_blobs
         ) r
-        CROSS JOIN chart_rollup_bucket_seconds() g
+        CROSS JOIN LATERAL chart_rollup_bucket_seconds_for(r.timestamp) g
     LOOP
         PERFORM blob_chart_rollups_refresh(
             affected.chain_id, affected.bucket_seconds, affected.bucket_start, affected.from_address);
@@ -154,10 +206,3 @@ BEGIN
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
-
-DROP FUNCTION IF EXISTS chart_rollup_bucket_seconds_for(TIMESTAMP);
-DROP FUNCTION IF EXISTS chart_rollup_fine_retention();
-DROP FUNCTION IF EXISTS chart_rollup_fine_bucket_seconds();
-
-DELETE FROM blob_chart_rollups WHERE bucket_seconds = 60;
-DELETE FROM block_metrics_rollups WHERE bucket_seconds = 60;

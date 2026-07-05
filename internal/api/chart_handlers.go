@@ -695,7 +695,7 @@ func estimatedBlockPoints(duration time.Duration) int {
 const rollupMinBucketSeconds = 3600
 
 // fineRollupBucketSeconds is the fine chart rollup bucket size, mirroring
-// chart_rollup_fine_bucket_seconds() in migration 2. Fine buckets carry a
+// chart_rollup_fine_bucket_seconds() in migration 4. Fine buckets carry a
 // ~48h retention window; every sub-hour chart request fits inside it because
 // the point limit caps such ranges at 1000 buckets (under 17 hours at 60s,
 // and the only 300s requests are range=24h).
@@ -706,7 +706,7 @@ const fineRollupBucketSeconds = 60
 // size to read: hour-and-coarser granularities match stored rows exactly,
 // and whole-minute sub-hour granularities re-aggregate fine (60s) rows into
 // display buckets. Fine serving additionally requires fine coverage to reach
-// the range start — coverage is backfilled by the indexer after migration 2 —
+// the range start — coverage is backfilled by the indexer after migration 4 —
 // so until then sub-hour requests keep using raw scans, which the point limit
 // bounds to at most 24 hours of data.
 func (a *API) chartRollupSourceBucket(ctx context.Context, chainID int, chart chartRequest) (sourceBucketSeconds int64, servedByRollups bool, err error) {
@@ -1214,7 +1214,6 @@ const queryBlobMarketTimeChart = `
 		FROM blobs bl
 		CROSS JOIN bounds b
 		WHERE bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
 	),
@@ -1304,7 +1303,6 @@ const queryBlobMarketBlockChart = `
 		FROM selected_blocks sb
 		LEFT JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.block_number = sb.block_number
 		GROUP BY sb.block_number
 	),
@@ -1325,7 +1323,6 @@ const queryBlobMarketBlockChart = `
 		FROM bounds b
 		LEFT JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
 	),
@@ -1380,7 +1377,7 @@ const queryCostComparisonTimeChart = `
 			END AS range_start,
 			$4::timestamp AS range_end
 		FROM blobs
-		WHERE chain_id = $1 AND confirmed = true
+		WHERE chain_id = $1
 	),
 	buckets AS (
 		SELECT
@@ -1408,7 +1405,6 @@ const queryCostComparisonTimeChart = `
 		FROM bounds b
 		JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
 	),
@@ -1479,7 +1475,6 @@ const queryCostComparisonBlockChart = `
 		FROM selected_blocks sb
 		LEFT JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.block_number = sb.block_number
 		GROUP BY sb.block_number
 	),
@@ -1490,7 +1485,6 @@ const queryCostComparisonBlockChart = `
 		FROM bounds b
 		LEFT JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
 	)
@@ -1628,7 +1622,7 @@ var queryAttributionUsageTimeChart = `
 			END AS range_start,
 			$4::timestamp AS range_end
 		FROM blobs
-		WHERE chain_id = $1 AND confirmed = true
+		WHERE chain_id = $1
 	),
 	buckets AS (
 		SELECT
@@ -1659,7 +1653,6 @@ var queryAttributionUsageTimeChart = `
 		FROM bounds b
 		JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
 		LEFT JOIN blob_users known
@@ -1712,7 +1705,6 @@ var queryAttributionUsageBlockChart = `
 		FROM buckets bu
 		JOIN blobs bl
 			ON bl.chain_id = $1
-			AND bl.confirmed = true
 			AND bl.block_number = bu.block_number
 		LEFT JOIN blob_users known
 			ON known.chain_id = bl.chain_id

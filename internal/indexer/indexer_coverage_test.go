@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"math/big"
@@ -480,11 +481,8 @@ func TestBackfillResumeBlock_Branches(t *testing.T) {
 			WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
 			WillReturnRows(rows)
 		mock.ExpectExec("INSERT INTO indexer_metadata").
-			WithArgs(idx.network.ChainID, models.MetadataCurrentChainHead, "120").
-			WillReturnResult(sqlmock.NewResult(1, 1))
-		mock.ExpectExec("INSERT INTO indexer_metadata").
-			WithArgs(idx.network.ChainID, models.MetadataChainHeadUpdatedAt, sqlmock.AnyArg()).
-			WillReturnResult(sqlmock.NewResult(1, 1))
+			WithArgs(idx.network.ChainID, models.MetadataCurrentChainHead, "120", models.MetadataChainHeadUpdatedAt, sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(1, 2))
 		mock.ExpectQuery("WITH indexed AS").
 			WithArgs(idx.network.ChainID, uint64(100), uint64(120)).
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(117)))
@@ -818,11 +816,8 @@ func TestUpdateLastIndexedBlock(t *testing.T) {
 	atomic.StoreUint64(&idx.lastIndexedBlock, 10)
 
 	mock.ExpectExec("INSERT INTO indexer_metadata").
-		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, "12").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("INSERT INTO indexer_metadata").
-		WithArgs(idx.network.ChainID, models.MetadataLastIndexedAt, sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(1, 1))
+		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, "12", models.MetadataLastIndexedAt, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 2))
 
 	idx.updateLastIndexedBlock(12)
 	if got := idx.GetLastIndexedBlock(); got != 12 {
@@ -845,11 +840,10 @@ func TestUpdateCurrentChainHead(t *testing.T) {
 
 	observedAt := time.Date(2026, 5, 24, 10, 0, 0, 0, time.UTC)
 	mock.ExpectExec("INSERT INTO indexer_metadata").
-		WithArgs(idx.network.ChainID, models.MetadataCurrentChainHead, "99").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("INSERT INTO indexer_metadata").
-		WithArgs(idx.network.ChainID, models.MetadataChainHeadUpdatedAt, models.FormatMetadataTimestamp(observedAt)).
-		WillReturnResult(sqlmock.NewResult(1, 1))
+		WithArgs(idx.network.ChainID,
+			models.MetadataCurrentChainHead, "99",
+			models.MetadataChainHeadUpdatedAt, models.FormatMetadataTimestamp(observedAt)).
+		WillReturnResult(sqlmock.NewResult(1, 2))
 
 	idx.updateCurrentChainHead(99, observedAt)
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -864,20 +858,13 @@ func TestUpdateBackfillStatus(t *testing.T) {
 
 	observedAt := time.Date(2026, 5, 24, 10, 0, 0, 0, time.UTC)
 	mock.ExpectExec("INSERT INTO indexer_metadata").
-		WithArgs(idx.network.ChainID, models.MetadataBackfillActive, "true").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("INSERT INTO indexer_metadata").
-		WithArgs(idx.network.ChainID, models.MetadataBackfillStartBlock, "10").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("INSERT INTO indexer_metadata").
-		WithArgs(idx.network.ChainID, models.MetadataBackfillCurrentBlock, "15").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("INSERT INTO indexer_metadata").
-		WithArgs(idx.network.ChainID, models.MetadataBackfillTargetBlock, "20").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("INSERT INTO indexer_metadata").
-		WithArgs(idx.network.ChainID, models.MetadataBackfillUpdatedAt, models.FormatMetadataTimestamp(observedAt)).
-		WillReturnResult(sqlmock.NewResult(1, 1))
+		WithArgs(idx.network.ChainID,
+			models.MetadataBackfillActive, "true",
+			models.MetadataBackfillStartBlock, "10",
+			models.MetadataBackfillCurrentBlock, "15",
+			models.MetadataBackfillTargetBlock, "20",
+			models.MetadataBackfillUpdatedAt, models.FormatMetadataTimestamp(observedAt)).
+		WillReturnResult(sqlmock.NewResult(1, 5))
 
 	idx.updateBackfillStatus(true, 10, 15, 20, observedAt)
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -1094,20 +1081,13 @@ func TestInsertPendingBlobs(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS (SELECT 1 FROM blobs WHERE chain_id = $1 AND tx_hash = $2 AND block_number >= 0)")).
 			WithArgs(blob.ChainID, blob.TxHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT blob_index FROM blobs")).
-			WithArgs(blob.ChainID, blob.TxHash).
-			WillReturnRows(sqlmock.NewRows([]string{"blob_index"}))
-		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND tx_hash = $2 AND block_number < 0")).
-			WithArgs(blob.ChainID, blob.TxHash).
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND tx_hash = $2 AND blob_index >= $3")).
+			WithArgs(blob.ChainID, blob.TxHash, 1).
 			WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(blob_index) FROM blobs WHERE chain_id = $1 AND block_number = $2")).
-			WithArgs(blob.ChainID, blob.BlockNumber).
-			WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(nil))
-		mock.ExpectPrepare("INSERT INTO blobs")
-		mock.ExpectExec("INSERT INTO blobs").
-			WithArgs(blob.ChainID, blob.BlockNumber, 0, blob.TxHash, blob.FromAddress, blob.UserAttribution,
+		mock.ExpectExec("INSERT INTO mempool_blobs").
+			WithArgs(blob.ChainID, blob.TxHash, 0, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.Confirmed, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
@@ -1116,7 +1096,12 @@ func TestInsertPendingBlobs(t *testing.T) {
 		}
 	})
 
-	t.Run("inserts multiple blobs for one tx with continuous indices", func(t *testing.T) {
+	t.Run("upserts multiple blobs at per-tx ordinals in one statement", func(t *testing.T) {
+		// blob_index is the per-transaction ordinal (0..N-1): a re-poll upserts
+		// the same rows in place via a single multi-row statement, and the
+		// leading DELETE trims rows past the current blob count if the tx
+		// shrank. Nothing here can grow unbounded, unlike the old pool-wide
+		// index counter in blobs.
 		idx := newTestIndexer()
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
@@ -1127,92 +1112,19 @@ func TestInsertPendingBlobs(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS")).
 			WithArgs(blob.ChainID, blob.TxHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT blob_index FROM blobs")).
-			WithArgs(blob.ChainID, blob.TxHash).
-			WillReturnRows(sqlmock.NewRows([]string{"blob_index"}))
-		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs")).
-			WithArgs(blob.ChainID, blob.TxHash).
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
+			WithArgs(blob.ChainID, blob.TxHash, 3).
 			WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(blob_index)")).
-			WithArgs(blob.ChainID, blob.BlockNumber).
-			WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(int64(4)))
-		mock.ExpectPrepare("INSERT INTO blobs")
+		upsertArgs := make([]driver.Value, 0, len(blobs)*mempoolBlobInsertColumns)
 		for offset := 0; offset < len(blobs); offset++ {
-			mock.ExpectExec("INSERT INTO blobs").
-				WithArgs(blob.ChainID, blob.BlockNumber, 5+offset, blob.TxHash, blob.FromAddress, blob.UserAttribution,
-					blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-					blob.Timestamp, blob.Confirmed, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
-				WillReturnResult(sqlmock.NewResult(int64(offset+1), 1))
+			upsertArgs = append(upsertArgs,
+				blob.ChainID, blob.TxHash, offset, blob.FromAddress, blob.UserAttribution,
+				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed)
 		}
-		mock.ExpectCommit()
-
-		if err := idx.insertPendingBlobs(blobs); err != nil {
-			t.Fatalf("insertPendingBlobs() error = %v", err)
-		}
-	})
-
-	t.Run("steady-state poll updates in place without reallocating", func(t *testing.T) {
-		// Regression guard: the previous implementation deleted then
-		// reallocated from MAX(blob_index)+1 on every poll, causing the
-		// pending pool's max to grow unbounded and eventually overflow the
-		// SMALLINT column under sticky mempool traffic.
-		idx := newTestIndexer()
-		idxDB, mock := newMockIndexerDB(t)
-		idx.db = idxDB
-		blob := newBlobFixture()
-		blobs := []models.Blob{blob, blob}
-
-		mock.ExpectBegin()
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS")).
-			WithArgs(blob.ChainID, blob.TxHash).
-			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT blob_index FROM blobs")).
-			WithArgs(blob.ChainID, blob.TxHash).
-			WillReturnRows(sqlmock.NewRows([]string{"blob_index"}).AddRow(11).AddRow(12))
-		mock.ExpectPrepare("UPDATE blobs SET")
-		for _, idxVal := range []int{11, 12} {
-			mock.ExpectExec("UPDATE blobs SET").
-				WithArgs(blob.FromAddress, blob.UserAttribution, blob.BlobSizeBytes,
-					blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-					blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed,
-					blob.ChainID, blob.BlockNumber, idxVal).
-				WillReturnResult(sqlmock.NewResult(0, 1))
-		}
-		mock.ExpectCommit()
-
-		if err := idx.insertPendingBlobs(blobs); err != nil {
-			t.Fatalf("insertPendingBlobs() error = %v", err)
-		}
-	})
-
-	t.Run("count mismatch falls back to delete and reallocate", func(t *testing.T) {
-		idx := newTestIndexer()
-		idxDB, mock := newMockIndexerDB(t)
-		idx.db = idxDB
-		blob := newBlobFixture()
-		blobs := []models.Blob{blob, blob} // expected 2 rows, existing has 1
-
-		mock.ExpectBegin()
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS")).
-			WithArgs(blob.ChainID, blob.TxHash).
-			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT blob_index FROM blobs")).
-			WithArgs(blob.ChainID, blob.TxHash).
-			WillReturnRows(sqlmock.NewRows([]string{"blob_index"}).AddRow(7))
-		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs")).
-			WithArgs(blob.ChainID, blob.TxHash).
-			WillReturnResult(sqlmock.NewResult(0, 1))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(blob_index)")).
-			WithArgs(blob.ChainID, blob.BlockNumber).
-			WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(int64(9)))
-		mock.ExpectPrepare("INSERT INTO blobs")
-		for offset := 0; offset < len(blobs); offset++ {
-			mock.ExpectExec("INSERT INTO blobs").
-				WithArgs(blob.ChainID, blob.BlockNumber, 10+offset, blob.TxHash, blob.FromAddress, blob.UserAttribution,
-					blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-					blob.Timestamp, blob.Confirmed, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
-				WillReturnResult(sqlmock.NewResult(int64(offset+1), 1))
-		}
+		mock.ExpectExec("INSERT INTO mempool_blobs").
+			WithArgs(upsertArgs...).
+			WillReturnResult(sqlmock.NewResult(int64(len(blobs)), int64(len(blobs))))
 		mock.ExpectCommit()
 
 		if err := idx.insertPendingBlobs(blobs); err != nil {
@@ -1237,6 +1149,27 @@ func TestInsertPendingBlobs(t *testing.T) {
 		}
 	})
 
+	t.Run("wraps trim error", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+		blob := newBlobFixture()
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS")).
+			WithArgs(blob.ChainID, blob.TxHash).
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
+			WithArgs(blob.ChainID, blob.TxHash, 1).
+			WillReturnError(errors.New("trim failed"))
+		mock.ExpectRollback()
+
+		err := idx.insertPendingBlobs([]models.Blob{blob})
+		if err == nil || !strings.Contains(err.Error(), "failed to trim surplus pending blobs") {
+			t.Fatalf("expected wrapped trim error, got %v", err)
+		}
+	})
+
 	t.Run("wraps insert error", func(t *testing.T) {
 		idx := newTestIndexer()
 		idxDB, mock := newMockIndexerDB(t)
@@ -1247,25 +1180,34 @@ func TestInsertPendingBlobs(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS")).
 			WithArgs(blob.ChainID, blob.TxHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT blob_index FROM blobs")).
-			WithArgs(blob.ChainID, blob.TxHash).
-			WillReturnRows(sqlmock.NewRows([]string{"blob_index"}))
-		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs")).
-			WithArgs(blob.ChainID, blob.TxHash).
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
+			WithArgs(blob.ChainID, blob.TxHash, 1).
 			WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(blob_index)")).
-			WithArgs(blob.ChainID, blob.BlockNumber).
-			WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(nil))
-		mock.ExpectPrepare("INSERT INTO blobs")
-		mock.ExpectExec("INSERT INTO blobs").
+		mock.ExpectExec("INSERT INTO mempool_blobs").
 			WillReturnError(errors.New("insert failed"))
 		mock.ExpectRollback()
 
 		err := idx.insertPendingBlobs([]models.Blob{blob})
-		if err == nil || !strings.Contains(err.Error(), "failed to insert pending blob") {
+		if err == nil || !strings.Contains(err.Error(), "failed to insert pending blobs") {
 			t.Fatalf("expected wrapped insert error, got %v", err)
 		}
 	})
+}
+
+func TestValuesPlaceholders(t *testing.T) {
+	if got := valuesPlaceholders(2, 3, nil); got != "($1,$2,$3), ($4,$5,$6)" {
+		t.Fatalf("unexpected placeholders: %q", got)
+	}
+	if got := valuesPlaceholders(1, 2, []string{"text", "int"}); got != "($1::text,$2::int)" {
+		t.Fatalf("unexpected cast placeholders: %q", got)
+	}
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic on casts/width mismatch")
+		}
+	}()
+	valuesPlaceholders(1, 3, []string{"text"})
 }
 
 func TestInsertBlockData(t *testing.T) {
@@ -1278,14 +1220,13 @@ func TestInsertBlockData(t *testing.T) {
 		idx.db = idxDB
 
 		mock.ExpectBegin()
-		// Expect pending blob cleanup before confirmed insert
-		mock.ExpectExec("DELETE FROM blobs WHERE").
+		// Expect pending blob promotion cleanup before confirmed insert
+		mock.ExpectExec("DELETE FROM mempool_blobs WHERE").
 			WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectPrepare("INSERT INTO blobs")
 		mock.ExpectExec("INSERT INTO blobs").
 			WithArgs(blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.Confirmed, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectExec("INSERT INTO indexed_blocks").
 			WithArgs(indexedBlock.ChainID, indexedBlock.BlockNumber, indexedBlock.BlockHash, indexedBlock.ParentHash).
@@ -1297,32 +1238,14 @@ func TestInsertBlockData(t *testing.T) {
 		}
 	})
 
-	t.Run("prepare error", func(t *testing.T) {
-		idx := newTestIndexer()
-		idxDB, mock := newMockIndexerDB(t)
-		idx.db = idxDB
-
-		mock.ExpectBegin()
-		mock.ExpectExec("DELETE FROM blobs WHERE").
-			WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectPrepare("INSERT INTO blobs").WillReturnError(errors.New("prepare failed"))
-		mock.ExpectRollback()
-
-		err := idx.insertBlockData([]models.Blob{blob}, indexedBlock, nil)
-		if err == nil || !strings.Contains(err.Error(), "failed to prepare blob statement") {
-			t.Fatalf("expected prepare error, got %v", err)
-		}
-	})
-
 	t.Run("blob insert error", func(t *testing.T) {
 		idx := newTestIndexer()
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
 
 		mock.ExpectBegin()
-		mock.ExpectExec("DELETE FROM blobs WHERE").
+		mock.ExpectExec("DELETE FROM mempool_blobs WHERE").
 			WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectPrepare("INSERT INTO blobs")
 		mock.ExpectExec("INSERT INTO blobs").
 			WillReturnError(errors.New("insert failed"))
 		mock.ExpectRollback()
@@ -1459,10 +1382,9 @@ func TestProcessBlock_WithBlobTransaction(t *testing.T) {
 		WithArgs(idx.network.ChainID, uint64(0)).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectBegin()
-	// Expect pending blob cleanup
-	mock.ExpectExec("DELETE FROM blobs WHERE").
+	// Expect pending blob promotion cleanup
+	mock.ExpectExec("DELETE FROM mempool_blobs WHERE").
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectPrepare("INSERT INTO blobs")
 	mock.ExpectExec("INSERT INTO blobs").
 		WithArgs(
 			idx.network.ChainID,
@@ -1476,7 +1398,6 @@ func TestProcessBlock_WithBlobTransaction(t *testing.T) {
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
-			true,
 			sqlmock.AnyArg(), // max_fee_per_blob_gas
 			sqlmock.AnyArg(), // blob_gas_used
 		).
@@ -1741,8 +1662,8 @@ func TestBlockProcessingWorker_ProcessesTask(t *testing.T) {
 	mock.ExpectExec("INSERT INTO indexed_blocks").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 	mock.ExpectExec("INSERT INTO indexer_metadata").
-		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, "1").
-		WillReturnResult(sqlmock.NewResult(1, 1))
+		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, "1", models.MetadataLastIndexedAt, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 2))
 
 	done := make(chan struct{})
 	go func() {
@@ -1969,7 +1890,6 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(blob_index)")).
 			WithArgs(idx.network.ChainID, int64(-1)).
 			WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(nil))
-		mock.ExpectPrepare("INSERT INTO blobs")
 		mock.ExpectExec("INSERT INTO blobs").
 			WithArgs(idx.network.ChainID, int64(-1), 0, txHash, sqlmock.AnyArg(), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), false, sqlmock.AnyArg(), sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
@@ -2017,7 +1937,6 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(blob_index)")).
 			WithArgs(idx.network.ChainID, int64(-1)).
 			WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(nil))
-		mock.ExpectPrepare("INSERT INTO blobs")
 		mock.ExpectExec("INSERT INTO blobs").
 			WithArgs(idx.network.ChainID, int64(-1), 0, txHash, sqlmock.AnyArg(), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), false, sqlmock.AnyArg(), sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))

@@ -8,11 +8,11 @@ import (
 
 const (
 	// FineChartRollupBucketSeconds is the fine chart-rollup bucket size.
-	// Mirrors chart_rollup_fine_bucket_seconds() in migration 2.
+	// Mirrors chart_rollup_fine_bucket_seconds() in migration 4.
 	FineChartRollupBucketSeconds = 60
 
 	// FineChartRollupRetention is how much fine-bucket history is kept.
-	// Mirrors chart_rollup_fine_retention() in migration 2; the trigger paths
+	// Mirrors chart_rollup_fine_retention() in migration 4; the trigger paths
 	// stop maintaining fine buckets for rows older than this, and the indexer
 	// prunes expired fine buckets on a timer.
 	FineChartRollupRetention = 48 * time.Hour
@@ -45,7 +45,6 @@ const backfillFineBlobChartRollupsChunk = `
 		NOW()
 	FROM blobs b
 	WHERE b.chain_id = $1
-		AND b.confirmed = true
 		AND b.timestamp >= $2
 		AND b.timestamp < $3
 	GROUP BY b.chain_id, chart_rollup_bucket_start(b.timestamp, $4::int), b.from_address

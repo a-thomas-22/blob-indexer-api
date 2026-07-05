@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -163,6 +164,48 @@ func (db *DB) SetNetworkMetadata(ctx context.Context, networkID int, key, value 
 	return nil
 }
 
+// MetadataKV is one key/value entry for SetNetworkMetadataBatch.
+type MetadataKV struct {
+	Key   string
+	Value string
+}
+
+// SetNetworkMetadataBatch upserts multiple metadata values for a network in a
+// single statement, avoiding one round-trip per key. Keys must be distinct
+// within a call: a duplicate key would make ON CONFLICT DO UPDATE affect the
+// same row twice, which Postgres rejects.
+func (db *DB) SetNetworkMetadataBatch(ctx context.Context, networkID int, entries []MetadataKV) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(entries))
+	var values strings.Builder
+	args := make([]interface{}, 0, 1+len(entries)*2)
+	args = append(args, networkID)
+	for i, entry := range entries {
+		if _, dup := seen[entry.Key]; dup {
+			return fmt.Errorf("duplicate metadata key %q in batch for network %d", entry.Key, networkID)
+		}
+		seen[entry.Key] = struct{}{}
+		if i > 0 {
+			values.WriteString(", ")
+		}
+		fmt.Fprintf(&values, "($1, $%d, $%d)", len(args)+1, len(args)+2)
+		args = append(args, entry.Key, entry.Value)
+	}
+
+	query := `
+		INSERT INTO indexer_metadata (chain_id, key, value)
+		VALUES ` + values.String() + `
+		ON CONFLICT (chain_id, key) DO UPDATE SET value = EXCLUDED.value
+	`
+	if _, err := db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("failed to set metadata batch (%d keys) for network %d: %w", len(entries), networkID, err)
+	}
+	return nil
+}
+
 // GetIndexedBlockHash returns the stored block hash for a given block number.
 // Returns sql.ErrNoRows if the block hasn't been indexed.
 func (db *DB) GetIndexedBlockHash(ctx context.Context, networkID int, blockNumber uint64) (string, error) {
@@ -242,7 +285,7 @@ func (db *DB) DeleteBlockMetricsFromBlock(ctx context.Context, networkID int, fr
 
 // DeleteStalePendingBlobs removes pending blobs older than the given cutoff time.
 func (db *DB) DeleteStalePendingBlobs(ctx context.Context, networkID int, cutoff time.Time) (int64, error) {
-	query := "DELETE FROM blobs WHERE chain_id = $1 AND block_number < 0 AND timestamp < $2"
+	query := "DELETE FROM mempool_blobs WHERE chain_id = $1 AND timestamp < $2"
 	res, err := db.ExecContext(ctx, query, networkID, cutoff)
 	if err != nil {
 		return 0, err

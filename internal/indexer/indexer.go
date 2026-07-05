@@ -271,17 +271,21 @@ func (i *Indexer) setNetworkMetadataValues(updates ...metadataUpdate) {
 }
 
 func (i *Indexer) setNetworkMetadataValuesLocked(updates ...metadataUpdate) {
-	if i.db == nil {
+	if i.db == nil || len(updates) == 0 {
 		return
 	}
 
-	for _, update := range updates {
-		if err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID, update.key, update.value); err != nil {
-			logger.Error("Failed to update indexer metadata",
-				zap.String("network", i.network.Name),
-				zap.String("metadata_key", update.key),
-				zap.Error(err))
-		}
+	entries := make([]db.MetadataKV, len(updates))
+	keys := make([]string, len(updates))
+	for idx, update := range updates {
+		entries[idx] = db.MetadataKV{Key: update.key, Value: update.value}
+		keys[idx] = update.key
+	}
+	if err := i.db.SetNetworkMetadataBatch(i.ctx, i.network.ChainID, entries); err != nil {
+		logger.Error("Failed to update indexer metadata",
+			zap.String("network", i.network.Name),
+			zap.Strings("metadata_keys", keys),
+			zap.Error(err))
 	}
 }
 
@@ -342,6 +346,12 @@ func (i *Indexer) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to determine start block: %w", err)
 	}
+
+	// Pending rows live in mempool_blobs; purge any legacy block_number < 0
+	// sentinel rows an old binary may have written into blobs between the
+	// mempool_blobs migration and this binary taking over. One-shot and
+	// best-effort: leftovers only skew blob_user_stats slightly.
+	i.cleanupLegacyPendingBlobs()
 
 	// Start the block processing workers
 	for w := 1; w <= i.workerCount; w++ {
@@ -1452,6 +1462,46 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 	return fmt.Errorf("reorg handled, rewound from %d to %d: %w", fromBlock, forkBlock, errReorgDetected)
 }
 
+// blobInsertColumns is the number of columns written per row when inserting
+// into blobs.
+const blobInsertColumns = 13
+
+// mempoolBlobInsertColumns is the number of columns written per row when
+// upserting into mempool_blobs.
+const mempoolBlobInsertColumns = 12
+
+// valuesPlaceholders builds a multi-row VALUES clause "($1,$2,...),($n,...),..."
+// for rows rows of width columns. casts, when non-nil, must have width entries
+// and appends "::type" to each placeholder — required when the VALUES list has
+// no INSERT target to infer parameter types from (e.g. UPDATE ... FROM (VALUES ...)).
+func valuesPlaceholders(rows, width int, casts []string) string {
+	if casts != nil && len(casts) != width {
+		panic(fmt.Sprintf("valuesPlaceholders: %d casts for width %d", len(casts), width))
+	}
+	var b strings.Builder
+	n := 1
+	for r := 0; r < rows; r++ {
+		if r > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteByte('(')
+		for c := 0; c < width; c++ {
+			if c > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteByte('$')
+			b.WriteString(strconv.Itoa(n))
+			if casts != nil {
+				b.WriteString("::")
+				b.WriteString(casts[c])
+			}
+			n++
+		}
+		b.WriteByte(')')
+	}
+	return b.String()
+}
+
 // insertBlockData inserts all blobs, block metrics, and records the indexed block in a single
 // database transaction. This ensures atomicity — either the entire block is recorded or nothing is.
 func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.IndexedBlock, blockMetrics *models.BlockMetrics) error {
@@ -1479,7 +1529,7 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				txHashes = append(txHashes, h)
 			}
 			deleteQuery, deleteArgs, err := sqlx.In(
-				"DELETE FROM blobs WHERE chain_id = ? AND block_number < 0 AND tx_hash IN (?)",
+				"DELETE FROM mempool_blobs WHERE chain_id = ? AND tx_hash IN (?)",
 				i.network.ChainID, txHashes,
 			)
 			if err != nil {
@@ -1497,12 +1547,15 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			}
 		}
 
-		blobStmt, err := tx.PrepareContext(i.ctx, `
+		// Insert all blobs in one multi-row statement so the statement-level
+		// aggregate triggers on blobs (network_blob_stats, blob_user_stats,
+		// blob_chart_rollups) fire once per block instead of once per row.
+		insertQuery := `
 			INSERT INTO blobs (
 				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-				timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+				timestamp, max_fee_per_blob_gas, blob_gas_used
+			) VALUES ` + valuesPlaceholders(len(blobs), blobInsertColumns, nil) + `
 			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
 				tx_hash = EXCLUDED.tx_hash,
 				from_address = EXCLUDED.from_address,
@@ -1512,23 +1565,18 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				tip_per_blob_gas = EXCLUDED.tip_per_blob_gas,
 				total_cost_wei = EXCLUDED.total_cost_wei,
 				timestamp = EXCLUDED.timestamp,
-				confirmed = EXCLUDED.confirmed,
 				max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
 				blob_gas_used = EXCLUDED.blob_gas_used
-		`)
-		if err != nil {
-			return fmt.Errorf("failed to prepare blob statement: %w", err)
-		}
-		defer blobStmt.Close()
-
+		`
+		insertArgs := make([]interface{}, 0, len(blobs)*blobInsertColumns)
 		for _, blob := range blobs {
-			if _, err := blobStmt.ExecContext(i.ctx,
+			insertArgs = append(insertArgs,
 				blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.Confirmed, blob.MaxFeePerBlobGas, blob.BlobGasUsed,
-			); err != nil {
-				return fmt.Errorf("failed to insert blob (tx: %s): %w", blob.TxHash, err)
-			}
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed)
+		}
+		if _, err := tx.ExecContext(i.ctx, insertQuery, insertArgs...); err != nil {
+			return fmt.Errorf("failed to insert blobs (block: %d): %w", indexedBlock.BlockNumber, err)
 		}
 	}
 
@@ -1635,6 +1683,31 @@ func (i *Indexer) runMempoolIndexer() {
 	}
 }
 
+// cleanupLegacyPendingBlobs removes pending rows written into blobs under the
+// old block_number < 0 sentinel scheme. The mempool_blobs migration deletes
+// them, but an old binary still running during the deploy window can write a
+// few more before this binary takes over; without this sweep those rows would
+// sit in blobs forever, inflating blob_user_stats. Best-effort — failures are
+// logged, not fatal.
+func (i *Indexer) cleanupLegacyPendingBlobs() {
+	unlockWrites := i.lockDBWrites()
+	defer unlockWrites()
+
+	res, err := i.db.ExecContext(i.ctx,
+		"DELETE FROM blobs WHERE chain_id = $1 AND block_number < 0", i.network.ChainID)
+	if err != nil {
+		logger.Error("Failed to clean up legacy pending blob rows",
+			zap.String("network", i.network.Name),
+			zap.Error(err))
+		return
+	}
+	if deleted, _ := res.RowsAffected(); deleted > 0 {
+		logger.Info("Removed legacy pending blob rows from blobs",
+			zap.String("network", i.network.Name),
+			zap.Int64("deleted_count", deleted))
+	}
+}
+
 // runMempoolCleanup periodically removes pending blobs that have exceeded the configured TTL.
 func (i *Indexer) runMempoolCleanup() {
 	logger.Info("Mempool cleanup starting",
@@ -1726,22 +1799,18 @@ func (i *Indexer) processPendingTransactions() error {
 	return nil
 }
 
-// insertPendingBlobs upserts the per-blob pending rows for a single transaction.
-// All blobs in the slice must share the same ChainID and TxHash. The method
-// is idempotent in the steady state: when a poll re-discovers a tx that is
-// already represented at the right count, existing rows are UPDATEd in place
-// (their blob_index values are preserved). Only when the row count changes do
-// we delete and reallocate from MAX(blob_index)+1. Without this short-circuit
-// the pending pool's max blob_index would climb on every poll, and because
-// blobs.blob_index is SMALLINT a sticky mempool would eventually overflow.
-// If the tx is already confirmed, the call is a no-op.
+// insertPendingBlobs upserts the per-blob pending rows for a single transaction
+// into mempool_blobs. All blobs in the slice must share the same ChainID and
+// TxHash. mempool_blobs.blob_index is the per-transaction blob ordinal
+// (0..N-1), so a re-poll of an already-tracked tx updates the same rows in
+// place via ON CONFLICT; if the tx's blob count shrank, surplus rows are
+// trimmed first. If the tx is already confirmed, the call is a no-op.
 func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	if len(blobs) == 0 {
 		return nil
 	}
 	networkID := blobs[0].ChainID
 	txHash := blobs[0].TxHash
-	pendingBlock := blobs[0].BlockNumber
 
 	unlockWrites := i.lockDBWrites()
 	defer unlockWrites()
@@ -1752,7 +1821,10 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// If the tx is already confirmed, do not (re)create pending rows.
+	// If the tx is already confirmed, do not (re)create pending rows. The
+	// block_number >= 0 filter keeps legacy pending sentinel rows — which an
+	// old binary can still write into blobs during the deploy window — from
+	// suppressing mempool_blobs writes.
 	var hasConfirmed bool
 	if err := tx.QueryRowContext(i.ctx,
 		`SELECT EXISTS (SELECT 1 FROM blobs WHERE chain_id = $1 AND tx_hash = $2 AND block_number >= 0)`,
@@ -1764,110 +1836,43 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 		return tx.Commit()
 	}
 
-	// Read any existing pending rows for this tx so we can either reuse their
-	// blob_index values (steady state) or fall back to reallocation.
-	rows, err := tx.QueryContext(i.ctx,
-		`SELECT blob_index FROM blobs
-		 WHERE chain_id = $1 AND tx_hash = $2 AND block_number < 0
-		 ORDER BY blob_index ASC`,
-		networkID, txHash,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to load existing pending blob indices: %w", err)
-	}
-	existingIdx := make([]int, 0, len(blobs))
-	for rows.Next() {
-		var v int
-		if err := rows.Scan(&v); err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to scan pending blob index: %w", err)
-		}
-		existingIdx = append(existingIdx, v)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("failed to iterate pending blob indices: %w", err)
-	}
-
-	// Steady-state path: same number of rows as expected → update in place.
-	if len(existingIdx) == len(blobs) {
-		updateStmt, err := tx.PrepareContext(i.ctx, `
-			UPDATE blobs SET
-				from_address = $1,
-				user_attribution = $2,
-				blob_size_bytes = $3,
-				base_fee_per_blob_gas = $4,
-				tip_per_blob_gas = $5,
-				total_cost_wei = $6,
-				timestamp = $7,
-				max_fee_per_blob_gas = $8,
-				blob_gas_used = $9
-			WHERE chain_id = $10 AND block_number = $11 AND blob_index = $12
-		`)
-		if err != nil {
-			return fmt.Errorf("failed to prepare pending blob update: %w", err)
-		}
-		defer updateStmt.Close()
-
-		for offset, b := range blobs {
-			if _, err := updateStmt.ExecContext(i.ctx,
-				b.FromAddress, b.UserAttribution, b.BlobSizeBytes,
-				b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostWei,
-				b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed,
-				b.ChainID, b.BlockNumber, existingIdx[offset],
-			); err != nil {
-				return fmt.Errorf("failed to update pending blob (tx: %s): %w", b.TxHash, err)
-			}
-		}
-		return tx.Commit()
-	}
-
-	// Mismatch path: row count differs from expected. Delete and reinsert at
-	// freshly-allocated indices. This happens when a tx is newly seen, when an
-	// indexer restart loses partial state, or if the protocol blob-per-tx
-	// count for this tx changed under us.
+	// Trim surplus rows if the tx's blob count shrank under us.
 	if _, err := tx.ExecContext(i.ctx,
-		`DELETE FROM blobs WHERE chain_id = $1 AND tx_hash = $2 AND block_number < 0`,
-		networkID, txHash,
+		`DELETE FROM mempool_blobs WHERE chain_id = $1 AND tx_hash = $2 AND blob_index >= $3`,
+		networkID, txHash, len(blobs),
 	); err != nil {
-		return fmt.Errorf("failed to clear prior pending blobs: %w", err)
+		return fmt.Errorf("failed to trim surplus pending blobs: %w", err)
 	}
 
-	// Allocate distinct blob_index values inside the pending pool. The
-	// UNIQUE(chain_id, block_number, blob_index) constraint applies here too,
-	// so we just continue the running counter past the current max.
-	var nextIdx sql.NullInt64
-	if err := tx.QueryRowContext(i.ctx,
-		`SELECT MAX(blob_index) FROM blobs WHERE chain_id = $1 AND block_number = $2`,
-		networkID, pendingBlock,
-	).Scan(&nextIdx); err != nil {
-		return fmt.Errorf("failed to compute next pending blob_index: %w", err)
-	}
-	base := 0
-	if nextIdx.Valid {
-		base = int(nextIdx.Int64) + 1
-	}
-
-	insertStmt, err := tx.PrepareContext(i.ctx, `
-		INSERT INTO blobs (
-			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+	// One multi-row upsert per poll keeps this a single round-trip; rows are
+	// keyed by the per-tx blob ordinal, so a re-poll updates the same rows in
+	// place.
+	upsertQuery := `
+		INSERT INTO mempool_blobs (
+			chain_id, tx_hash, blob_index, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to prepare pending blob insert: %w", err)
-	}
-	defer insertStmt.Close()
-
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES ` + valuesPlaceholders(len(blobs), mempoolBlobInsertColumns, nil) + `
+		ON CONFLICT (chain_id, tx_hash, blob_index) DO UPDATE SET
+			from_address = EXCLUDED.from_address,
+			user_attribution = EXCLUDED.user_attribution,
+			blob_size_bytes = EXCLUDED.blob_size_bytes,
+			base_fee_per_blob_gas = EXCLUDED.base_fee_per_blob_gas,
+			tip_per_blob_gas = EXCLUDED.tip_per_blob_gas,
+			total_cost_wei = EXCLUDED.total_cost_wei,
+			timestamp = EXCLUDED.timestamp,
+			max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
+			blob_gas_used = EXCLUDED.blob_gas_used
+	`
+	upsertArgs := make([]interface{}, 0, len(blobs)*mempoolBlobInsertColumns)
 	for offset, b := range blobs {
-		if _, err := insertStmt.ExecContext(i.ctx,
-			b.ChainID, b.BlockNumber, base+offset, b.TxHash, b.FromAddress, b.UserAttribution,
+		upsertArgs = append(upsertArgs,
+			b.ChainID, b.TxHash, offset, b.FromAddress, b.UserAttribution,
 			b.BlobSizeBytes, b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostWei,
-			b.Timestamp, b.Confirmed, b.MaxFeePerBlobGas, b.BlobGasUsed,
-		); err != nil {
-			return fmt.Errorf("failed to insert pending blob (tx: %s): %w", b.TxHash, err)
-		}
+			b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed)
+	}
+	if _, err := tx.ExecContext(i.ctx, upsertQuery, upsertArgs...); err != nil {
+		return fmt.Errorf("failed to insert pending blobs (tx: %s): %w", txHash, err)
 	}
 
 	return tx.Commit()
@@ -2309,10 +2314,8 @@ func (i *Indexer) GetCurrentBlock(ctx context.Context) (uint64, error) {
 func (i *Indexer) GetBlobCounts(ctx context.Context) (confirmedCount, pendingCount int, err error) {
 	query := `
 		SELECT
-			SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END) as confirmed_count,
-			SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END) as pending_count
-		FROM blobs
-		WHERE chain_id = $1
+			(SELECT COUNT(*) FROM blobs WHERE chain_id = $1) as confirmed_count,
+			(SELECT COUNT(*) FROM mempool_blobs WHERE chain_id = $1) as pending_count
 	`
 
 	var counts struct {

@@ -4,12 +4,20 @@ import (
 	"time"
 )
 
-// PendingBlockNumber is the internal sentinel stored in Blob.BlockNumber for
-// pending (mempool) blob rows that have not yet been included in a block. The
-// indexer writes this value; the API treats any block_number < 0 as pending and
-// serializes it as JSON null on the wire. The confirmed flag remains the source
-// of truth for whether a blob is included.
+// PendingBlockNumber is the internal sentinel used in Blob.BlockNumber for
+// pending (mempool) blob rows that have not yet been included in a block.
+// Pending rows live in the mempool_blobs table, which has no block_number
+// column; API queries project this sentinel so the shared Blob scanning and
+// serialization code treats any block_number < 0 as pending and emits JSON
+// null on the wire. The confirmed flag remains the source of truth for
+// whether a blob is included.
 const PendingBlockNumber int64 = -1
+
+// Confirmed is not a stored column: blobs holds confirmed rows only and
+// mempool_blobs holds pending rows, so API queries project a literal
+// (true/false AS confirmed) matching the source table. The flag stays on the
+// struct because it is exposed on the wire and drives serialization
+// (explorer URLs, cache TTLs).
 
 // Blob represents a blob transaction in the database
 type Blob struct {

@@ -507,6 +507,18 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 			return stats, fmt.Errorf("failed to clear old blob attributions: %w", err)
 		}
 		stats.BlobsCleared = rowsAffected(res)
+
+		mempoolRes, err := tx.ExecContext(ctx, `
+			UPDATE mempool_blobs
+			SET user_attribution = ''
+			WHERE chain_id = $1
+				AND LOWER(from_address) = ANY($2)
+				AND COALESCE(user_attribution, '') <> ''
+		`, s.networkID, pq.Array(changedAddresses))
+		if err != nil {
+			return stats, fmt.Errorf("failed to clear old pending blob attributions: %w", err)
+		}
+		stats.BlobsCleared += rowsAffected(mempoolRes)
 	}
 
 	sortClaimsForApplication(claims)
@@ -529,11 +541,10 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 			continue
 		}
 		res, err := tx.ExecContext(ctx, `
-			UPDATE blobs
+			UPDATE mempool_blobs
 			SET user_attribution = $1
 			WHERE chain_id = $2
 				AND LOWER(from_address) = $3
-				AND block_number < 0
 				AND COALESCE(user_attribution, '') IS DISTINCT FROM $1
 		`, claim.Name, s.networkID, claim.Address)
 		if err != nil {

@@ -112,13 +112,20 @@ func TestRunMigrationsRecoversDirtySchema(t *testing.T) {
 
 	m := migrator(t, db)
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		t.Fatalf("migrate to 11: %v", err)
+		t.Fatalf("migrate up: %v", err)
 	}
 
-	// Simulate the killed run: golang-migrate writes (1, dirty) before
-	// executing the baseline up.sql, and the kill rolls the migration body back
-	// while the version row persists.
-	if _, err := db.Exec(`UPDATE schema_migrations SET version = 1, dirty = true`); err != nil {
+	// Simulate the killed run: golang-migrate writes (N, dirty) before
+	// executing migration N's up.sql, and the kill rolls the migration body
+	// back while the version row persists. Marking the latest migration dirty
+	// on a fully-migrated schema reproduces that state exactly (dirty at an
+	// older version cannot coexist with later migrations having run) and makes
+	// the recovery re-run exercise the newest migration's idempotency.
+	latest, err := LatestMigrationVersion()
+	if err != nil {
+		t.Fatalf("LatestMigrationVersion: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE schema_migrations SET version = $1, dirty = true`, latest); err != nil {
 		t.Fatalf("mark schema dirty: %v", err)
 	}
 
@@ -126,10 +133,6 @@ func TestRunMigrationsRecoversDirtySchema(t *testing.T) {
 		t.Fatalf("RunMigrations should recover a dirty schema: %v", err)
 	}
 
-	latest, err := LatestMigrationVersion()
-	if err != nil {
-		t.Fatalf("LatestMigrationVersion: %v", err)
-	}
 	var v uint
 	var dirty bool
 	if err := db.QueryRow(`SELECT version, dirty FROM schema_migrations LIMIT 1`).Scan(&v, &dirty); err != nil {
@@ -200,10 +203,11 @@ func assertNetworkBlobStats(t *testing.T, db *sqlx.DB, want networkBlobStatsChec
 	}
 }
 
-// TestNetworkBlobStatsMigrationMaintainsSummary verifies migration 11's
-// backfill and statement-level triggers against the source tables they
+// TestNetworkBlobStatsMigrationMaintainsSummary verifies the statement-level
+// triggers on blobs and block_metrics against the source tables they
 // summarize. The API's /stats path depends on this table staying consistent
-// without rescanning full blob history.
+// without rescanning full blob history. blobs holds confirmed rows only, so
+// every insert/update/delete flows into the summary.
 func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 	db, err := sqlx.Connect("postgres", integrationDBURL(t))
 	if err != nil {
@@ -215,7 +219,7 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 
 	m := migrator(t, db)
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		t.Fatalf("migrate to 10: %v", err)
+		t.Fatalf("migrate up: %v", err)
 	}
 
 	if _, err := db.Exec(`
@@ -234,12 +238,11 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 		INSERT INTO blobs (
 			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
+			timestamp, max_fee_per_blob_gas, blob_gas_used
 		) VALUES
-			(1, 100, 0, '0xa', '0xfrom', '', 131072, 10, 2, 100, $1, true, 12, 131072),
-			(1, 101, 0, '0xb', '0xfrom', '', 131072, 30, 6, 300, $2, true, 36, 131072),
-			(1, -1, 0, '0xpending', '0xfrom', '', 131072, 50, 10, 500, $3, false, 60, 131072)
-	`, t100, t101, t102); err != nil {
+			(1, 100, 0, '0xa', '0xfrom', '', 131072, 10, 2, 100, $1, 12, 131072),
+			(1, 101, 0, '0xb', '0xfrom', '', 131072, 30, 6, 300, $2, 36, 131072)
+	`, t100, t101); err != nil {
 		t.Fatalf("seed blobs: %v", err)
 	}
 
@@ -256,10 +259,6 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 		t.Fatalf("seed block metrics: %v", err)
 	}
 
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		t.Fatalf("migrate to latest: %v", err)
-	}
-
 	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
 		networkID:       1,
 		confirmed:       2,
@@ -274,9 +273,9 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 		INSERT INTO blobs (
 			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
+			timestamp, max_fee_per_blob_gas, blob_gas_used
 		) VALUES
-			(1, 102, 0, '0xc', '0xfrom', '', 131072, 5, 1, 50, $1, true, 6, 131072)
+			(1, 102, 0, '0xc', '0xfrom', '', 131072, 5, 1, 50, $1, 6, 131072)
 	`, t102); err != nil {
 		t.Fatalf("insert confirmed blob: %v", err)
 	}
@@ -301,9 +300,6 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 		lastIndexedTime: t102,
 	})
 
-	if _, err := db.Exec(`UPDATE blobs SET confirmed = true WHERE chain_id = 1 AND tx_hash = '0xpending'`); err != nil {
-		t.Fatalf("promote pending blob: %v", err)
-	}
 	if _, err := db.Exec(`
 		UPDATE blobs
 		SET base_fee_per_blob_gas = 20, tip_per_blob_gas = 4, total_cost_wei = 200
@@ -316,10 +312,10 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 	}
 	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
 		networkID:       1,
-		confirmed:       4,
-		sumBaseFee:      "105",
-		sumTip:          "21",
-		sumTotalCost:    "1050",
+		confirmed:       3,
+		sumBaseFee:      "55",
+		sumTip:          "11",
+		sumTotalCost:    "550",
 		lastBlock:       102,
 		lastIndexedTime: t102,
 	})
@@ -332,19 +328,6 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 	}
 	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
 		networkID:       1,
-		confirmed:       3,
-		sumBaseFee:      "75",
-		sumTip:          "15",
-		sumTotalCost:    "750",
-		lastBlock:       101,
-		lastIndexedTime: t101,
-	})
-
-	if _, err := db.Exec(`UPDATE blobs SET confirmed = false WHERE chain_id = 1 AND tx_hash = '0xpending'`); err != nil {
-		t.Fatalf("demote confirmed blob: %v", err)
-	}
-	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
-		networkID:       1,
 		confirmed:       2,
 		sumBaseFee:      "25",
 		sumTip:          "5",
@@ -354,8 +337,8 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 	})
 }
 
-// TestMigrationsDownThenUp validates that the newest migration round-trips:
-// up to latest, one step down, then back up to latest.
+// TestMigrationsDownThenUp validates that migrations above the consolidated
+// baseline round-trip: step back to the baseline, then re-apply to latest.
 func TestMigrationsDownThenUp(t *testing.T) {
 	db, err := sqlx.Connect("postgres", integrationDBURL(t))
 	if err != nil {
@@ -373,20 +356,13 @@ func TestMigrationsDownThenUp(t *testing.T) {
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("migrate up: %v", err)
 	}
-	if err := m.Steps(-1); err != nil {
-		t.Fatalf("migrate one step down: %v", err)
-	}
-	v, dirty, err := m.Version()
-	if err != nil {
-		t.Fatalf("m.Version after down: %v", err)
-	}
-	if dirty || v != latest-1 {
-		t.Fatalf("after down: version=%d dirty=%v, want version=%d clean", v, dirty, latest-1)
+	if err := m.Migrate(1); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate down to baseline: %v", err)
 	}
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("migrate up again: %v", err)
 	}
-	v, dirty, err = m.Version()
+	v, dirty, err := m.Version()
 	if err != nil {
 		t.Fatalf("m.Version: %v", err)
 	}
@@ -395,6 +371,236 @@ func TestMigrationsDownThenUp(t *testing.T) {
 	}
 	if v != latest {
 		t.Fatalf("expected version %d, got %d", latest, v)
+	}
+}
+
+// TestMempoolBlobsMigration verifies migration 2: pending rows move to the
+// dedicated UNLOGGED mempool_blobs table, legacy block_number < 0 sentinel
+// rows are purged from blobs (including their blob_user_stats contribution),
+// and the dead pending partial index is dropped.
+func TestMempoolBlobsMigration(t *testing.T) {
+	db, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	resetSchema(t, db)
+
+	m := migrator(t, db)
+	if err := m.Migrate(1); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to baseline: %v", err)
+	}
+
+	// Seed one confirmed and one legacy pending sentinel row (baseline schema
+	// keeps pending rows in blobs). The default mainnet network (chain 1) is
+	// inserted by the baseline migration.
+	t0 := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
+		) VALUES
+			(1, 100, 0, '0xconfirmed', '0xfrom', '', 131072, 10, 2, 100, $1, true, 12, 131072),
+			(1, -1, 0, '0xpending', '0xfrom', '', 131072, 50, 10, 500, $1, false, 60, 131072)
+	`, t0); err != nil {
+		t.Fatalf("seed blobs: %v", err)
+	}
+
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to latest: %v", err)
+	}
+
+	var legacyPending int
+	if err := db.Get(&legacyPending, `SELECT COUNT(*) FROM blobs WHERE block_number < 0`); err != nil {
+		t.Fatalf("count legacy pending rows: %v", err)
+	}
+	if legacyPending != 0 {
+		t.Fatalf("expected legacy pending rows to be purged, got %d", legacyPending)
+	}
+	var confirmed int
+	if err := db.Get(&confirmed, `SELECT COUNT(*) FROM blobs WHERE chain_id = 1`); err != nil {
+		t.Fatalf("count confirmed rows: %v", err)
+	}
+	if confirmed != 1 {
+		t.Fatalf("expected the confirmed row to survive, got %d rows", confirmed)
+	}
+
+	// The purge must also remove the pending contribution from blob_user_stats
+	// via the delete trigger (the rollup is confirmed-only now).
+	assertBlobUserStats(t, db, "0xfrom", 1, 100)
+
+	// The dead partial index is gone.
+	var indexExists bool
+	if err := db.Get(&indexExists, `
+		SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_blobs_pending_chain_tx_hash')
+	`); err != nil {
+		t.Fatalf("check partial index: %v", err)
+	}
+	if indexExists {
+		t.Fatal("expected idx_blobs_pending_chain_tx_hash to be dropped")
+	}
+
+	// mempool_blobs is UNLOGGED and accepts the indexer's upsert shape.
+	var persistence string
+	if err := db.Get(&persistence, `SELECT relpersistence FROM pg_class WHERE relname = 'mempool_blobs'`); err != nil {
+		t.Fatalf("check mempool_blobs persistence: %v", err)
+	}
+	if persistence != "u" {
+		t.Fatalf("expected mempool_blobs to be UNLOGGED (relpersistence 'u'), got %q", persistence)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := db.Exec(`
+			INSERT INTO mempool_blobs (
+				chain_id, tx_hash, blob_index, from_address, user_attribution,
+				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+				timestamp, max_fee_per_blob_gas, blob_gas_used
+			) VALUES (1, '0xmempool', 0, '0xfrom', '', 131072, 50, 10, 500, $1, 60, 131072)
+			ON CONFLICT (chain_id, tx_hash, blob_index) DO UPDATE SET timestamp = EXCLUDED.timestamp
+		`, t0.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatalf("upsert mempool blob (round %d): %v", i, err)
+		}
+	}
+	var mempoolRows int
+	if err := db.Get(&mempoolRows, `SELECT COUNT(*) FROM mempool_blobs WHERE chain_id = 1`); err != nil {
+		t.Fatalf("count mempool rows: %v", err)
+	}
+	if mempoolRows != 1 {
+		t.Fatalf("expected upsert to keep a single mempool row, got %d", mempoolRows)
+	}
+
+	// Pending rows no longer touch the analytical rollups: the mempool insert
+	// above must not have changed blob_user_stats.
+	assertBlobUserStats(t, db, "0xfrom", 1, 100)
+}
+
+// TestDropConfirmedMigration verifies migration 3: the vestigial confirmed
+// column and its indexes are dropped, replacement indexes exist before use,
+// the stats triggers keep working without the predicate, and the down
+// migration restores the old shape.
+func TestDropConfirmedMigration(t *testing.T) {
+	db, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	resetSchema(t, db)
+
+	m := migrator(t, db)
+	if err := m.Migrate(2); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to 2: %v", err)
+	}
+
+	// Seed at version 2 (confirmed column still exists): one confirmed row and
+	// one stray unconfirmed row that the migration's safety net must purge.
+	t0 := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
+		) VALUES
+			(1, 100, 0, '0xkeep', '0xfrom', '', 131072, 10, 2, 100, $1, true, 12, 131072),
+			(1, 101, 0, '0xstray', '0xfrom', '', 131072, 30, 6, 300, $1, false, 36, 131072)
+	`, t0); err != nil {
+		t.Fatalf("seed blobs: %v", err)
+	}
+
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to latest: %v", err)
+	}
+
+	var columnExists bool
+	if err := db.Get(&columnExists, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_name = 'blobs' AND column_name = 'confirmed'
+		)
+	`); err != nil {
+		t.Fatalf("check confirmed column: %v", err)
+	}
+	if columnExists {
+		t.Fatal("expected blobs.confirmed to be dropped")
+	}
+
+	var rows int
+	if err := db.Get(&rows, `SELECT COUNT(*) FROM blobs WHERE chain_id = 1`); err != nil {
+		t.Fatalf("count blobs: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("expected the stray unconfirmed row to be purged, got %d rows", rows)
+	}
+
+	assertIndexes(t, db, map[string]bool{
+		"idx_blobs_confirmed":                             false,
+		"idx_blobs_chain_confirmed_block":                 false,
+		"idx_blobs_chain_confirmed_timestamp":             false,
+		"idx_blobs_chain_confirmed_timestamp_cover":       false,
+		"idx_blobs_chain_confirmed_timestamp_chart_cover": false,
+		"idx_blobs_chain_block":                           true,
+		"idx_blobs_chain_timestamp_cover":                 true,
+		"idx_blobs_chain_timestamp_chart_cover":           true,
+		"idx_blobs_chain_timestamp":                       true,
+	})
+
+	// The replaced trigger bodies must keep maintaining the rollups without
+	// the confirmed predicate.
+	if _, err := db.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES
+			(1, 102, 0, '0xnew', '0xfrom', '', 131072, 5, 1, 50, $1, 6, 131072)
+	`, t0.Add(time.Minute)); err != nil {
+		t.Fatalf("insert post-migration blob: %v", err)
+	}
+	var confirmedTotal int64
+	if err := db.Get(&confirmedTotal, `SELECT total_confirmed_blobs FROM network_blob_stats WHERE chain_id = 1`); err != nil {
+		t.Fatalf("read network_blob_stats: %v", err)
+	}
+	if confirmedTotal != 2 {
+		t.Fatalf("expected total_confirmed_blobs=2 after post-migration insert, got %d", confirmedTotal)
+	}
+	assertBlobUserStats(t, db, "0xfrom", 2, 150)
+
+	// Down restores the column (default TRUE), the confirmed-keyed indexes,
+	// and drops the replacements.
+	if err := m.Migrate(2); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate down to 2: %v", err)
+	}
+	var allConfirmed bool
+	if err := db.Get(&allConfirmed, `SELECT bool_and(confirmed) FROM blobs WHERE chain_id = 1`); err != nil {
+		t.Fatalf("check restored confirmed values: %v", err)
+	}
+	if !allConfirmed {
+		t.Fatal("expected every restored row to read confirmed = true")
+	}
+	assertIndexes(t, db, map[string]bool{
+		"idx_blobs_chain_confirmed_block":                 true,
+		"idx_blobs_chain_confirmed_timestamp_cover":       true,
+		"idx_blobs_chain_confirmed_timestamp_chart_cover": true,
+		"idx_blobs_chain_block":                           false,
+		"idx_blobs_chain_timestamp_cover":                 false,
+		"idx_blobs_chain_timestamp_chart_cover":           false,
+	})
+
+	// Re-applying up must be a clean no-op-safe run (idempotency).
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("re-apply up: %v", err)
+	}
+}
+
+func assertIndexes(t *testing.T, db *sqlx.DB, want map[string]bool) {
+	t.Helper()
+	for name, wantExists := range want {
+		var exists bool
+		if err := db.Get(&exists, `SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = $1)`, name); err != nil {
+			t.Fatalf("check index %s: %v", name, err)
+		}
+		if exists != wantExists {
+			t.Fatalf("index %s: exists=%v, want %v", name, exists, wantExists)
+		}
 	}
 }
 
@@ -431,15 +637,25 @@ func TestPublicAPIRollupsStayConsistent(t *testing.T) {
 		INSERT INTO blobs (
 			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
+			timestamp, max_fee_per_blob_gas, blob_gas_used
 		) VALUES
-			(1, 10, 0, '0xaa', '0x1111111111111111111111111111111111111111', 'Rollup A', 131072, 10, 1, 100, $1, true, 11, 131072),
-			(1, 10, 1, '0xbb', '0x2222222222222222222222222222222222222222', '', 131072, 20, 2, 200, $1, true, 22, 131072),
-			(1, -1, 0, '0xcc', '0x1111111111111111111111111111111111111111', 'Rollup A', 131072, 30, 3, 300, $2, false, 33, 131072)
-	`, t10, t10.Add(6*time.Second)); err != nil {
+			(1, 10, 0, '0xaa', '0x1111111111111111111111111111111111111111', 'Rollup A', 131072, 10, 1, 100, $1, 11, 131072),
+			(1, 10, 1, '0xbb', '0x2222222222222222222222222222222222222222', '', 131072, 20, 2, 200, $1, 22, 131072)
+	`, t10); err != nil {
 		t.Fatalf("insert blobs: %v", err)
 	}
+	if _, err := db.Exec(`
+		INSERT INTO mempool_blobs (
+			chain_id, tx_hash, blob_index, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES
+			(1, '0xcc', 0, '0x1111111111111111111111111111111111111111', 'Rollup A', 131072, 30, 3, 300, $1, 33, 131072)
+	`, t10.Add(6*time.Second)); err != nil {
+		t.Fatalf("insert pending blob: %v", err)
+	}
 
+	// Pending rows live in mempool_blobs and must not touch the rollups.
 	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
 		networkID:       1,
 		confirmed:       2,
@@ -449,14 +665,21 @@ func TestPublicAPIRollupsStayConsistent(t *testing.T) {
 		lastBlock:       11,
 		lastIndexedTime: t11,
 	})
-	assertBlobUserStats(t, db, "0x1111111111111111111111111111111111111111", 2, 400)
+	assertBlobUserStats(t, db, "0x1111111111111111111111111111111111111111", 1, 100)
 	assertBlobUserStats(t, db, "0x2222222222222222222222222222222222222222", 1, 200)
 
+	// Promotion is delete-from-mempool + insert-into-blobs.
+	if _, err := db.Exec(`DELETE FROM mempool_blobs WHERE chain_id = 1 AND tx_hash = '0xcc'`); err != nil {
+		t.Fatalf("delete promoted mempool blob: %v", err)
+	}
 	if _, err := db.Exec(`
-		UPDATE blobs
-		SET confirmed = true, block_number = 11, blob_index = 0
-		WHERE chain_id = 1 AND tx_hash = '0xcc'
-	`); err != nil {
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES
+			(1, 11, 0, '0xcc', '0x1111111111111111111111111111111111111111', 'Rollup A', 131072, 30, 3, 300, $1, 33, 131072)
+	`, t10.Add(6*time.Second)); err != nil {
 		t.Fatalf("promote pending blob: %v", err)
 	}
 	assertNetworkBlobStats(t, db, networkBlobStatsCheck{
@@ -612,7 +835,7 @@ func TestBlockMetricsRollupThresholdCounts(t *testing.T) {
 }
 
 // TestFineChartRollupsLifecycle exercises the fine (60s) chart rollup bucket
-// added by migration 2: statement triggers maintain fine buckets for rows
+// added by migration 4: statement triggers maintain fine buckets for rows
 // inside the retention window and skip rows outside it, the indexer's
 // chunked backfill statement recomputes buckets from raw rows (full replace),
 // and pruning removes expired fine rows without touching coarse buckets.
@@ -653,11 +876,11 @@ func TestFineChartRollupsLifecycle(t *testing.T) {
 		INSERT INTO blobs (
 			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
+			timestamp, max_fee_per_blob_gas, blob_gas_used
 		) VALUES
-			(1, 200, 0, '0xf1', '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Rollup A', 131072, 10, 1, 100, $1, true, 11, 131072),
-			(1, 201, 0, '0xf2', '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Rollup A', 131072, 30, 1, 100, $2, true, 33, 131072),
-			(1, 100, 0, '0xf3', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '', 131072, 50, 1, 300, $3, true, 55, 131072)
+			(1, 200, 0, '0xf1', '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Rollup A', 131072, 10, 1, 100, $1, 11, 131072),
+			(1, 201, 0, '0xf2', '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Rollup A', 131072, 30, 1, 100, $2, 33, 131072),
+			(1, 100, 0, '0xf3', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '', 131072, 50, 1, 300, $3, 55, 131072)
 	`, recent, recent.Add(12*time.Second), old); err != nil {
 		t.Fatalf("insert blobs: %v", err)
 	}

@@ -16,9 +16,8 @@ import (
 const (
 	queryDevIndexerCounts = `
 			SELECT
-				COALESCE(SUM(CASE WHEN confirmed = true THEN 1 ELSE 0 END), 0) as confirmed_count,
-				COALESCE(SUM(CASE WHEN confirmed = false THEN 1 ELSE 0 END), 0) as pending_count
-			FROM blobs WHERE chain_id = $1
+				(SELECT COUNT(*) FROM blobs WHERE chain_id = $1) as confirmed_count,
+				(SELECT COUNT(*) FROM mempool_blobs WHERE chain_id = $1) as pending_count
 		`
 )
 
@@ -184,6 +183,7 @@ func (a *API) DevIndexers(w http.ResponseWriter, r *http.Request) {
 var allowedTables = map[string]bool{
 	"networks":                true,
 	"blobs":                   true,
+	"mempool_blobs":           true,
 	"blob_users":              true,
 	"blob_attribution_claims": true,
 	"indexer_metadata":        true,
@@ -210,7 +210,7 @@ func (a *API) DevDatabase(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Getting database statistics")
 
 	// Get table statistics
-	tables := []string{"blobs", "blob_users", "blob_attribution_claims", "networks", "indexer_metadata", "block_reindex_requests"}
+	tables := []string{"blobs", "mempool_blobs", "blob_users", "blob_attribution_claims", "networks", "indexer_metadata", "block_reindex_requests"}
 	tableStats := make([]TableStat, 0, len(tables))
 	for _, table := range tables {
 		// Validate the table name against the whitelist to prevent SQL injection
