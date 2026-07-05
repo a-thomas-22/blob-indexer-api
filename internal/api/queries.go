@@ -1104,9 +1104,11 @@ const (
 	// querySearchBlobByVersionedHash resolves a 64-hex search query as an
 	// EIP-4844 blob versioned hash, preferring the newest confirmed occurrence
 	// (the same blob can be resubmitted in multiple transactions) over a
-	// pending one. Served by the partial idx_blobs_chain_versioned_hash; rows
-	// indexed before the versioned-hash migration have NULL versioned_hash and
-	// never match. The mempool arm is a bounded scan of the tiny pending set.
+	// pending one. The trailing tx_hash sort key keeps the response
+	// deterministic when the same hash lands in two transactions of one block.
+	// Served by the partial idx_blobs_chain_versioned_hash; rows indexed
+	// before the versioned-hash migration have NULL versioned_hash and never
+	// match. The mempool arm is a bounded scan of the tiny pending set.
 	querySearchBlobByVersionedHash = `
 		SELECT versioned_hash, tx_hash, block_number FROM (
 			SELECT versioned_hash, tx_hash, block_number FROM blobs
@@ -1115,7 +1117,7 @@ const (
 			SELECT versioned_hash, tx_hash, -1 AS block_number FROM mempool_blobs
 			WHERE chain_id = $1 AND versioned_hash = $2
 		) matches
-		ORDER BY block_number DESC
+		ORDER BY block_number DESC, tx_hash ASC
 		LIMIT 1
 	`
 
@@ -1136,13 +1138,15 @@ const (
 	// querySearchRollupsByName matches free-text search input against the
 	// known rollup attribution names synced from the blob-list (see
 	// internal/attribution) as a case-insensitive prefix. $2 must be a
-	// LIKE-escaped lowercase prefix pattern. blob_users holds one row per
+	// LIKE-escaped lowercase prefix pattern. The escape literal is an
+	// E-string so its meaning does not depend on the server's
+	// standard_conforming_strings setting. blob_users holds one row per
 	// attributed address, so the scan is bounded by the (small) known-user
 	// set rather than any per-blob table.
 	querySearchRollupsByName = `
 		SELECT name, array_agg(address ORDER BY address) AS addresses
 		FROM blob_users
-		WHERE chain_id = $1 AND LOWER(name) LIKE $2 ESCAPE '\'
+		WHERE chain_id = $1 AND LOWER(name) LIKE $2 ESCAPE E'\\'
 		GROUP BY name
 		ORDER BY name ASC
 		LIMIT $3
