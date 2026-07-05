@@ -78,6 +78,15 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 	`, now, pq.StringArray{pendingOnlyHash, sharedHash}); err != nil {
 		t.Fatalf("seed mempool blob: %v", err)
 	}
+	// Block 99 is deliberately missing: the coverage bounds are documented as
+	// sparse extremes, so an interior gap (a failed block awaiting retry) must
+	// not shrink the reported range.
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO indexed_blocks (chain_id, block_number, block_hash, parent_hash)
+		VALUES (1, 98, '0xhash98', '0xhash97'), (1, 100, '0xhash100', '0xhash99')
+	`); err != nil {
+		t.Fatalf("seed indexed blocks: %v", err)
+	}
 
 	t.Run("queryMempoolBlobs", func(t *testing.T) {
 		var blobs []models.Blob
@@ -194,6 +203,29 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		}
 		if len(shares) != 1 || shares[0].BlobCount != 1 {
 			t.Fatalf("unexpected category shares: %+v", shares)
+		}
+	})
+
+	t.Run("queryIndexedBlockCoverage", func(t *testing.T) {
+		var coverage indexedBlockCoverage
+		if err := sqlxDB.GetContext(ctx, &coverage, queryIndexedBlockCoverage, 1); err != nil {
+			t.Fatalf("queryIndexedBlockCoverage: %v", err)
+		}
+		// The seeded rows skip block 99: bounds span the interior gap.
+		if coverage.EarliestIndexedBlock == nil || *coverage.EarliestIndexedBlock != 98 {
+			t.Fatalf("expected earliest indexed block 98, got %+v", coverage)
+		}
+		if coverage.LatestIndexedBlock == nil || *coverage.LatestIndexedBlock != 100 {
+			t.Fatalf("expected latest indexed block 100, got %+v", coverage)
+		}
+		// A network with no indexed blocks scans NULL aggregates into nil
+		// bounds rather than erroring.
+		coverage = indexedBlockCoverage{}
+		if err := sqlxDB.GetContext(ctx, &coverage, queryIndexedBlockCoverage, 424242); err != nil {
+			t.Fatalf("queryIndexedBlockCoverage empty network: %v", err)
+		}
+		if coverage.EarliestIndexedBlock != nil || coverage.LatestIndexedBlock != nil {
+			t.Fatalf("expected nil coverage bounds for empty network, got %+v", coverage)
 		}
 	})
 
@@ -327,7 +359,8 @@ func TestUserWindowQueriesAgainstRealPostgres(t *testing.T) {
 
 // TestWSPollerQueriesAgainstRealPostgres validates the WebSocket poller's and
 // snapshot builder's query text against a real schema, including type
-// unification of block_number scans into uint64 slices.
+// unification of block_number scans into uint64 slices. The /block/{number}
+// endpoint's single-block lookup shares the seeded data.
 func TestWSPollerQueriesAgainstRealPostgres(t *testing.T) {
 	url := testdb.URL(t, "api")
 	sqlxDB, err := sqlx.Connect("postgres", url)
@@ -393,6 +426,19 @@ func TestWSPollerQueriesAgainstRealPostgres(t *testing.T) {
 		}
 		if len(numbers) != 2 || numbers[0] != 100 || numbers[1] != 101 {
 			t.Fatalf("got %v, want [100 101]", numbers)
+		}
+	})
+
+	t.Run("queryBlockMetricsForBlock", func(t *testing.T) {
+		var metric models.BlockMetrics
+		if err := sqlxDB.GetContext(ctx, &metric, queryBlockMetricsForBlock, 1, int64(100)); err != nil {
+			t.Fatalf("queryBlockMetricsForBlock: %v", err)
+		}
+		if metric.BlockNumber != 100 || metric.BlobCount != 1 {
+			t.Fatalf("unexpected metric: %+v", metric)
+		}
+		if err := sqlxDB.GetContext(ctx, &metric, queryBlockMetricsForBlock, 1, int64(999)); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for unindexed block, got %v", err)
 		}
 	})
 

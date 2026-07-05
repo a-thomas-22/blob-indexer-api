@@ -46,6 +46,9 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 - `GET /api/v1/blob/by-hash/{versionedHash}?network=mainnet` - Fetch the blob transaction carrying an EIP-4844 versioned blob hash (0x01-prefixed)
 - `GET /api/v1/blob/{txHash}?network=mainnet` - Fetch a specific blob by transaction hash
 
+### Block Endpoints
+- `GET /api/v1/block/{number}?network=mainnet` - Fetch a single indexed block with its blobs and pricing (same shape as the WebSocket `new_block` event); 404 if the block is not indexed
+
 ### User Endpoints
 - `GET /api/v1/users?network=mainnet&limit=10&range=24h` - Top blob users by blobs submitted; `range` (`1h`, `24h`, `7d`, `30d`, `all`; default `all`) scopes counts, spend, and share percentages to a recent window and is echoed back as `meta.range`
 - `GET /api/v1/users/unattributed?network=mainnet&limit=10` - Top unattributed blob senders by blobs submitted (same `range` support)
