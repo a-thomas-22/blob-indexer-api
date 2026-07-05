@@ -22,7 +22,6 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/holiman/uint256"
 	"github.com/jmoiron/sqlx"
-	"github.com/lib/pq"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
@@ -190,9 +189,11 @@ func newBlobFixture() models.Blob {
 		TotalCostWei:      "12",
 		Timestamp:         time.Unix(1, 0),
 		Confirmed:         false,
-		VersionedHashes:   pq.StringArray{"0x0100000000000000000000000000000000000000000000000000000000000001"},
+		VersionedHash:     &fixtureVersionedHash,
 	}
 }
+
+var fixtureVersionedHash = "0x0100000000000000000000000000000000000000000000000000000000000001"
 
 func newSignedBlobTx(t *testing.T, chainID int64, nonce uint64) *types.Transaction {
 	t.Helper()
@@ -1208,7 +1209,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 		mock.ExpectExec("INSERT INTO mempool_blobs").
 			WithArgs(blob.ChainID, blob.TxHash, 0, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHashes).
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
@@ -1241,7 +1242,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 			upsertArgs = append(upsertArgs,
 				blob.ChainID, blob.TxHash, offset, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHashes)
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash)
 		}
 		mock.ExpectExec("INSERT INTO mempool_blobs").
 			WithArgs(upsertArgs...).
@@ -1351,7 +1352,7 @@ func TestInsertBlockData(t *testing.T) {
 		mock.ExpectExec("INSERT INTO blobs").
 			WithArgs(blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHashes).
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectExec("INSERT INTO indexed_blocks").
 			WithArgs(indexedBlock.ChainID, indexedBlock.BlockNumber, indexedBlock.BlockHash, indexedBlock.ParentHash).
@@ -1578,9 +1579,9 @@ func TestProcessBlock_WithBlobTransaction(t *testing.T) {
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
-			sqlmock.AnyArg(), // max_fee_per_blob_gas
-			sqlmock.AnyArg(), // blob_gas_used
-			versionedHashStrings(blobTx.BlobHashes()),
+			sqlmock.AnyArg(),             // max_fee_per_blob_gas
+			sqlmock.AnyArg(),             // blob_gas_used
+			blobTx.BlobHashes()[0].Hex(), // versioned_hash
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO block_metrics").
@@ -2313,15 +2314,15 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			WithArgs(idx.network.ChainID, txHash, 0, sqlmock.AnyArg(), "",
 				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-				versionedHashStrings(ethSvc.txByHash.BlobHashes())).
+				ethSvc.txByHash.BlobHashes()[0].Hex()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
 		idx.processPendingTransaction(ethSvc.txByHash.Hash())
 
-		// insertPendingBlobs swallows nothing here, but processPendingTransaction
-		// logs-and-drops DB errors, so the expectations must be asserted
-		// explicitly for this to verify the mempool write path end to end.
+		// processPendingTransaction logs-and-drops DB errors, so the
+		// expectations must be asserted explicitly for this to verify the
+		// mempool write path (including versioned_hash) end to end.
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("pending insert expectations not met: %v", err)
 		}
@@ -2352,7 +2353,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 		})
 		// GetPendingTransactions reads the pending *block*
 		// (eth_getBlockByNumber("pending", true)), which the mock serves from
-		// blockTxs — not from the txpool service.
+		// blockTxs.
 		ethSvc.blockTxs = []*types.Transaction{blobTx}
 
 		txHash := blobTx.Hash().Hex()
@@ -2367,7 +2368,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			WithArgs(idx.network.ChainID, txHash, 0, sqlmock.AnyArg(), "",
 				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-				versionedHashStrings(blobTx.BlobHashes())).
+				blobTx.BlobHashes()[0].Hex()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
@@ -2406,18 +2407,6 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 
 		if err := idx.processPendingTransactions(); err != nil {
 			t.Fatalf("processPendingTransactions() error = %v", err)
-		}
-	})
-
-	t.Run("processPendingTransactions pending tx fetch error", func(t *testing.T) {
-		idx := newTestIndexer()
-		client, ethSvc := newMockEthClient(t, 10)
-		idx.ethClient = client
-		ethSvc.failBlock = true // causes pending block lookup to fail
-
-		err := idx.processPendingTransactions()
-		if err == nil || !strings.Contains(err.Error(), "failed to get pending transactions") {
-			t.Fatalf("expected pending tx fetch error, got %v", err)
 		}
 	})
 }

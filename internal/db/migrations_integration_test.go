@@ -1225,12 +1225,10 @@ func TestBlockMetricsNotifyTrigger(t *testing.T) {
 	}
 }
 
-// TestBlobVersionedHashesMigration verifies migrations 7 and 8: blobs and
-// mempool_blobs gain the versioned_hashes TEXT[] column (staying NULL on
-// pre-migration rows), containment matches find newly written rows on both
-// tables, and the GIN index serving the /blob/by-hash lookup exists. The
-// column add and the index build are separate migrations so the ADD COLUMN
-// ACCESS EXCLUSIVE lock is not held across the index build.
+// TestBlobVersionedHashesMigration verifies migration 7: blobs and
+// mempool_blobs gain the scalar versioned_hash column (staying NULL on
+// pre-migration rows), equality lookups find newly written rows on both
+// tables, and the partial index serving /search and /blob/by-hash exists.
 func TestBlobVersionedHashesMigration(t *testing.T) {
 	db, err := sqlx.Connect("postgres", integrationDBURL(t))
 	if err != nil {
@@ -1261,57 +1259,57 @@ func TestBlobVersionedHashesMigration(t *testing.T) {
 	}
 
 	// Pre-migration rows stay NULL rather than picking up a fabricated value.
-	var preMigrationHashes pq.StringArray
-	if err := db.Get(&preMigrationHashes, `SELECT versioned_hashes FROM blobs WHERE tx_hash = '0xpre'`); err != nil {
-		t.Fatalf("read pre-migration versioned_hashes: %v", err)
+	var preMigrationHash *string
+	if err := db.Get(&preMigrationHash, `SELECT versioned_hash FROM blobs WHERE tx_hash = '0xpre'`); err != nil {
+		t.Fatalf("read pre-migration versioned_hash: %v", err)
 	}
-	if preMigrationHashes != nil {
-		t.Fatalf("expected NULL versioned_hashes on pre-migration row, got %v", preMigrationHashes)
+	if preMigrationHash != nil {
+		t.Fatalf("expected NULL versioned_hash on pre-migration row, got %v", *preMigrationHash)
 	}
 
-	// New rows store the list and are found by containment on both tables.
+	// New rows store the hash and are found by equality on both tables.
 	confirmedHash := "0x01" + strings.Repeat("ab", 31)
 	pendingHash := "0x01" + strings.Repeat("cd", 31)
 	if _, err := db.Exec(`
 		INSERT INTO blobs (
 			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hashes
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
 		) VALUES (1, 101, 0, '0xpost', '0xfrom', '', 131072, 10, 2, 100, $1, 12, 131072, $2)
-	`, t0, pq.StringArray{confirmedHash}); err != nil {
+	`, t0, confirmedHash); err != nil {
 		t.Fatalf("insert post-migration blob: %v", err)
 	}
 	if _, err := db.Exec(`
 		INSERT INTO mempool_blobs (
 			chain_id, tx_hash, blob_index, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hashes
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
 		) VALUES (1, '0xpendingpost', 0, '0xfrom', '', 131072, 50, 10, 500, $1, 60, 131072, $2)
-	`, t0, pq.StringArray{pendingHash}); err != nil {
+	`, t0, pendingHash); err != nil {
 		t.Fatalf("insert post-migration mempool blob: %v", err)
 	}
 
 	var txHash string
-	if err := db.Get(&txHash, `SELECT tx_hash FROM blobs WHERE versioned_hashes @> ARRAY[$1::text]`, confirmedHash); err != nil {
-		t.Fatalf("containment lookup on blobs: %v", err)
+	if err := db.Get(&txHash, `SELECT tx_hash FROM blobs WHERE chain_id = 1 AND versioned_hash = $1`, confirmedHash); err != nil {
+		t.Fatalf("equality lookup on blobs: %v", err)
 	}
 	if txHash != "0xpost" {
-		t.Fatalf("expected containment match on 0xpost, got %q", txHash)
+		t.Fatalf("expected versioned-hash match on 0xpost, got %q", txHash)
 	}
-	if err := db.Get(&txHash, `SELECT tx_hash FROM mempool_blobs WHERE versioned_hashes @> ARRAY[$1::text]`, pendingHash); err != nil {
-		t.Fatalf("containment lookup on mempool_blobs: %v", err)
+	if err := db.Get(&txHash, `SELECT tx_hash FROM mempool_blobs WHERE chain_id = 1 AND versioned_hash = $1`, pendingHash); err != nil {
+		t.Fatalf("equality lookup on mempool_blobs: %v", err)
 	}
 	if txHash != "0xpendingpost" {
-		t.Fatalf("expected containment match on 0xpendingpost, got %q", txHash)
+		t.Fatalf("expected versioned-hash match on 0xpendingpost, got %q", txHash)
 	}
 
 	var indexExists bool
 	if err := db.Get(&indexExists, `
-		SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_blobs_versioned_hashes')
+		SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_blobs_chain_versioned_hash')
 	`); err != nil {
-		t.Fatalf("check GIN index: %v", err)
+		t.Fatalf("check versioned-hash index: %v", err)
 	}
 	if !indexExists {
-		t.Fatal("expected idx_blobs_versioned_hashes to exist")
+		t.Fatal("expected idx_blobs_chain_versioned_hash to exist")
 	}
 }

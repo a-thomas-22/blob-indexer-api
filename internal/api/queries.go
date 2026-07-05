@@ -5,7 +5,13 @@ import "github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 // blobSelectColumns projects blobs rows into the models.Blob shape. The
 // blobs table holds confirmed rows only (pending rows live in mempool_blobs),
 // so the wire-visible confirmed flag is the projected literal true rather
-// than a stored column.
+// than a stored column. versioned_hashes is computed, not stored: it gathers
+// the transaction's full ordered hash list from the sibling rows'
+// versioned_hash values — one idx_blobs_chain_txhash probe over the tx's
+// <= a-few rows per projected row, bounded by the small LIMITs of every query
+// using this projection. Rows indexed before the versioned-hash migration
+// have NULL hashes, filtered out here, so pre-migration transactions yield an
+// empty list (omitted on the wire).
 const blobSelectColumns = `
 	id,
 	chain_id,
@@ -22,13 +28,22 @@ const blobSelectColumns = `
 	true AS confirmed,
 	max_fee_per_blob_gas,
 	blob_gas_used,
-	versioned_hashes
+	versioned_hash,
+	ARRAY(
+		SELECT b2.versioned_hash FROM blobs b2
+		WHERE b2.chain_id = blobs.chain_id AND b2.tx_hash = blobs.tx_hash
+			AND b2.versioned_hash IS NOT NULL
+		ORDER BY b2.blob_index
+	) AS versioned_hashes
 `
 
 // mempoolBlobSelectColumns projects mempool_blobs rows into the models.Blob
 // shape. Pending rows carry the internal block-number sentinel
 // (models.PendingBlockNumber) and are never confirmed, so downstream
 // serialization (JSON null block_number, confirmed=false) is unchanged.
+// versioned_hashes gathers the transaction's hash list from sibling rows via
+// the mempool_blobs primary key (chain_id, tx_hash, blob_index) — see
+// blobSelectColumns.
 const mempoolBlobSelectColumns = `
 	0 AS id,
 	chain_id,
@@ -45,7 +60,13 @@ const mempoolBlobSelectColumns = `
 	false AS confirmed,
 	max_fee_per_blob_gas,
 	blob_gas_used,
-	versioned_hashes
+	versioned_hash,
+	ARRAY(
+		SELECT m2.versioned_hash FROM mempool_blobs m2
+		WHERE m2.chain_id = mempool_blobs.chain_id AND m2.tx_hash = mempool_blobs.tx_hash
+			AND m2.versioned_hash IS NOT NULL
+		ORDER BY m2.blob_index
+	) AS versioned_hashes
 `
 
 const blockMetricsSelectColumns = `
@@ -152,22 +173,24 @@ const (
 	`
 
 	// queryBlobByVersionedHash retrieves a single blob by EIP-4844 versioned
-	// blob hash and network. Every per-blob row carries its transaction's full
-	// hash list, so a containment match finds the carrying transaction — via
-	// idx_blobs_versioned_hashes (GIN) on blobs; mempool_blobs is a tiny
-	// seq-scanned table. When identical blob content was posted more than once
-	// (same content ⇒ same versioned hash): confirmed rows win over pending
-	// ones, then the newest inclusion by block, with timestamp DESC breaking
-	// pending ties (block_number is the shared -1 sentinel there) and tx_hash
-	// making same-block/same-poll ties deterministic. Within the selected
-	// transaction all keys before blob_index tie, so multi-blob transactions
-	// return their first blob, mirroring queryBlobByTxHash.
+	// blob hash and network — an equality probe on the per-row versioned_hash
+	// column, served by the partial idx_blobs_chain_versioned_hash (the same
+	// index behind /search's blob resolution); the mempool arm is a bounded
+	// scan of the tiny pending set. The matched row is the blob itself, so
+	// blob_index identifies the carrying position within its transaction. When
+	// identical blob content was posted more than once (same content ⇒ same
+	// versioned hash): confirmed rows win over pending ones, then the newest
+	// inclusion by block, with timestamp DESC breaking pending ties
+	// (block_number is the shared -1 sentinel there), tx_hash making
+	// same-block/same-poll ties deterministic, and blob_index settling
+	// duplicate hashes within one transaction. Rows indexed before the
+	// versioned-hash migration have NULL versioned_hash and never match.
 	queryBlobByVersionedHash = `
 		SELECT ` + blobSelectColumns + ` FROM blobs
-		WHERE versioned_hashes @> ARRAY[$1::text] AND chain_id = $2
+		WHERE chain_id = $2 AND versioned_hash = $1
 		UNION ALL
 		SELECT ` + mempoolBlobSelectColumns + ` FROM mempool_blobs
-		WHERE versioned_hashes @> ARRAY[$1::text] AND chain_id = $2
+		WHERE chain_id = $2 AND versioned_hash = $1
 		ORDER BY confirmed DESC, block_number DESC, timestamp DESC, tx_hash ASC, blob_index ASC
 		LIMIT 1
 	`
@@ -1121,5 +1144,81 @@ const (
 		SELECT ` + mempoolBlobSelectColumns + ` FROM mempool_blobs
 		WHERE chain_id = $1 AND tx_hash = ANY($2)
 		ORDER BY timestamp DESC, blob_index ASC
+	`
+
+	// querySearchBlockByNumber probes whether a block is indexed — a
+	// block_metrics primary-key lookup. block_metrics is the canonical
+	// per-block table: every indexed block has a row, including zero-blob
+	// blocks.
+	querySearchBlockByNumber = `
+		SELECT block_number FROM block_metrics
+		WHERE chain_id = $1 AND block_number = $2
+	`
+
+	// querySearchTxByHash resolves a 64-hex search query as a blob transaction
+	// hash, preferring a confirmed row over a pending one (pending rows sort
+	// last via the block-number sentinel). Served by idx_blobs_chain_txhash and
+	// the mempool_blobs primary key.
+	querySearchTxByHash = `
+		SELECT tx_hash, block_number FROM (
+			SELECT tx_hash, block_number FROM blobs
+			WHERE chain_id = $1 AND tx_hash = $2
+			UNION ALL
+			SELECT tx_hash, -1 AS block_number FROM mempool_blobs
+			WHERE chain_id = $1 AND tx_hash = $2
+		) matches
+		ORDER BY block_number DESC
+		LIMIT 1
+	`
+
+	// querySearchBlobByVersionedHash resolves a 64-hex search query as an
+	// EIP-4844 blob versioned hash, preferring the newest confirmed occurrence
+	// (the same blob can be resubmitted in multiple transactions) over a
+	// pending one. The trailing tx_hash sort key keeps the response
+	// deterministic when the same hash lands in two transactions of one block.
+	// Served by the partial idx_blobs_chain_versioned_hash; rows indexed
+	// before the versioned-hash migration have NULL versioned_hash and never
+	// match. The mempool arm is a bounded scan of the tiny pending set.
+	querySearchBlobByVersionedHash = `
+		SELECT versioned_hash, tx_hash, block_number FROM (
+			SELECT versioned_hash, tx_hash, block_number FROM blobs
+			WHERE chain_id = $1 AND versioned_hash = $2
+			UNION ALL
+			SELECT versioned_hash, tx_hash, -1 AS block_number FROM mempool_blobs
+			WHERE chain_id = $1 AND versioned_hash = $2
+		) matches
+		ORDER BY block_number DESC, tx_hash ASC
+		LIMIT 1
+	`
+
+	// querySearchSenderByAddress probes whether an address has sent confirmed
+	// blobs — a blob_user_stats primary-key lookup — with the same
+	// attribution-name coalescing as queryUserByAddress.
+	querySearchSenderByAddress = `
+		SELECT
+			s.from_address,
+			COALESCE(NULLIF(BTRIM(s.user_attribution), ''), NULLIF(BTRIM(bu.name), ''), '') AS user_attribution
+		FROM blob_user_stats s
+		LEFT JOIN blob_users bu
+			ON bu.chain_id = s.chain_id
+			AND LOWER(bu.address) = LOWER(s.from_address)
+		WHERE s.chain_id = $1 AND s.from_address = $2
+	`
+
+	// querySearchRollupsByName matches free-text search input against the
+	// known rollup attribution names synced from the blob-list (see
+	// internal/attribution) as a case-insensitive prefix. $2 must be a
+	// LIKE-escaped lowercase prefix pattern. The escape literal is an
+	// E-string so its meaning does not depend on the server's
+	// standard_conforming_strings setting. blob_users holds one row per
+	// attributed address, so the scan is bounded by the (small) known-user
+	// set rather than any per-blob table.
+	querySearchRollupsByName = `
+		SELECT name, array_agg(address ORDER BY address) AS addresses
+		FROM blob_users
+		WHERE chain_id = $1 AND LOWER(name) LIKE $2 ESCAPE E'\\'
+		GROUP BY name
+		ORDER BY name ASC
+		LIMIT $3
 	`
 )

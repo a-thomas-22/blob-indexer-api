@@ -733,7 +733,7 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 
 // GetBlobByVersionedHash godoc
 // @Summary Get blob by EIP-4844 versioned hash
-// @Description Retrieve the blob transaction carrying the given versioned blob hash (0x01-prefixed, 32 bytes). Confirmed inclusions win over pending ones; when identical blob content was posted more than once (same content means the same versioned hash), the newest inclusion by block is returned, with deterministic tie-breaking within a block. Multi-blob transactions return their first blob, like the tx-hash lookup.
+// @Description Retrieve the blob transaction carrying the given versioned blob hash (0x01-prefixed, 32 bytes). The returned blob is the matching blob itself, so blob_index identifies its position within the carrying transaction, and versioned_hashes lists the transaction's full hash list. Confirmed inclusions win over pending ones; when identical blob content was posted more than once (same content means the same versioned hash), the newest inclusion by block is returned, with deterministic tie-breaking within a block.
 // @Tags blobs
 // @Accept json
 // @Produce json

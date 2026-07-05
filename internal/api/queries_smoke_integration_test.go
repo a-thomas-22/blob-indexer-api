@@ -12,7 +12,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -51,32 +50,38 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 
-	// EIP-4844 versioned blob hashes. The "shared" hash appears on both the
-	// confirmed and the pending transaction (identical blob content produces
-	// identical versioned hashes), so the by-hash lookup must prefer the
-	// confirmed row.
-	confirmedOnlyHash := "0x01" + strings.Repeat("aa", 31)
-	pendingOnlyHash := "0x01" + strings.Repeat("bb", 31)
-	sharedHash := "0x01" + strings.Repeat("cc", 31)
-	missingHash := "0x01" + strings.Repeat("dd", 31)
-
 	if _, err := sqlxDB.Exec(`
 		INSERT INTO blobs (
 			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hashes
-		) VALUES (1, 100, 0, '0xconfirmed', '0xfrom', 'Rollup', 131072, 10, 2, 100, $1, 12, 131072, $2)
-	`, now, pq.StringArray{confirmedOnlyHash, sharedHash}); err != nil {
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
+		) VALUES (1, 100, 0, '0xconfirmed', '0xfrom', 'Rollup', 131072, 10, 2, 100, $1, 12, 131072, '0xvhconfirmed')
+	`, now); err != nil {
 		t.Fatalf("seed confirmed blob: %v", err)
 	}
 	if _, err := sqlxDB.Exec(`
 		INSERT INTO mempool_blobs (
 			chain_id, tx_hash, blob_index, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hashes
-		) VALUES (1, '0xpendingtx', 0, '0xfrom', 'Rollup', 131072, 50, 10, 500, $1, 60, 131072, $2)
-	`, now, pq.StringArray{pendingOnlyHash, sharedHash}); err != nil {
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
+		) VALUES (1, '0xpendingtx', 0, '0xfrom', 'Rollup', 131072, 50, 10, 500, $1, 60, 131072, '0xvhpending')
+	`, now); err != nil {
 		t.Fatalf("seed mempool blob: %v", err)
+	}
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO block_metrics (chain_id, block_number, block_timestamp)
+		VALUES (1, 100, $1)
+	`, now); err != nil {
+		t.Fatalf("seed block metrics: %v", err)
+	}
+	// Known-rollup row for a sender with no blob history: exercises the /search
+	// rollup-name arm without disturbing the blob_user_stats-derived
+	// assertions above.
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO blob_users (chain_id, address, name, description, category, first_seen, last_seen)
+		VALUES (1, '0xbase', 'Base', '', 'rollup', $1, $1)
+	`, now); err != nil {
+		t.Fatalf("seed blob user: %v", err)
 	}
 	// Block 99 is deliberately missing: the coverage bounds are documented as
 	// sparse extremes, so an interior gap (a failed block awaiting retry) must
@@ -138,29 +143,72 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 	})
 
 	t.Run("queryBlobByVersionedHash", func(t *testing.T) {
+		// Temp rows scoped to this subtest: a second blob on the confirmed tx
+		// (multi-blob hash-list assembly) and a pending re-post of the
+		// confirmed blob's content (identical content produces the identical
+		// versioned hash, so the lookup must prefer the confirmed row). Both
+		// are removed on exit so later subtests keep their seeded counts; the
+		// blobs delete also rolls its trigger-maintained stats back.
+		if _, err := sqlxDB.Exec(`
+			INSERT INTO blobs (
+				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
+			) VALUES (1, 100, 1, '0xconfirmed', '0xfrom', 'Rollup', 131072, 10, 2, 100, $1, 12, 131072, '0xvhconfirmed2')
+		`, now); err != nil {
+			t.Fatalf("seed second confirmed blob: %v", err)
+		}
+		if _, err := sqlxDB.Exec(`
+			INSERT INTO mempool_blobs (
+				chain_id, tx_hash, blob_index, from_address, user_attribution,
+				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
+			) VALUES (1, '0xpendingdup', 0, '0xfrom', 'Rollup', 131072, 50, 10, 500, $1, 60, 131072, '0xvhconfirmed')
+		`, now); err != nil {
+			t.Fatalf("seed duplicate-content pending blob: %v", err)
+		}
+		defer func() {
+			if _, err := sqlxDB.Exec(`DELETE FROM blobs WHERE chain_id = 1 AND tx_hash = '0xconfirmed' AND blob_index = 1`); err != nil {
+				t.Fatalf("clean up second confirmed blob: %v", err)
+			}
+			if _, err := sqlxDB.Exec(`DELETE FROM mempool_blobs WHERE chain_id = 1 AND tx_hash = '0xpendingdup'`); err != nil {
+				t.Fatalf("clean up duplicate-content pending blob: %v", err)
+			}
+		}()
+
+		// A hash carried by both a confirmed and a pending transaction resolves
+		// to the confirmed row, and the matched row is the blob itself.
 		var blob models.Blob
-		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, confirmedOnlyHash, 1); err != nil {
+		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, "0xvhconfirmed", 1); err != nil {
 			t.Fatalf("queryBlobByVersionedHash confirmed: %v", err)
 		}
-		if !blob.Confirmed || blob.BlockNumber != 100 || blob.TxHash != "0xconfirmed" {
-			t.Fatalf("expected confirmed blob, got %+v", blob)
+		if !blob.Confirmed || blob.BlockNumber != 100 || blob.TxHash != "0xconfirmed" || blob.BlobIndex != 0 {
+			t.Fatalf("expected confirmed blob at index 0, got %+v", blob)
 		}
-		if len(blob.VersionedHashes) != 2 || blob.VersionedHashes[0] != confirmedOnlyHash {
-			t.Fatalf("expected full versioned hash list on result, got %v", blob.VersionedHashes)
+		// The response carries the transaction's full ordered hash list,
+		// assembled from the sibling rows' scalar hashes.
+		want := pq.StringArray{"0xvhconfirmed", "0xvhconfirmed2"}
+		if len(blob.VersionedHashes) != 2 || blob.VersionedHashes[0] != want[0] || blob.VersionedHashes[1] != want[1] {
+			t.Fatalf("expected versioned hash list %v, got %v", want, blob.VersionedHashes)
 		}
-		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, pendingOnlyHash, 1); err != nil {
+
+		// Matching the second blob of the tx returns that blob's own row.
+		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, "0xvhconfirmed2", 1); err != nil {
+			t.Fatalf("queryBlobByVersionedHash second blob: %v", err)
+		}
+		if blob.TxHash != "0xconfirmed" || blob.BlobIndex != 1 {
+			t.Fatalf("expected second blob of confirmed tx, got %+v", blob)
+		}
+
+		// A pending-only hash falls through to the mempool arm.
+		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, "0xvhpending", 1); err != nil {
 			t.Fatalf("queryBlobByVersionedHash pending: %v", err)
 		}
 		if blob.Confirmed || blob.BlockNumber != models.PendingBlockNumber || blob.TxHash != "0xpendingtx" {
 			t.Fatalf("expected pending blob, got %+v", blob)
 		}
-		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, sharedHash, 1); err != nil {
-			t.Fatalf("queryBlobByVersionedHash shared: %v", err)
-		}
-		if !blob.Confirmed || blob.TxHash != "0xconfirmed" {
-			t.Fatalf("expected confirmed row to win for a hash carried by both, got %+v", blob)
-		}
-		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, missingHash, 1); !errors.Is(err, sql.ErrNoRows) {
+
+		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, "0xvhmissing", 1); !errors.Is(err, sql.ErrNoRows) {
 			t.Fatalf("expected sql.ErrNoRows for missing versioned hash, got %v", err)
 		}
 	})
@@ -236,6 +284,89 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		}
 		if counts.Confirmed != 1 || counts.Pending != 1 {
 			t.Fatalf("unexpected counts: %+v", counts)
+		}
+	})
+
+	t.Run("querySearchBlockByNumber", func(t *testing.T) {
+		var blockNumber int64
+		if err := sqlxDB.GetContext(ctx, &blockNumber, querySearchBlockByNumber, 1, 100); err != nil {
+			t.Fatalf("querySearchBlockByNumber: %v", err)
+		}
+		if blockNumber != 100 {
+			t.Fatalf("expected block 100, got %d", blockNumber)
+		}
+		if err := sqlxDB.GetContext(ctx, &blockNumber, querySearchBlockByNumber, 1, 999); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for unindexed block, got %v", err)
+		}
+	})
+
+	t.Run("querySearchTxByHash", func(t *testing.T) {
+		var tx searchTxRow
+		if err := sqlxDB.GetContext(ctx, &tx, querySearchTxByHash, 1, "0xconfirmed"); err != nil {
+			t.Fatalf("querySearchTxByHash confirmed: %v", err)
+		}
+		if tx.TxHash != "0xconfirmed" || tx.BlockNumber != 100 {
+			t.Fatalf("unexpected confirmed tx match: %+v", tx)
+		}
+		if err := sqlxDB.GetContext(ctx, &tx, querySearchTxByHash, 1, "0xpendingtx"); err != nil {
+			t.Fatalf("querySearchTxByHash pending: %v", err)
+		}
+		if tx.TxHash != "0xpendingtx" || tx.BlockNumber != models.PendingBlockNumber {
+			t.Fatalf("unexpected pending tx match: %+v", tx)
+		}
+		if err := sqlxDB.GetContext(ctx, &tx, querySearchTxByHash, 1, "0xmissing"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for missing tx, got %v", err)
+		}
+	})
+
+	t.Run("querySearchBlobByVersionedHash", func(t *testing.T) {
+		var blob searchBlobRow
+		if err := sqlxDB.GetContext(ctx, &blob, querySearchBlobByVersionedHash, 1, "0xvhconfirmed"); err != nil {
+			t.Fatalf("querySearchBlobByVersionedHash confirmed: %v", err)
+		}
+		if blob.VersionedHash != "0xvhconfirmed" || blob.TxHash != "0xconfirmed" || blob.BlockNumber != 100 {
+			t.Fatalf("unexpected confirmed blob match: %+v", blob)
+		}
+		if err := sqlxDB.GetContext(ctx, &blob, querySearchBlobByVersionedHash, 1, "0xvhpending"); err != nil {
+			t.Fatalf("querySearchBlobByVersionedHash pending: %v", err)
+		}
+		if blob.VersionedHash != "0xvhpending" || blob.TxHash != "0xpendingtx" || blob.BlockNumber != models.PendingBlockNumber {
+			t.Fatalf("unexpected pending blob match: %+v", blob)
+		}
+		if err := sqlxDB.GetContext(ctx, &blob, querySearchBlobByVersionedHash, 1, "0xmissing"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for missing versioned hash, got %v", err)
+		}
+	})
+
+	t.Run("querySearchSenderByAddress", func(t *testing.T) {
+		var sender searchSenderRow
+		if err := sqlxDB.GetContext(ctx, &sender, querySearchSenderByAddress, 1, "0xfrom"); err != nil {
+			t.Fatalf("querySearchSenderByAddress: %v", err)
+		}
+		if sender.FromAddress != "0xfrom" || sender.UserAttribution != "Rollup" {
+			t.Fatalf("unexpected sender match: %+v", sender)
+		}
+		if err := sqlxDB.GetContext(ctx, &sender, querySearchSenderByAddress, 1, "0xnothere"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for unknown sender, got %v", err)
+		}
+	})
+
+	t.Run("querySearchRollupsByName", func(t *testing.T) {
+		var rollups []searchRollupRow
+		if err := sqlxDB.SelectContext(ctx, &rollups, querySearchRollupsByName, 1, escapeLikePattern("ba")+"%", maxSearchRollupMatches); err != nil {
+			t.Fatalf("querySearchRollupsByName: %v", err)
+		}
+		if len(rollups) != 1 || rollups[0].Name != "Base" || len(rollups[0].Addresses) != 1 || rollups[0].Addresses[0] != "0xbase" {
+			t.Fatalf("unexpected rollup matches: %+v", rollups)
+		}
+		// LIKE metacharacters in user input must match literally, not as
+		// wildcards: "_ase" would otherwise match "Base".
+		rollups = nil
+		if err := sqlxDB.SelectContext(ctx, &rollups, querySearchRollupsByName, 1, escapeLikePattern("_ase")+"%", maxSearchRollupMatches); err != nil {
+			t.Fatalf("querySearchRollupsByName escaped: %v", err)
+		}
+		if len(rollups) != 0 {
+			t.Fatalf("expected no matches for escaped pattern, got %+v", rollups)
 		}
 	})
 }
