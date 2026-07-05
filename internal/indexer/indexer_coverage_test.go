@@ -367,6 +367,9 @@ func TestDetermineStartBlock_ResumesActiveBackfillCursor(t *testing.T) {
 	if start != 251 {
 		t.Fatalf("expected backfill resume block 251, got %d", start)
 	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
 }
 
 // Regression test for the 2026-07-05 mainnet incident: the tip-gap catch-up
@@ -578,6 +581,9 @@ func TestBackfillResumeBlock_Branches(t *testing.T) {
 		_, _, err := idx.backfillResumeBlock(100, 200, true)
 		if err == nil || !strings.Contains(err.Error(), "failed to get first unindexed block") {
 			t.Fatalf("expected coverage scan error, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
 		}
 	})
 
