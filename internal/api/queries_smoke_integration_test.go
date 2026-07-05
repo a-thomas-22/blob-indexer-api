@@ -68,6 +68,12 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 	`, now); err != nil {
 		t.Fatalf("seed mempool blob: %v", err)
 	}
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO indexed_blocks (chain_id, block_number, block_hash, parent_hash)
+		VALUES (1, 98, '0xhash98', '0xhash97'), (1, 99, '0xhash99', '0xhash98'), (1, 100, '0xhash100', '0xhash99')
+	`); err != nil {
+		t.Fatalf("seed indexed blocks: %v", err)
+	}
 
 	t.Run("queryMempoolBlobs", func(t *testing.T) {
 		var blobs []models.Blob
@@ -156,6 +162,28 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		}
 		if len(shares) != 1 || shares[0].BlobCount != 1 {
 			t.Fatalf("unexpected category shares: %+v", shares)
+		}
+	})
+
+	t.Run("queryIndexedBlockCoverage", func(t *testing.T) {
+		var coverage indexedBlockCoverage
+		if err := sqlxDB.GetContext(ctx, &coverage, queryIndexedBlockCoverage, 1); err != nil {
+			t.Fatalf("queryIndexedBlockCoverage: %v", err)
+		}
+		if coverage.EarliestIndexedBlock == nil || *coverage.EarliestIndexedBlock != 98 {
+			t.Fatalf("expected earliest indexed block 98, got %+v", coverage)
+		}
+		if coverage.LatestIndexedBlock == nil || *coverage.LatestIndexedBlock != 100 {
+			t.Fatalf("expected latest indexed block 100, got %+v", coverage)
+		}
+		// A network with no indexed blocks scans NULL aggregates into nil
+		// bounds rather than erroring.
+		coverage = indexedBlockCoverage{}
+		if err := sqlxDB.GetContext(ctx, &coverage, queryIndexedBlockCoverage, 424242); err != nil {
+			t.Fatalf("queryIndexedBlockCoverage empty network: %v", err)
+		}
+		if coverage.EarliestIndexedBlock != nil || coverage.LatestIndexedBlock != nil {
+			t.Fatalf("expected nil coverage bounds for empty network, got %+v", coverage)
 		}
 	})
 

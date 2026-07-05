@@ -957,6 +957,20 @@ const (
 	// handling.
 	queryNetworkLastIndexedTime = "SELECT COALESCE(MAX(last_indexed_time), '1970-01-01'::timestamp) FROM network_blob_stats WHERE chain_id = $1"
 
+	// queryIndexedBlockCoverage reports the indexed block range for a network
+	// from indexed_blocks, the canonical per-block coverage record (the indexer
+	// writes one row per indexed block and uses it for gap detection). The
+	// (chain_id, block_number) primary key turns both aggregates into single
+	// index probes, so this stays cheap under /status polling. Both bounds are
+	// NULL when the network has no indexed blocks.
+	queryIndexedBlockCoverage = `
+		SELECT
+			MIN(block_number) AS earliest_indexed_block,
+			MAX(block_number) AS latest_indexed_block
+		FROM indexed_blocks
+		WHERE chain_id = $1
+	`
+
 	// userSortByCountClause / userSortBySpendClause terminate the all-history
 	// top-user queries with static sort keys that line up with
 	// idx_blob_user_stats_chain_count and idx_blob_user_stats_chain_spend. The
