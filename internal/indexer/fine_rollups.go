@@ -62,11 +62,14 @@ func (i *Indexer) runFineRollupMaintenance() {
 }
 
 // backfillFineRollups recomputes fine rollup buckets across the retention
-// window in bucket-aligned chunks, oldest first. Each chunk holds the network
-// write lock so the full-replace upserts cannot race this indexer's own
-// trigger-driven rollup increments. Re-running is safe (recompute-and-replace),
-// so a failed run just leaves the remaining coverage gap for the API's raw
-// fallback until the next restart.
+// window in bucket-aligned chunks, newest first. Newest-first ordering keeps
+// completed coverage contiguous with the trigger-maintained buckets, so the
+// API's coverage probe (MIN(bucket_start) of fine buckets) never claims a
+// range with a hole in the middle even if this run aborts partway. Each chunk
+// holds the network write lock so the full-replace upserts cannot race this
+// indexer's own trigger-driven rollup increments. Re-running is safe
+// (recompute-and-replace), so a failed run just leaves the remaining coverage
+// gap for the API's raw fallback until the next restart.
 func (i *Indexer) backfillFineRollups() {
 	bucket := db.FineChartRollupBucketDuration
 	// End past the in-progress bucket so backfill and live triggers meet with
@@ -80,10 +83,10 @@ func (i *Indexer) backfillFineRollups() {
 		zap.Time("end", end))
 
 	began := time.Now()
-	for chunkStart := start; chunkStart.Before(end); {
-		chunkEnd := chunkStart.Add(fineRollupBackfillChunk)
-		if chunkEnd.After(end) {
-			chunkEnd = end
+	for chunkEnd := end; chunkEnd.After(start); {
+		chunkStart := chunkEnd.Add(-fineRollupBackfillChunk)
+		if chunkStart.Before(start) {
+			chunkStart = start
 		}
 
 		unlockWrites := i.lockDBWrites()
@@ -98,7 +101,7 @@ func (i *Indexer) backfillFineRollups() {
 			}
 			return
 		}
-		chunkStart = chunkEnd
+		chunkEnd = chunkStart
 
 		select {
 		case <-i.ctx.Done():

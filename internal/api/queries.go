@@ -642,7 +642,9 @@ const (
 	// window or chart range starting before this timestamp is not fully
 	// covered and must fall back to raw scans. block_metrics_rollups is the
 	// coverage signal because blocks are continuous while blob buckets are
-	// sparse.
+	// sparse. MIN is a sound signal because the backfill runs newest-first in
+	// atomic chunks: completed fine coverage is always contiguous from this
+	// timestamp to now, even if a backfill run aborted partway.
 	queryFineRollupCoverageStart = `
 		SELECT MIN(bucket_start) FROM block_metrics_rollups
 		WHERE chain_id = $1 AND bucket_seconds = 60

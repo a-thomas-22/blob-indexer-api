@@ -45,12 +45,15 @@ $$ LANGUAGE sql IMMUTABLE;
 
 -- Bucket sizes the triggers maintain for a row with the given timestamp: all
 -- coarse buckets always, the fine bucket only within its retention window.
+-- Row timestamps are UTC wall times in TIMESTAMP columns, so NOW() is
+-- converted to a UTC wall time before comparing — a bare NOW() (timestamptz)
+-- would be interpreted in the session TimeZone and shift the cutoff.
 CREATE OR REPLACE FUNCTION chart_rollup_bucket_seconds_for(p_timestamp TIMESTAMP)
 RETURNS TABLE (bucket_seconds INTEGER) AS $$
     SELECT g.bucket_seconds
     FROM chart_rollup_bucket_seconds() g
     WHERE g.bucket_seconds <> chart_rollup_fine_bucket_seconds()
-        OR p_timestamp >= NOW() - chart_rollup_fine_retention();
+        OR p_timestamp >= (NOW() AT TIME ZONE 'UTC') - chart_rollup_fine_retention();
 $$ LANGUAGE sql STABLE;
 
 -- ---------------------------------------------------------------------------

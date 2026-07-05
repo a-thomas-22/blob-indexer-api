@@ -136,28 +136,45 @@ const backfillFineBlockMetricsRollupsChunk = `
 // BackfillFineChartRollupsChunk recomputes the fine (60s) chart rollup buckets
 // covering [start, end) from raw blobs and block_metrics. Both bounds must be
 // aligned to the fine bucket size: each bucket is fully replaced, so a bucket
-// spanning a chunk boundary would lose the rows outside the chunk.
+// spanning a chunk boundary would lose the rows outside the chunk. The two
+// statements run in one transaction so a chunk is all-or-nothing — the API's
+// coverage probe reads block_metrics_rollups, and committing that table's
+// rows without the matching blob rows (or vice versa) could serve mixed
+// fine/raw stats for the chunk's range.
 func (db *DB) BackfillFineChartRollupsChunk(ctx context.Context, networkID int, start, end time.Time) error {
 	if !start.Truncate(FineChartRollupBucketDuration).Equal(start) || !end.Truncate(FineChartRollupBucketDuration).Equal(end) {
 		return fmt.Errorf("fine rollup backfill chunk bounds must be aligned to %ds buckets, got [%s, %s)",
 			FineChartRollupBucketSeconds, start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano))
 	}
-	if _, err := db.ExecContext(ctx, backfillFineBlobChartRollupsChunk, networkID, start, end, FineChartRollupBucketSeconds); err != nil {
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin fine rollup backfill for network %d: %w", networkID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, backfillFineBlobChartRollupsChunk, networkID, start, end, FineChartRollupBucketSeconds); err != nil {
 		return fmt.Errorf("failed to backfill fine blob chart rollups for network %d [%s, %s): %w",
 			networkID, start.Format(time.RFC3339), end.Format(time.RFC3339), err)
 	}
-	if _, err := db.ExecContext(ctx, backfillFineBlockMetricsRollupsChunk, networkID, start, end, FineChartRollupBucketSeconds); err != nil {
+	if _, err := tx.ExecContext(ctx, backfillFineBlockMetricsRollupsChunk, networkID, start, end, FineChartRollupBucketSeconds); err != nil {
 		return fmt.Errorf("failed to backfill fine block metrics rollups for network %d [%s, %s): %w",
+			networkID, start.Format(time.RFC3339), end.Format(time.RFC3339), err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit fine rollup backfill for network %d [%s, %s): %w",
 			networkID, start.Format(time.RFC3339), end.Format(time.RFC3339), err)
 	}
 	return nil
 }
 
-// PruneFineChartRollups deletes fine (60s) rollup buckets starting before the
-// cutoff and returns the total rows removed. Deleting rollup rows directly
-// fires no triggers, and pruned buckets are disjoint from the recent buckets
-// live writes touch, so this needs no write serialization.
+// PruneFineChartRollups deletes fine (60s) rollup buckets that are entirely
+// older than the cutoff and returns the total rows removed. The cutoff aligns
+// down to the bucket size so a bucket that still partially overlaps the
+// retention window is kept until it fully expires. Deleting rollup rows
+// directly fires no triggers, and pruned buckets are disjoint from the recent
+// buckets live writes touch, so this needs no write serialization.
 func (db *DB) PruneFineChartRollups(ctx context.Context, networkID int, cutoff time.Time) (int64, error) {
+	cutoff = cutoff.Truncate(FineChartRollupBucketDuration)
 	var total int64
 	for _, query := range []string{
 		"DELETE FROM blob_chart_rollups WHERE chain_id = $1 AND bucket_seconds = $2 AND bucket_start < $3",
