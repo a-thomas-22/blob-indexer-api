@@ -445,8 +445,16 @@ func TestHub_SendEventToClient_Delivered(t *testing.T) {
 		hub:         hub,
 		send:        make(chan []byte, 4),
 		networkName: "sepolia",
+		registered:  make(chan struct{}),
 	}
 	hub.register <- client
+	// Direct sends to a not-yet-registered client are dropped by design; wait
+	// for the hub's registration ack the way production senders do.
+	select {
+	case <-client.registered:
+	case <-time.After(time.Second):
+		t.Fatal("registration not acknowledged")
+	}
 
 	hub.SendEventToClient(client, WSEvent{Type: EventBlockSnapshot, Data: BlockSnapshotData{Blocks: []NewBlockData{{BlockNumber: 42}}}})
 
