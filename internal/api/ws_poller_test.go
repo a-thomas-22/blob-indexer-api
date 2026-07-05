@@ -896,6 +896,11 @@ func TestPoller_BroadcastUsersUpdate_Success(t *testing.T) {
 	if countEvents(events, EventUsersUpdate) != 1 {
 		t.Fatalf("expected one users_update, got %d", countEvents(events, EventUsersUpdate))
 	}
+	for _, e := range events {
+		if e.Type == EventUsersUpdate && e.Range != string(userWindowAll) {
+			t.Fatalf("expected users_update range %q, got %q", userWindowAll, e.Range)
+		}
+	}
 }
 
 func TestPoller_ScanError_NoBroadcastNoCorruption(t *testing.T) {

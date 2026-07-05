@@ -170,6 +170,123 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 	})
 }
 
+// TestUserWindowQueriesAgainstRealPostgres validates the windowed /users query
+// text against a real schema: the 1h tier reading trigger-maintained fine
+// (60s) rollup buckets, the hourly tier's 24h/30d bounds, and the
+// deterministic ordering of count ties. It runs on a deliberately non-UTC
+// session so a window bound computed in session-local time (instead of UTC
+// wall time, matching the naive bucket_start timestamps) shifts by the UTC
+// offset and fails the bounds assertions.
+func TestUserWindowQueriesAgainstRealPostgres(t *testing.T) {
+	url := testdb.URL(t, "api")
+	sqlxDB, err := sqlx.Connect("postgres", url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer sqlxDB.Close()
+
+	for _, stmt := range []string{
+		"DROP SCHEMA IF EXISTS public CASCADE",
+		"CREATE SCHEMA public",
+		"GRANT ALL ON SCHEMA public TO PUBLIC",
+	} {
+		if _, err := sqlxDB.Exec(stmt); err != nil {
+			t.Fatalf("reset schema (%s): %v", stmt, err)
+		}
+	}
+	if err := db.RunMigrations(url); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// Pin the pool to one connection so the session TimeZone below applies to
+	// every query in this test. Tokyo is UTC+9: far enough that any
+	// session-local window bound moves by hours in the direction that changes
+	// which seeded blobs fall inside each window.
+	sqlxDB.SetMaxOpenConns(1)
+	if _, err := sqlxDB.Exec("SET TIME ZONE 'Asia/Tokyo'"); err != nil {
+		t.Fatalf("set session time zone: %v", err)
+	}
+
+	ctx := context.Background()
+	recent := time.Now().UTC().Add(-2 * time.Minute)
+	older := time.Now().UTC().Add(-3 * 24 * time.Hour)
+
+	// Sender A is attributed and active both minutes and days ago; sender B is
+	// unattributed and only recent, with higher spend so the recent-window
+	// count tie must break by cost. The insert triggers populate both the fine
+	// (60s) and hourly rollup buckets for the recent rows; the older row is
+	// outside fine retention and only gets hourly buckets.
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES
+			(1, 200, 0, '0xrecenta', '0xaaa', 'RollupA', 131072, 10, 2, 100, $1, 12, 131072),
+			(1, 200, 1, '0xrecentb', '0xbbb', '', 131072, 10, 2, 200, $1, 12, 131072),
+			(1, 100, 0, '0xoldera', '0xaaa', 'RollupA', 131072, 10, 2, 300, $2, 12, 131072)
+	`, recent, older); err != nil {
+		t.Fatalf("seed blobs: %v", err)
+	}
+
+	for _, window := range []string{"1h", "24h"} {
+		t.Run("queryTopBlobUsersWithOptions "+window, func(t *testing.T) {
+			var users []models.BlobUserStats
+			if err := sqlxDB.SelectContext(ctx, &users, queryTopBlobUsersWithOptions, 1, 10, 0, window, "count"); err != nil {
+				t.Fatalf("queryTopBlobUsersWithOptions %s: %v", window, err)
+			}
+			// Only the two recent blobs are inside the window; the count tie
+			// breaks by spend, so B (200 wei) precedes A (100 wei).
+			if len(users) != 2 || users[0].Address != "0xbbb" || users[1].Address != "0xaaa" {
+				t.Fatalf("unexpected %s users: %+v", window, users)
+			}
+			if users[0].BlobCount != 1 || users[0].BlobSharePercent != 50 || users[0].TotalCostWei != "200" {
+				t.Fatalf("unexpected %s leader aggregates: %+v", window, users[0])
+			}
+		})
+	}
+
+	t.Run("queryTopBlobUsersWithOptions 30d", func(t *testing.T) {
+		var users []models.BlobUserStats
+		if err := sqlxDB.SelectContext(ctx, &users, queryTopBlobUsersWithOptions, 1, 10, 0, "30d", "count"); err != nil {
+			t.Fatalf("queryTopBlobUsersWithOptions 30d: %v", err)
+		}
+		// The 30d window also covers the older blob, so A leads on count.
+		if len(users) != 2 || users[0].Address != "0xaaa" || users[0].BlobCount != 2 || users[1].BlobCount != 1 {
+			t.Fatalf("unexpected 30d users: %+v", users)
+		}
+		if users[0].TotalCostWei != "400" || users[0].Name != "RollupA" {
+			t.Fatalf("unexpected 30d leader aggregates: %+v", users[0])
+		}
+	})
+
+	t.Run("queryTopUnattributedBlobUsersWithOptions 1h", func(t *testing.T) {
+		var users []models.BlobUserStats
+		if err := sqlxDB.SelectContext(ctx, &users, queryTopUnattributedBlobUsersWithOptions, 1, 10, 0, "1h", "count"); err != nil {
+			t.Fatalf("queryTopUnattributedBlobUsersWithOptions 1h: %v", err)
+		}
+		if len(users) != 1 || users[0].Address != "0xbbb" {
+			t.Fatalf("unexpected unattributed users: %+v", users)
+		}
+	})
+
+	t.Run("queryBlobUserCategoryBreakdown windows", func(t *testing.T) {
+		var shares []models.BlobUserCategoryShare
+		if err := sqlxDB.SelectContext(ctx, &shares, queryBlobUserCategoryBreakdown, 1, "1h"); err != nil {
+			t.Fatalf("queryBlobUserCategoryBreakdown 1h: %v", err)
+		}
+		if len(shares) != 1 || shares[0].Category != "unknown" || shares[0].BlobCount != 2 {
+			t.Fatalf("unexpected 1h category shares: %+v", shares)
+		}
+		if err := sqlxDB.SelectContext(ctx, &shares, queryBlobUserCategoryBreakdown, 1, "30d"); err != nil {
+			t.Fatalf("queryBlobUserCategoryBreakdown 30d: %v", err)
+		}
+		if len(shares) != 1 || shares[0].BlobCount != 3 {
+			t.Fatalf("unexpected 30d category shares: %+v", shares)
+		}
+	})
+}
+
 // TestWSPollerQueriesAgainstRealPostgres validates the WebSocket poller's and
 // snapshot builder's query text against a real schema, including type
 // unification of block_number scans into uint64 slices.

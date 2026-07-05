@@ -143,7 +143,12 @@ func aggregateWorkContext(r *http.Request) context.Context {
 type Response struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
-	Error   string      `json:"error,omitempty"`
+	// Meta carries optional request-scoped metadata about how data was
+	// resolved (e.g. the aggregation range echoed by /users). Handlers must
+	// only derive it from the request URL, never from per-request state, so
+	// cached copies of the response stay valid for every requester.
+	Meta  interface{} `json:"meta,omitempty"`
+	Error string      `json:"error,omitempty"`
 	// ErrorCode is a stable, machine-readable identifier for the error
 	// (e.g. "not_found", "rate_limited"). It is derived from the HTTP status
 	// and the human-readable message, and is omitted on success responses.

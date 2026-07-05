@@ -39,7 +39,14 @@ var AllEventTypes = []WSEventType{
 // WSEvent is the envelope for all server-to-client WebSocket messages.
 type WSEvent struct {
 	Type WSEventType `json:"type"`
-	Data interface{} `json:"data,omitempty"`
+	// Range identifies the aggregation window a users_update payload covers
+	// (currently always "all"), so clients viewing a different REST range can
+	// drop mismatched pushes instead of overwriting their table with them. It
+	// lives on the envelope because the users_update data payload is a bare
+	// array, which can't grow a field without breaking its shape. Empty for
+	// event types that have no aggregation window.
+	Range string      `json:"range,omitempty"`
+	Data  interface{} `json:"data,omitempty"`
 }
 
 // NewBlockData is the payload for EventNewBlock.

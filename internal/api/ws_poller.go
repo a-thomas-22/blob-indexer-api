@@ -463,8 +463,9 @@ func (p *Poller) broadcastUsersUpdate(ctx context.Context, network config.Networ
 	}
 
 	p.hub.BroadcastEvent(network.Name, WSEvent{
-		Type: EventUsersUpdate,
-		Data: response,
+		Type:  EventUsersUpdate,
+		Range: string(userWindowAll),
+		Data:  response,
 	})
 }
 

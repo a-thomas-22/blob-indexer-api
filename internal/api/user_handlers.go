@@ -27,8 +27,10 @@ const (
 type userWindowOption string
 
 const (
+	userWindow1h  userWindowOption = "1h"
 	userWindow24h userWindowOption = apiWindow24h
 	userWindow7d  userWindowOption = "7d"
+	userWindow30d userWindowOption = "30d"
 	userWindowAll userWindowOption = "all"
 )
 
@@ -93,16 +95,37 @@ func parseUserSortOption(r *http.Request) (userSortOption, error) {
 	}
 }
 
-func parseUserWindowOption(r *http.Request) (userWindowOption, error) {
-	window := strings.ToLower(r.URL.Query().Get("window"))
-	if window == "" {
-		return userWindowAll, nil
+// usersRangeMeta echoes the resolved aggregation window on requests that named
+// one, so clients can confirm which window the returned rows describe.
+type usersRangeMeta struct {
+	Range string `json:"range"`
+}
+
+// parseUserRangeOption resolves the aggregation window from the canonical
+// `range` query param or its legacy `window` alias. explicit reports whether
+// the client named a window at all: omitted requests keep the historical
+// default (all-history) with a byte-identical response shape, while explicit
+// requests additionally get the resolved window echoed under meta. Conflicting
+// values across the two params are rejected rather than silently picking one,
+// so a client never renders data labeled with the wrong window.
+func parseUserRangeOption(r *http.Request) (window userWindowOption, explicit bool, err error) {
+	rangeValue := strings.ToLower(r.URL.Query().Get("range"))
+	windowValue := strings.ToLower(r.URL.Query().Get("window"))
+	if rangeValue != "" && windowValue != "" && rangeValue != windowValue {
+		return "", false, fmt.Errorf("conflicting range and window parameters")
 	}
-	switch userWindowOption(window) {
-	case userWindow24h, userWindow7d, userWindowAll:
-		return userWindowOption(window), nil
+	param, value := "range", rangeValue
+	if value == "" {
+		param, value = "window", windowValue
+	}
+	if value == "" {
+		return userWindowAll, false, nil
+	}
+	switch userWindowOption(value) {
+	case userWindow1h, userWindow24h, userWindow7d, userWindow30d, userWindowAll:
+		return userWindowOption(value), true, nil
 	default:
-		return "", fmt.Errorf("invalid window parameter")
+		return "", false, fmt.Errorf("invalid %s parameter", param)
 	}
 }
 
@@ -116,7 +139,8 @@ func parseUserWindowOption(r *http.Request) (userWindowOption, error) {
 // @Param limit query int false "Number of users to return (default: 10, max: 100)"
 // @Param offset query int false "Number of users to skip for pagination (default: 0, max: 10000)"
 // @Param sort query string false "Sort users by count or spend (default: count)" Enums(count, spend)
-// @Param window query string false "Time window to aggregate (default: all)" Enums(24h, 7d, all)
+// @Param range query string false "Time range to aggregate; echoed back in meta.range (default: all)" Enums(1h, 24h, 7d, 30d, all)
+// @Param window query string false "Deprecated alias for range" Enums(1h, 24h, 7d, 30d, all)
 // @Success 200 {object} Response{data=[]UserResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -136,7 +160,8 @@ func (a *API) GetTopBlobUsers(w http.ResponseWriter, r *http.Request) {
 // @Param limit query int false "Number of users to return (default: 10, max: 100)"
 // @Param offset query int false "Number of users to skip for pagination (default: 0, max: 10000)"
 // @Param sort query string false "Sort users by count or spend (default: count)" Enums(count, spend)
-// @Param window query string false "Time window to aggregate (default: all)" Enums(24h, 7d, all)
+// @Param range query string false "Time range to aggregate; echoed back in meta.range (default: all)" Enums(1h, 24h, 7d, 30d, all)
+// @Param window query string false "Deprecated alias for range" Enums(1h, 24h, 7d, 30d, all)
 // @Success 200 {object} Response{data=[]UserResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -180,10 +205,18 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 		return
 	}
 
-	window, err := parseUserWindowOption(r)
+	window, explicitWindow, err := parseUserRangeOption(r)
 	if err != nil {
 		a.respondError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	// Echo the resolved window only when the client named one: omitted-range
+	// responses stay byte-identical to the historical shape, and the meta is
+	// constant per URL so every cache layer stays coherent.
+	var meta interface{}
+	if explicitWindow {
+		meta = usersRangeMeta{Range: string(window)}
 	}
 
 	logMessage := "Getting top blob users"
@@ -227,6 +260,7 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 		a.respondJSON(w, http.StatusOK, Response{
 			Success: true,
 			Data:    cached.response,
+			Meta:    meta,
 		})
 		return
 	}
@@ -281,7 +315,11 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 		zap.String("sort", string(sort)),
 		zap.String("window", string(window)),
 		zap.Int("count", len(response)))
-	a.respondSuccess(w, response)
+	a.respondJSON(w, http.StatusOK, Response{
+		Success: true,
+		Data:    response,
+		Meta:    meta,
+	})
 }
 
 // GetUserBreakdown godoc
@@ -291,7 +329,8 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 // @Accept json
 // @Produce json
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
-// @Param window query string false "Time window to aggregate (default: all)" Enums(24h, 7d, all)
+// @Param range query string false "Time range to aggregate; echoed back in meta.range (default: all)" Enums(1h, 24h, 7d, 30d, all)
+// @Param window query string false "Deprecated alias for range" Enums(1h, 24h, 7d, 30d, all)
 // @Success 200 {object} Response{data=UserBreakdownResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -304,10 +343,17 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	window, err := parseUserWindowOption(r)
+	window, explicitWindow, err := parseUserRangeOption(r)
 	if err != nil {
 		a.respondError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	// Same explicit-only meta echo as getTopBlobUsers, so the range contract
+	// is uniform across the /users endpoints.
+	var meta interface{}
+	if explicitWindow {
+		meta = usersRangeMeta{Range: string(window)}
 	}
 
 	logger.Debug("Getting blob user breakdown",
@@ -319,7 +365,11 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 	if cached, ok := a.breakdownCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		a.cacheMu.RUnlock()
 		setCacheControl(w, aggregateCacheTTL, aggregateEdgeTTL)
-		a.respondSuccess(w, cached.response)
+		a.respondJSON(w, http.StatusOK, Response{
+			Success: true,
+			Data:    cached.response,
+			Meta:    meta,
+		})
 		return
 	}
 	a.cacheMu.RUnlock()
@@ -385,7 +435,11 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 	response, _ := value.(UserBreakdownResponse)
 
 	setCacheControl(w, aggregateCacheTTL, aggregateEdgeTTL)
-	a.respondSuccess(w, response)
+	a.respondJSON(w, http.StatusOK, Response{
+		Success: true,
+		Data:    response,
+		Meta:    meta,
+	})
 }
 
 // GetUserByAddress godoc

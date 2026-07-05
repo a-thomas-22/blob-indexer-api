@@ -149,17 +149,37 @@ const (
 		LIMIT 1
 	`
 
-	// queryTopBlobUsersWithOptions aggregates windowed sender usage ($4 is '24h'
-	// or '7d'; all-history reads use queryTopBlobUsersAll) from hourly chart
-	// rollups so wide windows stay O(buckets x senders) instead of scanning raw
-	// blobs. Windows align down to the rollup hour and cover confirmed blobs
-	// only; exact last-seen times come from blob_user_stats.
+	// queryTopBlobUsersWithOptions aggregates windowed sender usage ($4 is '1h',
+	// '24h', '7d', or '30d'; all-history reads use the queryTopBlobUsersAll*
+	// variants) from chart rollups so windows stay O(buckets x senders) instead
+	// of scanning raw blobs. The 1h window reads fine (60s) buckets aligned down
+	// to the minute; wider windows read hourly buckets aligned down to the hour.
+	// Windows have only the aligned lower bound and extend through the
+	// in-progress bucket: results stay current through now (a leaderboard that
+	// excluded the open bucket would lag by up to a full bucket), while the
+	// bound itself moves only at bucket boundaries, so request-time jitter
+	// never shifts the window and every cache layer (in-process, ETag, edge,
+	// browser) serves one entry per URL between data changes. The traded cost
+	// is that a window spans up to one extra bucket of history beyond its
+	// nominal width. Fine buckets are trigger-maintained in the same
+	// transaction as blob inserts (48h retention), so a 1h window is fully
+	// covered on any database whose fine-rollup migration is at least an hour
+	// old. Windows cover confirmed blobs only; exact last-seen times come from
+	// blob_user_stats. The trailing from_address sort key makes ordering — and
+	// therefore pagination — fully deterministic across ties.
 	queryTopBlobUsersWithOptions = `
-		WITH window_bounds AS (
-			SELECT date_trunc('hour', NOW() - CASE
-				WHEN $4 = '24h' THEN INTERVAL '24 hours'
-				ELSE INTERVAL '7 days'
-			END) AS start_time
+		WITH window_params AS (
+			SELECT
+				CASE WHEN $4 = '1h' THEN 60 ELSE 3600 END AS bucket_seconds,
+				-- bucket_start is a naive UTC timestamp, so the bound must be
+				-- computed in UTC wall time; bare NOW() would shift the window
+				-- by the session TimeZone offset.
+				CASE
+					WHEN $4 = '1h' THEN date_trunc('minute', (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 hour')
+					WHEN $4 = '24h' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours')
+					WHEN $4 = '30d' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days')
+					ELSE date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days')
+				END AS start_time
 		),
 		user_totals AS (
 			SELECT
@@ -170,13 +190,13 @@ const (
 				COALESCE(SUM(r.total_cost_wei), 0) AS total_cost_wei,
 				MAX(r.bucket_start) AS last_bucket_start
 			FROM blob_chart_rollups r
-			CROSS JOIN window_bounds wb
+			CROSS JOIN window_params wp
 			LEFT JOIN blob_users bu
 				ON bu.chain_id = r.chain_id
 				AND LOWER(bu.address) = LOWER(r.from_address)
 			WHERE r.chain_id = $1
-				AND r.bucket_seconds = 3600
-				AND r.bucket_start >= wb.start_time
+				AND r.bucket_seconds = wp.bucket_seconds
+				AND r.bucket_start >= wp.start_time
 			GROUP BY r.from_address
 		),
 		totals AS (
@@ -210,7 +230,7 @@ const (
 			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_wei END DESC,
 			user_totals.blob_count DESC,
 			user_totals.total_cost_wei DESC,
-			COALESCE(s.last_timestamp, user_totals.last_bucket_start) DESC
+			user_totals.from_address ASC
 		LIMIT $2 OFFSET $3
 	`
 
@@ -275,11 +295,18 @@ const (
 	// for addresses without either indexed attribution or a known blob_users
 	// entry. Same rollup-backed window semantics as queryTopBlobUsersWithOptions.
 	queryTopUnattributedBlobUsersWithOptions = `
-		WITH window_bounds AS (
-			SELECT date_trunc('hour', NOW() - CASE
-				WHEN $4 = '24h' THEN INTERVAL '24 hours'
-				ELSE INTERVAL '7 days'
-			END) AS start_time
+		WITH window_params AS (
+			SELECT
+				CASE WHEN $4 = '1h' THEN 60 ELSE 3600 END AS bucket_seconds,
+				-- bucket_start is a naive UTC timestamp, so the bound must be
+				-- computed in UTC wall time; bare NOW() would shift the window
+				-- by the session TimeZone offset.
+				CASE
+					WHEN $4 = '1h' THEN date_trunc('minute', (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 hour')
+					WHEN $4 = '24h' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours')
+					WHEN $4 = '30d' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days')
+					ELSE date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days')
+				END AS start_time
 		),
 		user_totals AS (
 			SELECT
@@ -290,13 +317,13 @@ const (
 				COALESCE(SUM(r.total_cost_wei), 0) AS total_cost_wei,
 				MAX(r.bucket_start) AS last_bucket_start
 			FROM blob_chart_rollups r
-			CROSS JOIN window_bounds wb
+			CROSS JOIN window_params wp
 			LEFT JOIN blob_users bu
 				ON bu.chain_id = r.chain_id
 				AND LOWER(bu.address) = LOWER(r.from_address)
 			WHERE r.chain_id = $1
-				AND r.bucket_seconds = 3600
-				AND r.bucket_start >= wb.start_time
+				AND r.bucket_seconds = wp.bucket_seconds
+				AND r.bucket_start >= wp.start_time
 			GROUP BY r.from_address
 			HAVING NULLIF(MAX(BTRIM(r.user_attribution)), '') IS NULL
 				AND MAX(bu.id) IS NULL
@@ -332,7 +359,7 @@ const (
 			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_wei END DESC,
 			user_totals.blob_count DESC,
 			user_totals.total_cost_wei DESC,
-			COALESCE(s.last_timestamp, user_totals.last_bucket_start) DESC
+			user_totals.from_address ASC
 		LIMIT $2 OFFSET $3
 	`
 
@@ -386,15 +413,22 @@ const (
 	queryTopUnattributedBlobUsersAllBySpend = queryTopUnattributedBlobUsersAllBase + userSortBySpendClause
 
 	// queryBlobUserCategoryBreakdown aggregates windowed blob usage by known user
-	// category ($2 is '24h' or '7d'; all-history reads use
+	// category ($2 is '1h', '24h', '7d', or '30d'; all-history reads use
 	// queryBlobUserCategoryBreakdownAll). Same rollup-backed window semantics as
 	// queryTopBlobUsersWithOptions.
 	queryBlobUserCategoryBreakdown = `
-		WITH window_bounds AS (
-			SELECT date_trunc('hour', NOW() - CASE
-				WHEN $2 = '24h' THEN INTERVAL '24 hours'
-				ELSE INTERVAL '7 days'
-			END) AS start_time
+		WITH window_params AS (
+			SELECT
+				CASE WHEN $2 = '1h' THEN 60 ELSE 3600 END AS bucket_seconds,
+				-- bucket_start is a naive UTC timestamp, so the bound must be
+				-- computed in UTC wall time; bare NOW() would shift the window
+				-- by the session TimeZone offset.
+				CASE
+					WHEN $2 = '1h' THEN date_trunc('minute', (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 hour')
+					WHEN $2 = '24h' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours')
+					WHEN $2 = '30d' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days')
+					ELSE date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days')
+				END AS start_time
 		),
 		category_totals AS (
 			SELECT
@@ -402,13 +436,13 @@ const (
 				COALESCE(SUM(r.blob_count), 0)::bigint AS blob_count,
 				COALESCE(SUM(r.total_cost_wei), 0) AS total_cost_wei
 			FROM blob_chart_rollups r
-			CROSS JOIN window_bounds wb
+			CROSS JOIN window_params wp
 			LEFT JOIN blob_users bu
 				ON bu.chain_id = r.chain_id
 				AND LOWER(bu.address) = LOWER(r.from_address)
 			WHERE r.chain_id = $1
-				AND r.bucket_seconds = 3600
-				AND r.bucket_start >= wb.start_time
+				AND r.bucket_seconds = wp.bucket_seconds
+				AND r.bucket_start >= wp.start_time
 			GROUP BY COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown')
 		),
 		totals AS (
@@ -925,19 +959,24 @@ const (
 
 	// userSortByCountClause / userSortBySpendClause terminate the all-history
 	// top-user queries with static sort keys that line up with
-	// idx_blob_user_stats_chain_count and idx_blob_user_stats_chain_spend.
+	// idx_blob_user_stats_chain_count and idx_blob_user_stats_chain_spend. The
+	// trailing from_address key makes ordering fully deterministic for
+	// pagination; it sits outside the indexes, but full three-key ties are rare
+	// enough that the incremental sort it forces almost never runs.
 	userSortByCountClause = `
 		ORDER BY
 			user_totals.blob_count DESC,
 			user_totals.total_cost_wei DESC,
-			user_totals.last_timestamp DESC
+			user_totals.last_timestamp DESC,
+			user_totals.from_address ASC
 		LIMIT $2 OFFSET $3
 	`
 	userSortBySpendClause = `
 		ORDER BY
 			user_totals.total_cost_wei DESC,
 			user_totals.blob_count DESC,
-			user_totals.last_timestamp DESC
+			user_totals.last_timestamp DESC,
+			user_totals.from_address ASC
 		LIMIT $2 OFFSET $3
 	`
 

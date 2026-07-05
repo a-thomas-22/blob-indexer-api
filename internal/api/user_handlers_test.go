@@ -124,6 +124,11 @@ func TestGetTopBlobUsers_DefaultAllUsesRollup(t *testing.T) {
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
 	}
+	// Requests that never named a range keep the historical response shape:
+	// no meta echo.
+	if strings.Contains(w.Body.String(), `"meta"`) {
+		t.Fatalf("expected no meta on omitted range, got %s", w.Body.String())
+	}
 }
 
 func TestGetTopUnattributedBlobUsers_SortSpendWindow(t *testing.T) {
@@ -241,12 +246,121 @@ func TestGetTopBlobUsers_InvalidSort(t *testing.T) {
 
 func TestGetTopBlobUsers_InvalidWindow(t *testing.T) {
 	a := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?window=30d", http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, "/?window=12h", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetTopBlobUsers(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "invalid window parameter") {
+		t.Fatalf("expected window-specific error, got %s", w.Body.String())
+	}
+}
+
+func TestGetTopBlobUsers_InvalidRange(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?range=100blocks", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	var resp Response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Success || resp.Error != "invalid range parameter" || resp.ErrorCode != errCodeInvalidRequest {
+		t.Fatalf("unexpected error envelope: %+v", resp)
+	}
+}
+
+func TestGetTopBlobUsers_ConflictingRangeAndWindow(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?range=24h&window=7d", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetTopBlobUsers_RangeWindowedQueriesAndMetaEcho(t *testing.T) {
+	for _, tc := range []struct {
+		url       string
+		wantRange string
+	}{
+		{"/?network=42&range=1h", "1h"},
+		{"/?network=42&range=24h", "24h"},
+		{"/?network=42&range=30d", "30d"},
+		{"/?network=42&window=30d", "30d"},
+		{"/?network=42&range=24h&window=24h", "24h"},
+	} {
+		t.Run(tc.url, func(t *testing.T) {
+			var gotQuery string
+			var gotArgs []interface{}
+			db := &mockDB{
+				selectFn: func(_ context.Context, dest interface{}, query string, args ...interface{}) error {
+					gotQuery = query
+					gotArgs = append([]interface{}{}, args...)
+					users := dest.(*[]models.BlobUserStats)
+					*users = []models.BlobUserStats{}
+					return nil
+				},
+			}
+			a := newTestAPIWithDB(db)
+			req := httptest.NewRequest(http.MethodGet, tc.url, http.NoBody)
+			w := httptest.NewRecorder()
+			a.GetTopBlobUsers(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", w.Code)
+			}
+			if gotQuery != queryTopBlobUsersWithOptions {
+				t.Fatal("expected windowed query to be used")
+			}
+			wantArgs := []interface{}{42, 10, 0, tc.wantRange, "count"}
+			if !reflect.DeepEqual(gotArgs, wantArgs) {
+				t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+			}
+
+			// An empty window is a success with an empty list, not an error.
+			body := w.Body.String()
+			if !strings.Contains(body, `"data":[]`) {
+				t.Fatalf("expected empty data array, got %s", body)
+			}
+			if !strings.Contains(body, fmt.Sprintf(`"meta":{"range":%q}`, tc.wantRange)) {
+				t.Fatalf("expected meta range echo %q, got %s", tc.wantRange, body)
+			}
+		})
+	}
+}
+
+func TestGetTopBlobUsers_RangeAllUsesRollupAndEchoesMeta(t *testing.T) {
+	var gotQuery string
+	db := &mockDB{
+		selectFn: func(_ context.Context, dest interface{}, query string, _ ...interface{}) error {
+			gotQuery = query
+			users := dest.(*[]models.BlobUserStats)
+			*users = []models.BlobUserStats{}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42&range=all", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if gotQuery != queryTopBlobUsersAllByCount {
+		t.Fatal("expected all-window rollup query to be used")
+	}
+	if !strings.Contains(w.Body.String(), `"meta":{"range":"all"}`) {
+		t.Fatalf("expected meta range echo, got %s", w.Body.String())
 	}
 }
 
@@ -375,16 +489,51 @@ func TestGetUserBreakdown_DefaultAllUsesRollup(t *testing.T) {
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
 	}
+	if strings.Contains(w.Body.String(), `"meta"`) {
+		t.Fatalf("expected no meta on omitted range, got %s", w.Body.String())
+	}
 }
 
 func TestGetUserBreakdown_InvalidWindow(t *testing.T) {
 	a := newTestAPI()
-	req := httptest.NewRequest(http.MethodGet, "/?window=30d", http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, "/?window=12h", http.NoBody)
 	w := httptest.NewRecorder()
 	a.GetUserBreakdown(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetUserBreakdown_RangeParam(t *testing.T) {
+	var gotQuery string
+	var gotArgs []interface{}
+	db := &mockDB{
+		selectFn: func(_ context.Context, dest interface{}, query string, args ...interface{}) error {
+			gotQuery = query
+			gotArgs = append([]interface{}{}, args...)
+			shares := dest.(*[]models.BlobUserCategoryShare)
+			*shares = []models.BlobUserCategoryShare{}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42&range=30d", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetUserBreakdown(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if gotQuery != queryBlobUserCategoryBreakdown {
+		t.Fatal("expected windowed breakdown query to be used")
+	}
+	wantArgs := []interface{}{42, "30d"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+	if !strings.Contains(w.Body.String(), `"meta":{"range":"30d"}`) {
+		t.Fatalf("expected meta range echo, got %s", w.Body.String())
 	}
 }
 
@@ -499,6 +648,31 @@ func TestGetTopBlobUsers_CacheHit(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetTopBlobUsers_CacheHitEchoesMeta(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(_ context.Context, _ interface{}, _ string, _ ...interface{}) error {
+			t.Fatal("DB should not be called on cache hit")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	cacheKey := fmt.Sprintf("%d:%d:%d:%s:%s", 42, 10, 0, userSortCount, userWindow24h)
+	a.topUsersCache[cacheKey] = topUsersCacheEntry{
+		response:  []UserResponse{{Address: "0xcached"}},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/?range=24h", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"meta":{"range":"24h"}`) {
+		t.Fatalf("expected meta range echo on cache hit, got %s", w.Body.String())
 	}
 }
 
