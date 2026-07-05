@@ -98,8 +98,11 @@ func TestPollerListenNotifyEndToEnd(t *testing.T) {
 			if err := json.Unmarshal(raw, &data); err != nil {
 				t.Fatalf("unmarshal new_block: %v", err)
 			}
+			if data.BlockNumber == 100 {
+				t.Fatal("baseline block 100 was replayed after startup")
+			}
 			if data.BlockNumber != 101 {
-				continue // baseline-era block, keep waiting
+				continue
 			}
 			if data.Pricing == nil {
 				t.Fatal("new_block missing pricing")

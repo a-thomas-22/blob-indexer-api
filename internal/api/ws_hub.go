@@ -121,6 +121,9 @@ func (h *Hub) Run() {
 		case client := <-h.register:
 			h.clients[client] = struct{}{}
 			h.clientCount.Store(int64(len(h.clients)))
+			if client.registered != nil {
+				close(client.registered)
+			}
 			logger.Debug("WebSocket client registered",
 				zap.String("network", client.networkName),
 				zap.Int("total_clients", len(h.clients)))

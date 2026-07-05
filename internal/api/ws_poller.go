@@ -281,8 +281,12 @@ func (p *Poller) scanNetwork(ctx context.Context, network config.NetworkConfig) 
 	if !st.baselined {
 		queryCtx, cancel := context.WithTimeout(ctx, pollerQueryTimeout)
 		defer cancel()
-		var maxBlock uint64
-		if err := p.db.GetContext(queryCtx, &maxBlock, queryMaxBlockMetricsNumber, network.ChainID); err != nil {
+		// Seed the seen-set with the newest trailing window of existing
+		// blocks: the head alone is not enough, because the catch-up scan
+		// deliberately re-checks that window and would otherwise replay it
+		// as fresh broadcasts on the next tick.
+		var numbers []uint64
+		if err := p.db.SelectContext(queryCtx, &numbers, queryRecentBlockMetricsNumbers, network.ChainID, trailingScanWindow); err != nil {
 			// Retry next tick. Unlike the previous watermark, an error here
 			// never corrupts broadcast state.
 			logger.Error("Poller: failed to establish broadcast baseline",
@@ -290,7 +294,12 @@ func (p *Poller) scanNetwork(ctx context.Context, network config.NetworkConfig) 
 				zap.Error(err))
 			return
 		}
-		st.head = maxBlock
+		for _, blockNumber := range numbers {
+			st.seen[blockNumber] = struct{}{}
+			if blockNumber > st.head {
+				st.head = blockNumber
+			}
+		}
 		st.baselined = true
 		return
 	}

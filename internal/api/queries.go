@@ -975,10 +975,15 @@ const (
 				)
 		`
 
-	// queryMaxBlockMetricsNumber retrieves the newest block_metrics block for a
-	// network — the WebSocket broadcast baseline at startup.
-	queryMaxBlockMetricsNumber = `
-		SELECT COALESCE(MAX(block_number), 0) FROM block_metrics WHERE chain_id = $1
+	// queryRecentBlockMetricsNumbers lists the newest block numbers with a
+	// block_metrics row for a network. The WebSocket poller's startup baseline
+	// seeds its seen-set from one trailing window of these so the first
+	// catch-up scan does not replay already-indexed history.
+	queryRecentBlockMetricsNumbers = `
+		SELECT block_number FROM block_metrics
+		WHERE chain_id = $1
+		ORDER BY block_number DESC
+		LIMIT $2
 	`
 
 	// queryBlockMetricsNumbersSince lists block numbers with a block_metrics row

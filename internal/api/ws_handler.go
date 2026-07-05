@@ -93,16 +93,18 @@ func (a *API) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		networkChainID: network.ChainID,
 		networkName:    network.Name,
 		remoteIP:       remoteIP,
+		registered:     make(chan struct{}),
 	}
 
 	select {
 	case a.hub.register <- client:
 		go client.writePump()
 		go client.readPump()
-		// Send the recent-blocks snapshot after registration so any block
-		// broadcast while the snapshot is being built is also delivered —
-		// the client deduplicates by block number, so overlap is harmless
-		// while a gap would not be.
+		// Send the recent-blocks snapshot once registration completes (the
+		// hub closes client.registered) so any block broadcast while the
+		// snapshot is being built is also delivered — the client
+		// deduplicates by block number, so overlap is harmless while a gap
+		// would not be.
 		go a.sendBlockSnapshot(client, network)
 	case <-a.hub.done:
 		// Hub is shutting down: release the slot and drop the connection. The
@@ -173,6 +175,15 @@ func (a *API) sendBlockSnapshot(client *Client, network config.NetworkConfig) {
 		logger.Warn("Failed to build WebSocket block snapshot",
 			zap.String("network", network.Name),
 			zap.Error(err))
+		return
+	}
+	// The hub's select processes ready channels in random order, so the
+	// direct send could otherwise be handled before the queued registration
+	// and be dropped as addressed to an unknown client. Wait for the hub to
+	// acknowledge registration first.
+	select {
+	case <-client.registered:
+	case <-a.hub.done:
 		return
 	}
 	a.hub.SendEventToClient(client, WSEvent{Type: EventBlockSnapshot, Data: snapshot})

@@ -81,18 +81,18 @@ func countEvents(events []WSEvent, eventType WSEventType) int {
 }
 
 // pollerBlockDB is a mockDB preloaded with block_metrics-shaped responses:
-// maxBlock answers the baseline query, blockNumbers the catch-up scan, and
-// metricsFor/blobsFor the per-block broadcast queries.
+// recentNumbers (descending) answers the baseline query, blockNumbers the
+// catch-up scan, and metricsFor/blobsFor the per-block broadcast queries.
 type pollerBlockDB struct {
-	mu           sync.Mutex
-	maxBlock     uint64
-	baselineErr  error
-	blockNumbers []uint64
-	scanErr      error
-	metricsFor   map[uint64][]models.BlockMetrics
-	metricsErr   error
-	blobsFor     map[uint64][]models.Blob
-	blobsErr     error
+	mu            sync.Mutex
+	recentNumbers []uint64
+	baselineErr   error
+	blockNumbers  []uint64
+	scanErr       error
+	metricsFor    map[uint64][]models.BlockMetrics
+	metricsErr    error
+	blobsFor      map[uint64][]models.Blob
+	blobsErr      error
 }
 
 func (p *pollerBlockDB) mock() *mockDB {
@@ -100,13 +100,7 @@ func (p *pollerBlockDB) mock() *mockDB {
 		getFn: func(_ context.Context, dest interface{}, query string, _ ...interface{}) error {
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			switch query {
-			case queryMaxBlockMetricsNumber:
-				if p.baselineErr != nil {
-					return p.baselineErr
-				}
-				*dest.(*uint64) = p.maxBlock
-			case queryBlobStats:
+			if query == queryBlobStats {
 				*dest.(*models.BlobStatsAggregate) = models.BlobStatsAggregate{TotalBlobs: 10}
 			}
 			return nil
@@ -115,6 +109,11 @@ func (p *pollerBlockDB) mock() *mockDB {
 			p.mu.Lock()
 			defer p.mu.Unlock()
 			switch query {
+			case queryRecentBlockMetricsNumbers:
+				if p.baselineErr != nil {
+					return p.baselineErr
+				}
+				*dest.(*[]uint64) = append([]uint64(nil), p.recentNumbers...)
 			case queryBlockMetricsNumbersSince:
 				if p.scanErr != nil {
 					return p.scanErr
@@ -205,7 +204,7 @@ func TestPoller_BaselineDoesNotBroadcastHistory(t *testing.T) {
 	defer hub.Stop()
 	client := registerTestClient(t, hub)
 
-	blockDB := &pollerBlockDB{maxBlock: 100, blockNumbers: []uint64{99, 100}}
+	blockDB := &pollerBlockDB{recentNumbers: []uint64{100, 99}, blockNumbers: []uint64{99, 100}}
 	poller := NewPoller(blockDB.mock(), hub, testNetworks(), time.Hour, time.Hour)
 
 	poller.scanNetwork(context.Background(), sepoliaNetwork())
@@ -218,6 +217,13 @@ func TestPoller_BaselineDoesNotBroadcastHistory(t *testing.T) {
 	if !st.baselined || st.head != 100 {
 		t.Fatalf("expected baselined head=100, got baselined=%v head=%d", st.baselined, st.head)
 	}
+
+	// The next tick re-checks the trailing window; the baseline must have
+	// seeded those blocks as seen or this scan replays them as history.
+	poller.scanNetwork(context.Background(), sepoliaNetwork())
+	if events := drainEvents(client, 50*time.Millisecond); len(events) != 0 {
+		t.Fatalf("post-baseline scan replayed history, got %d events", len(events))
+	}
 }
 
 func TestPoller_BaselineErrorRetriesWithoutCorruption(t *testing.T) {
@@ -226,7 +232,7 @@ func TestPoller_BaselineErrorRetriesWithoutCorruption(t *testing.T) {
 	defer hub.Stop()
 	client := registerTestClient(t, hub)
 
-	blockDB := &pollerBlockDB{baselineErr: fmt.Errorf("db down"), maxBlock: 100}
+	blockDB := &pollerBlockDB{baselineErr: fmt.Errorf("db down"), recentNumbers: []uint64{100}}
 	poller := NewPoller(blockDB.mock(), hub, testNetworks(), time.Hour, time.Hour)
 
 	poller.scanNetwork(context.Background(), sepoliaNetwork())
@@ -254,7 +260,7 @@ func TestPoller_ScanBroadcastsNewBlocks_IncludingZeroBlobBlocks(t *testing.T) {
 	client := registerTestClient(t, hub)
 
 	blockDB := &pollerBlockDB{
-		maxBlock: 100,
+		recentNumbers: []uint64{100},
 		metricsFor: map[uint64][]models.BlockMetrics{
 			101: metricsRow(101, 2),
 			102: metricsRow(102, 0), // zero-blob block must still broadcast
@@ -306,9 +312,9 @@ func TestPoller_ScanSkipsAlreadyBroadcastBlocks(t *testing.T) {
 	client := registerTestClient(t, hub)
 
 	blockDB := &pollerBlockDB{
-		maxBlock:   100,
-		metricsFor: map[uint64][]models.BlockMetrics{101: metricsRow(101, 1)},
-		blobsFor:   map[uint64][]models.Blob{101: {blobRow(101, "0xaaa")}},
+		recentNumbers: []uint64{100},
+		metricsFor:    map[uint64][]models.BlockMetrics{101: metricsRow(101, 1)},
+		blobsFor:      map[uint64][]models.Blob{101: {blobRow(101, "0xaaa")}},
 	}
 	poller := NewPoller(blockDB.mock(), hub, testNetworks(), time.Hour, time.Hour)
 
@@ -330,7 +336,7 @@ func TestPoller_ScanCatchesLateOutOfOrderCommit(t *testing.T) {
 	client := registerTestClient(t, hub)
 
 	blockDB := &pollerBlockDB{
-		maxBlock: 100,
+		recentNumbers: []uint64{100},
 		metricsFor: map[uint64][]models.BlockMetrics{
 			101: metricsRow(101, 1),
 			102: metricsRow(102, 1),
@@ -622,9 +628,9 @@ func TestPoller_Run_NotificationDrivesBroadcast(t *testing.T) {
 	client := registerTestClient(t, hub)
 
 	blockDB := &pollerBlockDB{
-		maxBlock:   100,
-		metricsFor: map[uint64][]models.BlockMetrics{101: metricsRow(101, 1)},
-		blobsFor:   map[uint64][]models.Blob{101: {blobRow(101, "0xaaa")}},
+		recentNumbers: []uint64{100},
+		metricsFor:    map[uint64][]models.BlockMetrics{101: metricsRow(101, 1)},
+		blobsFor:      map[uint64][]models.Blob{101: {blobRow(101, "0xaaa")}},
 	}
 
 	listener := &fakeListener{notifCh: make(chan *pq.Notification, 1)}
@@ -662,9 +668,9 @@ func TestPoller_Run_ReconnectTriggersScan(t *testing.T) {
 	client := registerTestClient(t, hub)
 
 	blockDB := &pollerBlockDB{
-		maxBlock:   100,
-		metricsFor: map[uint64][]models.BlockMetrics{101: metricsRow(101, 1)},
-		blobsFor:   map[uint64][]models.Blob{101: {blobRow(101, "0xaaa")}},
+		recentNumbers: []uint64{100},
+		metricsFor:    map[uint64][]models.BlockMetrics{101: metricsRow(101, 1)},
+		blobsFor:      map[uint64][]models.Blob{101: {blobRow(101, "0xaaa")}},
 	}
 
 	listener := &fakeListener{notifCh: make(chan *pq.Notification)}
@@ -706,9 +712,9 @@ func TestPoller_Run_ListenFailureFallsBackToScanOnly(t *testing.T) {
 	client := registerTestClient(t, hub)
 
 	blockDB := &pollerBlockDB{
-		maxBlock:   100,
-		metricsFor: map[uint64][]models.BlockMetrics{101: metricsRow(101, 1)},
-		blobsFor:   map[uint64][]models.Blob{101: {blobRow(101, "0xaaa")}},
+		recentNumbers: []uint64{100},
+		metricsFor:    map[uint64][]models.BlockMetrics{101: metricsRow(101, 1)},
+		blobsFor:      map[uint64][]models.Blob{101: {blobRow(101, "0xaaa")}},
 	}
 
 	listener := &fakeListener{notifCh: make(chan *pq.Notification), listenErr: fmt.Errorf("no LISTEN for you")}
@@ -891,7 +897,7 @@ func TestPoller_ScanError_NoBroadcastNoCorruption(t *testing.T) {
 	defer hub.Stop()
 	client := registerTestClient(t, hub)
 
-	blockDB := &pollerBlockDB{maxBlock: 100, scanErr: fmt.Errorf("scan failed")}
+	blockDB := &pollerBlockDB{recentNumbers: []uint64{100}, scanErr: fmt.Errorf("scan failed")}
 	poller := NewPoller(blockDB.mock(), hub, testNetworks(), time.Hour, time.Hour)
 
 	poller.scanNetwork(context.Background(), sepoliaNetwork()) // baseline
@@ -913,9 +919,9 @@ func TestPoller_SeenSetPrunedToTrailingWindow(t *testing.T) {
 	registerTestClient(t, hub)
 
 	blockDB := &pollerBlockDB{
-		maxBlock:   100,
-		metricsFor: map[uint64][]models.BlockMetrics{},
-		blobsFor:   map[uint64][]models.Blob{},
+		recentNumbers: []uint64{100},
+		metricsFor:    map[uint64][]models.BlockMetrics{},
+		blobsFor:      map[uint64][]models.Blob{},
 	}
 	for n := uint64(101); n <= 150; n++ {
 		blockDB.metricsFor[n] = metricsRow(n, 0)
@@ -1048,9 +1054,9 @@ func TestPoller_InvalidatesCachesOnNewBlockAndMempoolChange(t *testing.T) {
 	registerTestClient(t, hub)
 
 	blockDB := &pollerBlockDB{
-		maxBlock:   100,
-		metricsFor: map[uint64][]models.BlockMetrics{101: metricsRow(101, 1)},
-		blobsFor:   map[uint64][]models.Blob{101: {blobRow(101, "0xaaa")}},
+		recentNumbers: []uint64{100},
+		metricsFor:    map[uint64][]models.BlockMetrics{101: metricsRow(101, 1)},
+		blobsFor:      map[uint64][]models.Blob{101: {blobRow(101, "0xaaa")}},
 	}
 	db := blockDB.mock()
 	baseSelect := db.selectFn

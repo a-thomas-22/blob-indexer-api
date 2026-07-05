@@ -213,20 +213,21 @@ func TestWSPollerQueriesAgainstRealPostgres(t *testing.T) {
 		t.Fatalf("seed blob: %v", err)
 	}
 
-	t.Run("queryMaxBlockMetricsNumber", func(t *testing.T) {
-		var maxBlock uint64
-		if err := sqlxDB.GetContext(ctx, &maxBlock, queryMaxBlockMetricsNumber, 1); err != nil {
-			t.Fatalf("queryMaxBlockMetricsNumber: %v", err)
+	t.Run("queryRecentBlockMetricsNumbers", func(t *testing.T) {
+		var numbers []uint64
+		if err := sqlxDB.SelectContext(ctx, &numbers, queryRecentBlockMetricsNumbers, 1, 32); err != nil {
+			t.Fatalf("queryRecentBlockMetricsNumbers: %v", err)
 		}
-		if maxBlock != 101 {
-			t.Fatalf("got max %d, want 101", maxBlock)
+		if len(numbers) != 2 || numbers[0] != 101 || numbers[1] != 100 {
+			t.Fatalf("got %v, want [101 100]", numbers)
 		}
-		// Empty network must COALESCE to zero, not error.
-		if err := sqlxDB.GetContext(ctx, &maxBlock, queryMaxBlockMetricsNumber, 424242); err != nil {
-			t.Fatalf("queryMaxBlockMetricsNumber empty: %v", err)
+		// Empty network yields an empty (non-error) result.
+		numbers = nil
+		if err := sqlxDB.SelectContext(ctx, &numbers, queryRecentBlockMetricsNumbers, 424242, 32); err != nil {
+			t.Fatalf("queryRecentBlockMetricsNumbers empty: %v", err)
 		}
-		if maxBlock != 0 {
-			t.Fatalf("got max %d for empty network, want 0", maxBlock)
+		if len(numbers) != 0 {
+			t.Fatalf("got %v for empty network, want none", numbers)
 		}
 	})
 
