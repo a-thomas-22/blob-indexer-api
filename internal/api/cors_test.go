@@ -27,8 +27,10 @@ func TestCORSMiddleware_AllowsConfiguredOriginOnSuccess(t *testing.T) {
 	if got := w.Header().Get("Access-Control-Expose-Headers"); got != "Content-Length, ETag" {
 		t.Fatalf("expected exposed headers, got %q", got)
 	}
-	if got := w.Header().Get("Vary"); got != "Origin" {
-		t.Fatalf("expected Vary Origin, got %q", got)
+	// A single-literal-origin policy pins the header set, so the response no
+	// longer varies by requester and Vary: Origin is intentionally absent.
+	if got := w.Header().Get("Vary"); got != "" {
+		t.Fatalf("expected no Vary for pinned single-origin policy, got %q", got)
 	}
 }
 
@@ -130,7 +132,11 @@ func TestCORSMiddleware_AllowsOriginPattern(t *testing.T) {
 }
 
 func TestCORSMiddleware_BlocksDisallowedOrigin(t *testing.T) {
-	handler := CORSMiddleware(testCORSConfig())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// Use a multi-origin config so reflection (not pinning) is exercised: a
+	// disallowed Origin must not be echoed back.
+	cfg := testCORSConfig()
+	cfg.AllowedOrigins = append(cfg.AllowedOrigins, "https://second.example")
+	handler := CORSMiddleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -141,6 +147,18 @@ func TestCORSMiddleware_BlocksDisallowedOrigin(t *testing.T) {
 
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Fatalf("expected disallowed origin to be omitted, got %q", got)
+	}
+
+	// Pinned single-origin mode answers every requester with the constant
+	// allowed origin; the disallowed caller is still blocked by its browser
+	// because the pinned value names a different origin.
+	pinned := CORSMiddleware(testCORSConfig())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	w2 := httptest.NewRecorder()
+	pinned.ServeHTTP(w2, req)
+	if got := w2.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3000" {
+		t.Fatalf("expected pinned origin for single-origin policy, got %q", got)
 	}
 }
 
@@ -288,5 +306,96 @@ func testCORSConfig() config.CORSConfig {
 		ExposedHeaders:   []string{"Content-Length", "ETag"},
 		MaxAgeSeconds:    86400,
 		AllowCredentials: false,
+	}
+}
+
+// TestCORSMiddleware_PinnedSingleOrigin verifies that a single-literal-origin
+// policy emits a constant Access-Control-Allow-Origin (no Vary: Origin) for
+// every requester, so edge-cached copies always carry a header valid for the
+// real frontend regardless of who populated the cache.
+func TestCORSMiddleware_PinnedSingleOrigin(t *testing.T) {
+	mw := CORSMiddleware(config.CORSConfig{
+		Enabled:        true,
+		AllowedOrigins: []string{"https://blob-flow.example"},
+		AllowedMethods: []string{"GET", "OPTIONS"},
+		ExposedHeaders: []string{"Content-Length", "ETag"},
+	})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	cases := []struct {
+		name   string
+		origin string
+	}{
+		{"no origin header", ""},
+		{"allowed origin", "https://blob-flow.example"},
+		{"other origin", "https://evil.example"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if got := w.Header().Get("Access-Control-Allow-Origin"); got != "https://blob-flow.example" {
+				t.Errorf("ACAO = %q, want pinned origin", got)
+			}
+			if got := w.Header().Get("Vary"); got != "" {
+				t.Errorf("Vary = %q, want none for constant headers", got)
+			}
+			if got := w.Header().Get("Access-Control-Expose-Headers"); got != "Content-Length, ETag" {
+				t.Errorf("Expose-Headers = %q", got)
+			}
+		})
+	}
+}
+
+// TestCORSMiddleware_NoPinWithMultipleOrigins verifies reflection semantics are
+// preserved when more than one origin is allowed.
+func TestCORSMiddleware_NoPinWithMultipleOrigins(t *testing.T) {
+	mw := CORSMiddleware(config.CORSConfig{
+		Enabled:        true,
+		AllowedOrigins: []string{"https://a.example", "https://b.example"},
+		AllowedMethods: []string{"GET"},
+	})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// No Origin header → no ACAO.
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("ACAO = %q, want empty without Origin", got)
+	}
+
+	// Allowed Origin → reflected.
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.Header.Set("Origin", "https://b.example")
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req)
+	if got := w2.Header().Get("Access-Control-Allow-Origin"); got != "https://b.example" {
+		t.Errorf("ACAO = %q, want reflected origin", got)
+	}
+	if got := w2.Header().Get("Vary"); got != "Origin" {
+		t.Errorf("Vary = %q, want Origin", got)
+	}
+}
+
+// TestCORSMiddleware_NoPinWithPatterns verifies wildcard patterns disable
+// pinning even with a single literal origin.
+func TestCORSMiddleware_NoPinWithPatterns(t *testing.T) {
+	policy := newCORSPolicy(config.CORSConfig{
+		Enabled:               true,
+		AllowedOrigins:        []string{"https://a.example"},
+		AllowedOriginPatterns: []string{"https://*.preview.example"},
+		AllowedMethods:        []string{"GET"},
+	})
+	if policy.pinnedOrigin != "" {
+		t.Fatalf("pinnedOrigin = %q, want empty with patterns configured", policy.pinnedOrigin)
 	}
 }

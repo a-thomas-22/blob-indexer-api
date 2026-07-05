@@ -59,7 +59,7 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 	a.cacheMu.RLock()
 	if cached, ok := a.statsCache[network.ChainID]; ok && time.Now().Before(cached.expiresAt) {
 		a.cacheMu.RUnlock()
-		setCacheControl(w, statsCacheTTL)
+		setCacheControl(w, statsCacheTTL, statsEdgeTTL)
 		a.respondJSON(w, http.StatusOK, Response{
 			Success: true,
 			Data:    cached.response,
@@ -91,7 +91,7 @@ func (a *API) GetBlobStats(w http.ResponseWriter, r *http.Request) {
 	// so the assertion's ok value can never be false here.
 	response, _ := value.(StatsResponse)
 
-	setCacheControl(w, statsCacheTTL)
+	setCacheControl(w, statsCacheTTL, statsEdgeTTL)
 	a.respondSuccess(w, response)
 }
 

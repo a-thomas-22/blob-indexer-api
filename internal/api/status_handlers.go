@@ -41,9 +41,8 @@ func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
 
 	logger.Debug("Getting indexer status", zap.String("network", network.Name))
 
-	var lastIndexedTime *time.Time
-	query := "SELECT MAX(timestamp) FROM blobs WHERE chain_id = $1"
-	if err := a.db.GetContext(r.Context(), &lastIndexedTime, query, network.ChainID); err != nil {
+	var indexedTime time.Time
+	if err := a.db.GetContext(r.Context(), &indexedTime, queryNetworkLastIndexedTime, network.ChainID); err != nil {
 		logger.Error("Failed to get last indexed time",
 			zap.String("network", network.Name),
 			zap.Error(err))
@@ -52,11 +51,6 @@ func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	uptime := time.Since(a.startTime).Truncate(time.Second).String()
-
-	var indexedTime time.Time
-	if lastIndexedTime != nil {
-		indexedTime = *lastIndexedTime
-	}
 
 	freshness := a.getNetworkFreshnessFromDB(r.Context(), network.ChainID)
 	response := StatusResponse{
@@ -70,5 +64,6 @@ func (a *API) GetIndexerStatus(w http.ResponseWriter, r *http.Request) {
 		FreshnessResponse: freshness.FreshnessResponse,
 	}
 
+	setCacheControl(w, networkStatusCacheTTL, networkStatusEdgeTTL)
 	a.respondSuccess(w, response)
 }

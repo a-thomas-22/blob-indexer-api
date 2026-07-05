@@ -349,8 +349,8 @@ func TestRespondAggregateError_TimeoutMapsTo503(t *testing.T) {
 
 func TestSetCacheControl(t *testing.T) {
 	w := httptest.NewRecorder()
-	setCacheControl(w, 15*time.Second)
-	if got := w.Header().Get("Cache-Control"); got != "public, max-age=15" {
+	setCacheControl(w, 15*time.Second, 30*time.Second)
+	if got := w.Header().Get("Cache-Control"); got != "public, max-age=15, s-maxage=30" {
 		t.Fatalf("Cache-Control = %q", got)
 	}
 }

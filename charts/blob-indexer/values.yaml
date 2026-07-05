@@ -225,22 +225,20 @@ externalDatabase:
   url: ""
 
 # API health check configuration.
-#   path          — endpoint used by both probes when livenessPath/readinessPath
-#                   are unset (the default).
-#   livenessPath  — should NOT touch the database (a DB blip must not restart the
-#                   pod). Once the app image exposes /api/v1/healthz (no DB), set
-#                   this to /api/v1/healthz.
-#   readinessPath — should ping the database so traffic only reaches pods that
-#                   can serve queries. Once the app image exposes /api/v1/readyz
-#                   (DB ping), set this to /api/v1/readyz.
-# Defaults are intentionally empty so both probes fall back to `path`
-# (/api/v1/status), keeping the chart compatible with app images that predate
-# the dedicated health endpoints. Flip them in a release coordinated with the
-# app version that adds /healthz + /readyz.
+#   path          — fallback endpoint used by a probe when its dedicated path
+#                   is set to "".
+#   livenessPath  — does NOT touch the database (a DB blip must not restart the
+#                   pod).
+#   readinessPath — pings the database so traffic only reaches pods that can
+#                   serve queries.
+# The dedicated endpoints also avoid the DB queries /api/v1/status runs on
+# every call, so probe traffic no longer generates database load. When
+# deploying an app image that predates /healthz + /readyz, set both back to ""
+# to fall back to `path`.
 healthCheck:
   path: /api/v1/status
-  livenessPath: ""
-  readinessPath: ""
+  livenessPath: /api/v1/healthz
+  readinessPath: /api/v1/readyz
   initialDelaySeconds: 60
   periodSeconds: 15
 

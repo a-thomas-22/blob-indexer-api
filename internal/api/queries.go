@@ -214,8 +214,12 @@ const (
 		LIMIT $2 OFFSET $3
 	`
 
-	// queryTopBlobUsersAll reads all-history sender usage from maintained rollups.
-	queryTopBlobUsersAll = `
+	// queryTopBlobUsersAllBase reads all-history sender usage from maintained
+	// rollups. The ORDER BY is appended statically per sort option (ByCount /
+	// BySpend below) rather than via CASE expressions on a parameter, so the
+	// planner can serve the ordered LIMIT scan straight from
+	// idx_blob_user_stats_chain_count / idx_blob_user_stats_chain_spend.
+	queryTopBlobUsersAllBase = `
 		WITH user_totals AS (
 			SELECT
 				s.from_address,
@@ -262,14 +266,10 @@ const (
 			END AS spend_share_percent
 		FROM user_totals
 		CROSS JOIN totals
-		ORDER BY
-			CASE WHEN $5 = 'count' THEN user_totals.blob_count END DESC,
-			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_wei END DESC,
-			user_totals.blob_count DESC,
-			user_totals.total_cost_wei DESC,
-			user_totals.last_timestamp DESC
-		LIMIT $2 OFFSET $3
 	`
+
+	queryTopBlobUsersAllByCount = queryTopBlobUsersAllBase + userSortByCountClause
+	queryTopBlobUsersAllBySpend = queryTopBlobUsersAllBase + userSortBySpendClause
 
 	// queryTopUnattributedBlobUsersWithOptions aggregates windowed sender usage
 	// for addresses without either indexed attribution or a known blob_users
@@ -336,9 +336,10 @@ const (
 		LIMIT $2 OFFSET $3
 	`
 
-	// queryTopUnattributedBlobUsersAll reads all-history unattributed sender
-	// usage from maintained sender rollups.
-	queryTopUnattributedBlobUsersAll = `
+	// queryTopUnattributedBlobUsersAllBase reads all-history unattributed sender
+	// usage from maintained sender rollups. Same static-ORDER BY scheme as
+	// queryTopBlobUsersAllBase.
+	queryTopUnattributedBlobUsersAllBase = `
 		WITH user_totals AS (
 			SELECT
 				s.from_address,
@@ -379,14 +380,10 @@ const (
 			END AS spend_share_percent
 		FROM user_totals
 		CROSS JOIN totals
-		ORDER BY
-			CASE WHEN $5 = 'count' THEN user_totals.blob_count END DESC,
-			CASE WHEN $5 = 'spend' THEN user_totals.total_cost_wei END DESC,
-			user_totals.blob_count DESC,
-			user_totals.total_cost_wei DESC,
-			user_totals.last_timestamp DESC
-		LIMIT $2 OFFSET $3
 	`
+
+	queryTopUnattributedBlobUsersAllByCount = queryTopUnattributedBlobUsersAllBase + userSortByCountClause
+	queryTopUnattributedBlobUsersAllBySpend = queryTopUnattributedBlobUsersAllBase + userSortBySpendClause
 
 	// queryBlobUserCategoryBreakdown aggregates windowed blob usage by known user
 	// category ($2 is '24h' or '7d'; all-history reads use
@@ -839,11 +836,15 @@ const (
 		WHERE chain_id = $1 AND block_number = ANY($2::bigint[])
 	`
 
-	// queryLatestBlobsByAddress retrieves confirmed blobs for a specific sender address.
+	// queryLatestBlobsByAddress retrieves confirmed blobs for a specific sender
+	// address. Ordered by timestamp — for confirmed rows block-timestamp order
+	// is block order — so idx_blobs_chain_from_timestamp serves the top-N
+	// directly; ordering by block_number has no matching index and degrades to
+	// fetching the sender's entire history and sorting it.
 	queryLatestBlobsByAddress = `
 		SELECT ` + blobSelectColumns + ` FROM blobs
 		WHERE chain_id = $1 AND from_address = $2
-		ORDER BY block_number DESC, blob_index ASC
+		ORDER BY timestamp DESC, blob_index ASC
 		LIMIT $3 OFFSET $4
 	`
 
@@ -908,6 +909,31 @@ const (
 	// defaulting to epoch if no blobs exist.
 	queryLastIndexedTimeCoalesce = "SELECT COALESCE(MAX(timestamp), '1970-01-01'::timestamp) FROM blobs WHERE chain_id = $1"
 
+	// queryNetworkLastIndexedTime reads the trigger-maintained last indexed
+	// block timestamp from the single-row network summary — a primary-key
+	// lookup, unlike a MAX() probe over the blobs table. MAX() over the 0-or-1
+	// matching rows folds the missing-network case to epoch without ErrNoRows
+	// handling.
+	queryNetworkLastIndexedTime = "SELECT COALESCE(MAX(last_indexed_time), '1970-01-01'::timestamp) FROM network_blob_stats WHERE chain_id = $1"
+
+	// userSortByCountClause / userSortBySpendClause terminate the all-history
+	// top-user queries with static sort keys that line up with
+	// idx_blob_user_stats_chain_count and idx_blob_user_stats_chain_spend.
+	userSortByCountClause = `
+		ORDER BY
+			user_totals.blob_count DESC,
+			user_totals.total_cost_wei DESC,
+			user_totals.last_timestamp DESC
+		LIMIT $2 OFFSET $3
+	`
+	userSortBySpendClause = `
+		ORDER BY
+			user_totals.total_cost_wei DESC,
+			user_totals.blob_count DESC,
+			user_totals.last_timestamp DESC
+		LIMIT $2 OFFSET $3
+	`
+
 	// queryTableSize retrieves the total size of a table in bytes.
 	queryTableSize = `
 		SELECT pg_total_relation_size($1)
@@ -954,5 +980,22 @@ const (
 		WHERE chain_id = $1 AND block_number > $2
 		ORDER BY block_number ASC, blob_index ASC
 		LIMIT $3
+	`
+
+	// queryPendingBlobTxHashes lists the distinct tx hashes of every pending
+	// blob for a network — an index-only scan of the mempool_blobs primary key
+	// (chain_id, tx_hash, blob_index) — so the WebSocket poller can diff the
+	// mempool each tick without fetching full rows. DISTINCT collapses
+	// multi-blob transactions (one pending row per blob) to one hash.
+	queryPendingBlobTxHashes = "SELECT DISTINCT tx_hash FROM mempool_blobs WHERE chain_id = $1"
+
+	// queryPendingBlobsByTxHashes fetches full pending rows for the (typically
+	// zero or few) tx hashes that are new since the poller's previous tick.
+	// blob_index ASC lets the caller keep the first blob per tx, mirroring
+	// queryBlobByTxHash's first-blob convention for multi-blob transactions.
+	queryPendingBlobsByTxHashes = `
+		SELECT ` + mempoolBlobSelectColumns + ` FROM mempool_blobs
+		WHERE chain_id = $1 AND tx_hash = ANY($2)
+		ORDER BY timestamp DESC, blob_index ASC
 	`
 )
