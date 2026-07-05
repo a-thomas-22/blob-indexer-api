@@ -12,11 +12,14 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/lib/pq"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
+
+const validTestVersionedHash = "0x01bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 func TestGetLatestBlobs_Success(t *testing.T) {
 	db := &mockDB{
@@ -35,6 +38,7 @@ func TestGetLatestBlobs_Success(t *testing.T) {
 					TotalCostWei:      "0.001",
 					Timestamp:         time.Now(),
 					Confirmed:         true,
+					VersionedHashes:   pq.StringArray{validTestVersionedHash},
 				},
 			}
 			return nil
@@ -48,12 +52,18 @@ func TestGetLatestBlobs_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	var resp Response
+	var resp struct {
+		Success bool           `json:"success"`
+		Data    []BlobResponse `json:"data"`
+	}
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 	if !resp.Success {
 		t.Error("expected Success=true")
+	}
+	if len(resp.Data) != 1 || len(resp.Data[0].VersionedHashes) != 1 || resp.Data[0].VersionedHashes[0] != validTestVersionedHash {
+		t.Errorf("expected versioned_hashes [%s] on list rows, got %+v", validTestVersionedHash, resp.Data)
 	}
 	wantCache := fmt.Sprintf("public, max-age=%d, s-maxage=%d",
 		int(latestBlobsCacheTTL.Seconds()), int(latestBlobsEdgeTTL.Seconds()))
@@ -660,6 +670,263 @@ func TestGetBlobByTxHash_InvalidFormat(t *testing.T) {
 
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("expected 400 for invalid hash format, got %d", w.Code)
+			}
+		})
+	}
+}
+
+func TestGetBlobByVersionedHash_Success(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if query != queryBlobByVersionedHash {
+				t.Errorf("unexpected query: %q", query)
+			}
+			if len(args) != 2 || args[0] != validTestVersionedHash || args[1] != 42 {
+				t.Errorf("unexpected query args: %v", args)
+			}
+			blob := dest.(*models.Blob)
+			*blob = models.Blob{
+				ChainID:           42,
+				BlockNumber:       100,
+				TxHash:            validTestTxHash,
+				FromAddress:       "0x123",
+				BlobSizeBytes:     131072,
+				BaseFeePerBlobGas: "1000",
+				TipPerBlobGas:     "100",
+				TotalCostWei:      "0.001",
+				Timestamp:         time.Now(),
+				Confirmed:         true,
+				VersionedHashes:   pq.StringArray{validTestVersionedHash},
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+
+	r := chi.NewRouter()
+	r.Get("/blob/by-hash/{versionedHash}", a.GetBlobByVersionedHash)
+
+	req := httptest.NewRequest(http.MethodGet, "/blob/by-hash/"+validTestVersionedHash, http.NoBody)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Success bool         `json:"success"`
+		Data    BlobResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success {
+		t.Error("expected Success=true")
+	}
+	if resp.Data.TxHash != validTestTxHash {
+		t.Errorf("tx_hash = %q, want %q", resp.Data.TxHash, validTestTxHash)
+	}
+	if resp.Data.BlockNumber == nil || *resp.Data.BlockNumber != 100 {
+		t.Errorf("block_number = %v, want 100", resp.Data.BlockNumber)
+	}
+	if len(resp.Data.VersionedHashes) != 1 || resp.Data.VersionedHashes[0] != validTestVersionedHash {
+		t.Errorf("versioned_hashes = %v, want [%s]", resp.Data.VersionedHashes, validTestVersionedHash)
+	}
+	wantCache := fmt.Sprintf("public, max-age=%d, s-maxage=%d",
+		int(confirmedBlobCacheTTL.Seconds()), int(confirmedBlobEdgeTTL.Seconds()))
+	if got := w.Header().Get("Cache-Control"); got != wantCache {
+		t.Errorf("confirmed blob Cache-Control = %q, want %q", got, wantCache)
+	}
+}
+
+func TestGetBlobByVersionedHash_NormalizesCase(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if len(args) != 2 || args[0] != validTestVersionedHash {
+				t.Errorf("expected lowercased hash arg, got %v", args)
+			}
+			setStructResult(dest, &models.Blob{
+				ChainID:           42,
+				BlockNumber:       100,
+				TxHash:            validTestTxHash,
+				FromAddress:       "0x123",
+				BlobSizeBytes:     131072,
+				BaseFeePerBlobGas: "1000",
+				TipPerBlobGas:     "100",
+				TotalCostWei:      "0.001",
+				Timestamp:         time.Now(),
+				Confirmed:         true,
+			})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	rctx := chi.NewRouteContext()
+	// Uppercase hex digits must still match: normalization runs before both
+	// the version check and the case-sensitive array containment query.
+	rctx.URLParams.Add("versionedHash", "0x01"+strings.ToUpper(strings.TrimPrefix(validTestVersionedHash, "0x01")))
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	a.GetBlobByVersionedHash(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetBlobByVersionedHash_PendingNotCached(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setStructResult(dest, &models.Blob{
+				ChainID:           42,
+				BlockNumber:       models.PendingBlockNumber,
+				TxHash:            validTestTxHash,
+				FromAddress:       "0x123",
+				BlobSizeBytes:     131072,
+				BaseFeePerBlobGas: "1000",
+				TipPerBlobGas:     "100",
+				TotalCostWei:      "1",
+				Timestamp:         time.Now(),
+				Confirmed:         false,
+				VersionedHashes:   pq.StringArray{validTestVersionedHash},
+			})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	r := chi.NewRouter()
+	r.Get("/blob/by-hash/{versionedHash}", a.GetBlobByVersionedHash)
+
+	req := httptest.NewRequest(http.MethodGet, "/blob/by-hash/"+validTestVersionedHash, http.NoBody)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "" {
+		t.Errorf("pending blob must not be cached, got Cache-Control = %q", got)
+	}
+}
+
+func TestGetBlobByVersionedHash_NotFound(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return sql.ErrNoRows
+		},
+	}
+	a := newTestAPIWithDB(db)
+
+	r := chi.NewRouter()
+	r.Get("/blob/by-hash/{versionedHash}", a.GetBlobByVersionedHash)
+
+	req := httptest.NewRequest(http.MethodGet, "/blob/by-hash/"+validTestVersionedHash, http.NoBody)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+	var resp Response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Success {
+		t.Error("expected Success=false for 404")
+	}
+}
+
+func TestGetBlobByVersionedHash_DBError(t *testing.T) {
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return fmt.Errorf("db error")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("versionedHash", validTestVersionedHash)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	a.GetBlobByVersionedHash(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
+func TestGetBlobByVersionedHash_BadNetwork(t *testing.T) {
+	a := newTestAPI()
+	a.networks = map[int]config.NetworkConfig{}
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("versionedHash", validTestVersionedHash)
+	req := httptest.NewRequest(http.MethodGet, "/?network=999", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	a.GetBlobByVersionedHash(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetBlobByVersionedHash_EmptyHash(t *testing.T) {
+	a := newTestAPI()
+
+	// Call directly - versionedHash will be empty from chi.URLParam
+	req := httptest.NewRequest(http.MethodGet, "/blob/by-hash/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobByVersionedHash(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetBlobByVersionedHash_InvalidFormat(t *testing.T) {
+	testCases := []struct {
+		name          string
+		versionedHash string
+	}{
+		{
+			name:          "missing 0x prefix with 64 hex chars",
+			versionedHash: "01" + strings.Repeat("b", 62),
+		},
+		{
+			name:          "with 0x prefix but wrong length",
+			versionedHash: "0x01bb",
+		},
+		{
+			name:          "with 0x prefix and non-hex characters",
+			versionedHash: "0x01" + strings.Repeat("g", 62),
+		},
+		{
+			name:          "completely invalid string",
+			versionedHash: "invalid-hash",
+		},
+		{
+			name:          "well-formed hash with wrong version byte",
+			versionedHash: "0x02" + strings.Repeat("b", 62),
+		},
+		{
+			name:          "well-formed hash with no version byte",
+			versionedHash: validTestTxHash,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestAPIWithDB(&mockDB{})
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("versionedHash", tc.versionedHash)
+			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+			w := httptest.NewRecorder()
+			a.GetBlobByVersionedHash(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for invalid versioned hash, got %d", w.Code)
 			}
 		})
 	}

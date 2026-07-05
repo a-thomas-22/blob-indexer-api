@@ -383,6 +383,12 @@ components:
           $ref: '#/components/schemas/WeiString'
         fee_cap_headroom_percent:
           $ref: '#/components/schemas/DecimalString'
+        versioned_hashes:
+          type: array
+          items:
+            type: string
+          description: The transaction's full ordered list of EIP-4844 versioned blob hashes (0x01-prefixed). Omitted for rows indexed before versioned hashes were stored.
+          example: ['0x01a1f8730e4064f7dd90279b721b25e28c07fc3e16d5fd4a26e6d3d5e9e0dbeb']
     StatsResponse:
       type: object
       description: Network identity comes from the connection query. `network_id` and `network_name` may be omitted in WebSocket stats updates.

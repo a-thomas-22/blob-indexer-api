@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -1221,5 +1222,94 @@ func TestBlockMetricsNotifyTrigger(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		// Expected: silence.
+	}
+}
+
+// TestBlobVersionedHashesMigration verifies migration 7: blobs and
+// mempool_blobs gain the versioned_hashes TEXT[] column (staying NULL on
+// pre-migration rows), containment matches find newly written rows on both
+// tables, and the GIN index serving the /blob/by-hash lookup exists.
+func TestBlobVersionedHashesMigration(t *testing.T) {
+	db, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	resetSchema(t, db)
+
+	m := migrator(t, db)
+	if err := m.Migrate(6); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to version 6: %v", err)
+	}
+
+	// Seed a row under the pre-migration schema.
+	t0 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES (1, 100, 0, '0xpre', '0xfrom', '', 131072, 10, 2, 100, $1, 12, 131072)
+	`, t0); err != nil {
+		t.Fatalf("seed pre-migration blob: %v", err)
+	}
+
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to latest: %v", err)
+	}
+
+	// Pre-migration rows stay NULL rather than picking up a fabricated value.
+	var preMigrationHashes pq.StringArray
+	if err := db.Get(&preMigrationHashes, `SELECT versioned_hashes FROM blobs WHERE tx_hash = '0xpre'`); err != nil {
+		t.Fatalf("read pre-migration versioned_hashes: %v", err)
+	}
+	if preMigrationHashes != nil {
+		t.Fatalf("expected NULL versioned_hashes on pre-migration row, got %v", preMigrationHashes)
+	}
+
+	// New rows store the list and are found by containment on both tables.
+	confirmedHash := "0x01" + strings.Repeat("ab", 31)
+	pendingHash := "0x01" + strings.Repeat("cd", 31)
+	if _, err := db.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hashes
+		) VALUES (1, 101, 0, '0xpost', '0xfrom', '', 131072, 10, 2, 100, $1, 12, 131072, $2)
+	`, t0, pq.StringArray{confirmedHash}); err != nil {
+		t.Fatalf("insert post-migration blob: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO mempool_blobs (
+			chain_id, tx_hash, blob_index, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hashes
+		) VALUES (1, '0xpendingpost', 0, '0xfrom', '', 131072, 50, 10, 500, $1, 60, 131072, $2)
+	`, t0, pq.StringArray{pendingHash}); err != nil {
+		t.Fatalf("insert post-migration mempool blob: %v", err)
+	}
+
+	var txHash string
+	if err := db.Get(&txHash, `SELECT tx_hash FROM blobs WHERE versioned_hashes @> ARRAY[$1::text]`, confirmedHash); err != nil {
+		t.Fatalf("containment lookup on blobs: %v", err)
+	}
+	if txHash != "0xpost" {
+		t.Fatalf("expected containment match on 0xpost, got %q", txHash)
+	}
+	if err := db.Get(&txHash, `SELECT tx_hash FROM mempool_blobs WHERE versioned_hashes @> ARRAY[$1::text]`, pendingHash); err != nil {
+		t.Fatalf("containment lookup on mempool_blobs: %v", err)
+	}
+	if txHash != "0xpendingpost" {
+		t.Fatalf("expected containment match on 0xpendingpost, got %q", txHash)
+	}
+
+	var indexExists bool
+	if err := db.Get(&indexExists, `
+		SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_blobs_versioned_hashes')
+	`); err != nil {
+		t.Fatalf("check GIN index: %v", err)
+	}
+	if !indexExists {
+		t.Fatal("expected idx_blobs_versioned_hashes to exist")
 	}
 }

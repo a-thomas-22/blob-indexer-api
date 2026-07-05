@@ -12,6 +12,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,22 +51,31 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 
+	// EIP-4844 versioned blob hashes. The "shared" hash appears on both the
+	// confirmed and the pending transaction (identical blob content produces
+	// identical versioned hashes), so the by-hash lookup must prefer the
+	// confirmed row.
+	confirmedOnlyHash := "0x01" + strings.Repeat("aa", 31)
+	pendingOnlyHash := "0x01" + strings.Repeat("bb", 31)
+	sharedHash := "0x01" + strings.Repeat("cc", 31)
+	missingHash := "0x01" + strings.Repeat("dd", 31)
+
 	if _, err := sqlxDB.Exec(`
 		INSERT INTO blobs (
 			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used
-		) VALUES (1, 100, 0, '0xconfirmed', '0xfrom', 'Rollup', 131072, 10, 2, 100, $1, 12, 131072)
-	`, now); err != nil {
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hashes
+		) VALUES (1, 100, 0, '0xconfirmed', '0xfrom', 'Rollup', 131072, 10, 2, 100, $1, 12, 131072, $2)
+	`, now, pq.StringArray{confirmedOnlyHash, sharedHash}); err != nil {
 		t.Fatalf("seed confirmed blob: %v", err)
 	}
 	if _, err := sqlxDB.Exec(`
 		INSERT INTO mempool_blobs (
 			chain_id, tx_hash, blob_index, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used
-		) VALUES (1, '0xpendingtx', 0, '0xfrom', 'Rollup', 131072, 50, 10, 500, $1, 60, 131072)
-	`, now); err != nil {
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hashes
+		) VALUES (1, '0xpendingtx', 0, '0xfrom', 'Rollup', 131072, 50, 10, 500, $1, 60, 131072, $2)
+	`, now, pq.StringArray{pendingOnlyHash, sharedHash}); err != nil {
 		t.Fatalf("seed mempool blob: %v", err)
 	}
 
@@ -115,6 +125,34 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		}
 		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByTxHash, "0xmissing", 1); !errors.Is(err, sql.ErrNoRows) {
 			t.Fatalf("expected sql.ErrNoRows for missing tx, got %v", err)
+		}
+	})
+
+	t.Run("queryBlobByVersionedHash", func(t *testing.T) {
+		var blob models.Blob
+		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, confirmedOnlyHash, 1); err != nil {
+			t.Fatalf("queryBlobByVersionedHash confirmed: %v", err)
+		}
+		if !blob.Confirmed || blob.BlockNumber != 100 || blob.TxHash != "0xconfirmed" {
+			t.Fatalf("expected confirmed blob, got %+v", blob)
+		}
+		if len(blob.VersionedHashes) != 2 || blob.VersionedHashes[0] != confirmedOnlyHash {
+			t.Fatalf("expected full versioned hash list on result, got %v", blob.VersionedHashes)
+		}
+		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, pendingOnlyHash, 1); err != nil {
+			t.Fatalf("queryBlobByVersionedHash pending: %v", err)
+		}
+		if blob.Confirmed || blob.BlockNumber != models.PendingBlockNumber || blob.TxHash != "0xpendingtx" {
+			t.Fatalf("expected pending blob, got %+v", blob)
+		}
+		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, sharedHash, 1); err != nil {
+			t.Fatalf("queryBlobByVersionedHash shared: %v", err)
+		}
+		if !blob.Confirmed || blob.TxHash != "0xconfirmed" {
+			t.Fatalf("expected confirmed row to win for a hash carried by both, got %+v", blob)
+		}
+		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByVersionedHash, missingHash, 1); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for missing versioned hash, got %v", err)
 		}
 	})
 

@@ -339,6 +339,7 @@ func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) 
 			r.Get("/mempool", a.GetMempoolBlobs)
 			r.With(aggregateLimit).Get("/mempool/pressure", a.GetMempoolPressure)
 			r.Get("/pricing", a.GetBlobPricing)
+			r.Get("/by-hash/{versionedHash}", a.GetBlobByVersionedHash)
 			r.Get("/{txHash}", a.GetBlobByTxHash)
 		})
 

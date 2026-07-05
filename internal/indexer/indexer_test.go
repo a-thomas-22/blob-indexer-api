@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"math/big"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
+	"github.com/lib/pq"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
 	"github.com/a-thomas-22/blob-indexer-api/internal/blobparams"
@@ -180,6 +182,26 @@ func TestCalculateBlobMetrics_UsesRealizedBlobBaseFeeCost(t *testing.T) {
 	}
 	if metrics.blobSizeBytes != gasPerBlob {
 		t.Fatalf("expected per-blob size %d bytes, got %d", gasPerBlob, metrics.blobSizeBytes)
+	}
+}
+
+func TestBuildPendingBlobs_PopulatesVersionedHashes(t *testing.T) {
+	hashes := []common.Hash{{0x01, 0xaa}, {0x01, 0xbb}}
+	tx := types.NewTx(&types.BlobTx{
+		BlobFeeCap: uint256.NewInt(5),
+		BlobHashes: hashes,
+	})
+
+	rows := buildPendingBlobs(tx, big.NewInt(2), 42, "0xfrom", "alice")
+
+	if len(rows) != len(hashes) {
+		t.Fatalf("expected %d pending rows, got %d", len(hashes), len(rows))
+	}
+	want := pq.StringArray{hashes[0].Hex(), hashes[1].Hex()}
+	for i, row := range rows {
+		if !reflect.DeepEqual(row.VersionedHashes, want) {
+			t.Fatalf("row %d versioned hashes = %v, want %v", i, row.VersionedHashes, want)
+		}
 	}
 }
 

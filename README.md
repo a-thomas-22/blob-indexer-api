@@ -43,6 +43,7 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 - `GET /api/v1/blob/latest?network=mainnet&limit=10` - Fetch latest blobs from recent blocks
 - `GET /api/v1/blob/mempool?network=mainnet&limit=10` - Fetch pending (unconfirmed) blob transactions
 - `GET /api/v1/blob/pricing?network=mainnet&blocks=20` - Fetch recent blob pricing and utilization metrics
+- `GET /api/v1/blob/by-hash/{versionedHash}?network=mainnet` - Fetch the blob transaction carrying an EIP-4844 versioned blob hash (0x01-prefixed)
 - `GET /api/v1/blob/{txHash}?network=mainnet` - Fetch a specific blob by transaction hash
 
 ### User Endpoints

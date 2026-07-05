@@ -21,7 +21,8 @@ const blobSelectColumns = `
 	timestamp,
 	true AS confirmed,
 	max_fee_per_blob_gas,
-	blob_gas_used
+	blob_gas_used,
+	versioned_hashes
 `
 
 // mempoolBlobSelectColumns projects mempool_blobs rows into the models.Blob
@@ -43,7 +44,8 @@ const mempoolBlobSelectColumns = `
 	timestamp,
 	false AS confirmed,
 	max_fee_per_blob_gas,
-	blob_gas_used
+	blob_gas_used,
+	versioned_hashes
 `
 
 const blockMetricsSelectColumns = `
@@ -146,6 +148,24 @@ const (
 		UNION ALL
 		SELECT ` + mempoolBlobSelectColumns + ` FROM mempool_blobs WHERE tx_hash = $1 AND chain_id = $2
 		ORDER BY confirmed DESC, blob_index ASC
+		LIMIT 1
+	`
+
+	// queryBlobByVersionedHash retrieves a single blob by EIP-4844 versioned
+	// blob hash and network. Every per-blob row carries its transaction's full
+	// hash list, so a containment match finds the carrying transaction — via
+	// idx_blobs_versioned_hashes (GIN) on blobs; mempool_blobs is a tiny
+	// seq-scanned table. Confirmed rows win over pending ones, the newest
+	// inclusion wins when identical blob content was posted more than once
+	// (same content ⇒ same versioned hash), and multi-blob transactions return
+	// their first blob, mirroring queryBlobByTxHash.
+	queryBlobByVersionedHash = `
+		SELECT ` + blobSelectColumns + ` FROM blobs
+		WHERE versioned_hashes @> ARRAY[$1::text] AND chain_id = $2
+		UNION ALL
+		SELECT ` + mempoolBlobSelectColumns + ` FROM mempool_blobs
+		WHERE versioned_hashes @> ARRAY[$1::text] AND chain_id = $2
+		ORDER BY confirmed DESC, block_number DESC, blob_index ASC
 		LIMIT 1
 	`
 
