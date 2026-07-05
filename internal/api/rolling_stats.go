@@ -257,7 +257,7 @@ func (a *API) GetRollingStatsChart(w http.ResponseWriter, r *http.Request) {
 // windows longer than the cutoff read hourly rollups, windows at or below it
 // read fine (60s) rollups when coverage reaches the window start, and the
 // remainder falls back to raw scans (fine coverage is only missing until the
-// indexer's retention-window backfill completes after migration 4).
+// indexer's retention-window backfill completes after the fine_chart_rollups migration).
 func splitRollingStatsWindows(windows []statsWindowSpec, generatedAt, fineCoverageStart time.Time, hasFineCoverage bool) (fine, raw, rollup []statsWindowSpec) {
 	// The fine query aligns window ends down to the last completed minute, so
 	// coverage is judged against the aligned window start.

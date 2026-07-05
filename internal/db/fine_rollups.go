@@ -8,11 +8,11 @@ import (
 
 const (
 	// FineChartRollupBucketSeconds is the fine chart-rollup bucket size.
-	// Mirrors chart_rollup_fine_bucket_seconds() in migration 4.
+	// Mirrors chart_rollup_fine_bucket_seconds() in the fine_chart_rollups migration.
 	FineChartRollupBucketSeconds = 60
 
 	// FineChartRollupRetention is how much fine-bucket history is kept.
-	// Mirrors chart_rollup_fine_retention() in migration 4; the trigger paths
+	// Mirrors chart_rollup_fine_retention() in the fine_chart_rollups migration; the trigger paths
 	// stop maintaining fine buckets for rows older than this, and the indexer
 	// prunes expired fine buckets on a timer.
 	FineChartRollupRetention = 48 * time.Hour

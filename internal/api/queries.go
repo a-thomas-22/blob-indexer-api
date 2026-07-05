@@ -634,8 +634,9 @@ const (
 	`
 
 	// queryFineRollupCoverageStart reports the earliest fine (60s) rollup
-	// bucket for a network. Fine buckets are trigger-maintained from migration
-	// 4 onward and backfilled across the retention window by the indexer, so a
+	// bucket for a network. Fine buckets are trigger-maintained from the
+	// fine_chart_rollups migration onward and backfilled across the retention
+	// window by the indexer, so a
 	// window or chart range starting before this timestamp is not fully
 	// covered and must fall back to raw scans. block_metrics_rollups is the
 	// coverage signal because blocks are continuous while blob buckets are

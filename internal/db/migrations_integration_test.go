@@ -839,7 +839,7 @@ func TestBlockMetricsRollupThresholdCounts(t *testing.T) {
 }
 
 // TestFineChartRollupsLifecycle exercises the fine (60s) chart rollup bucket
-// added by migration 4: statement triggers maintain fine buckets for rows
+// added by the fine_chart_rollups migration: statement triggers maintain fine buckets for rows
 // inside the retention window and skip rows outside it, the indexer's
 // chunked backfill statement recomputes buckets from raw rows (full replace),
 // and pruning removes expired fine rows without touching coarse buckets.

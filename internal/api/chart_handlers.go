@@ -695,7 +695,7 @@ func estimatedBlockPoints(duration time.Duration) int {
 const rollupMinBucketSeconds = 3600
 
 // fineRollupBucketSeconds is the fine chart rollup bucket size, mirroring
-// chart_rollup_fine_bucket_seconds() in migration 4. Fine buckets carry a
+// chart_rollup_fine_bucket_seconds() in the fine_chart_rollups migration. Fine buckets carry a
 // ~48h retention window; every sub-hour chart request fits inside it because
 // the point limit caps such ranges at 1000 buckets (under 17 hours at 60s,
 // and the only 300s requests are range=24h).
@@ -706,7 +706,7 @@ const fineRollupBucketSeconds = 60
 // size to read: hour-and-coarser granularities match stored rows exactly,
 // and whole-minute sub-hour granularities re-aggregate fine (60s) rows into
 // display buckets. Fine serving additionally requires fine coverage to reach
-// the range start — coverage is backfilled by the indexer after migration 4 —
+// the range start — coverage is backfilled by the indexer after the fine_chart_rollups migration —
 // so until then sub-hour requests keep using raw scans, which the point limit
 // bounds to at most 24 hours of data.
 func (a *API) chartRollupSourceBucket(ctx context.Context, chainID int, chart chartRequest) (sourceBucketSeconds int64, servedByRollups bool, err error) {
