@@ -773,6 +773,8 @@ func TestGetBlobPricing_BlocksClamping(t *testing.T) {
 		{"one hour of mainnet slots", "/?blocks=300", 300},
 		{"max passes through", "/?blocks=512", MaxPricingBlocks},
 		{"above max clamps to max", "/?blocks=9999", MaxPricingBlocks},
+		{"int overflow clamps to max", "/?blocks=99999999999999999999", MaxPricingBlocks},
+		{"negative overflow clamps to default", "/?blocks=-99999999999999999999", DefaultPricingBlocks},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

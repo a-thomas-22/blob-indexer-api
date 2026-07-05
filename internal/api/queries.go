@@ -825,8 +825,10 @@ const (
 
 	// queryBlockMetrics retrieves recent block metrics for pricing data: the N
 	// most recently indexed blocks, newest first. Every indexed block has a row
-	// (including zero-blob blocks), so the window is contiguous by block number;
-	// the (chain_id, block_number) primary key serves this as a single backward
+	// (including zero-blob blocks), so gaps appear only where a slot was missed
+	// or a block's commit is still in flight — the indexer commits blocks
+	// concurrently, so a block can briefly land before its predecessor. The
+	// (chain_id, block_number) primary key serves this as a single backward
 	// range scan.
 	queryBlockMetrics = `
 		SELECT ` + blockMetricsSelectColumns + ` FROM block_metrics

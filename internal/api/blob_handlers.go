@@ -728,7 +728,7 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 
 // GetBlobPricing godoc
 // @Summary Get blob pricing data
-// @Description Retrieve current and historical blob pricing with utilization metrics and fork parameters. recent_blocks holds the N most recently indexed blocks, newest first and contiguous by block number (zero-blob blocks included — they still carry a blob base fee). market_pressure is computed over the same requested window.
+// @Description Retrieve current and historical blob pricing with utilization metrics and fork parameters. recent_blocks holds the N most recently indexed blocks, newest first, zero-blob blocks included (they still carry a blob base fee); gaps appear only for missed slots or blocks not yet indexed. market_pressure is computed over the same requested window.
 // @Tags blobs
 // @Accept json
 // @Produce json
@@ -750,8 +750,11 @@ func (a *API) GetBlobPricing(w http.ResponseWriter, r *http.Request) {
 	// comparing recent_blocks length to what it asked for.
 	blocks := DefaultPricingBlocks
 	if blocksStr := r.URL.Query().Get("blocks"); blocksStr != "" {
+		// Values overflowing int are still numeric out-of-range: Atoi reports
+		// ErrRange but returns the nearest representable int, which the clamp
+		// below folds into the valid window. Only non-numeric input is a 400.
 		b, err := strconv.Atoi(blocksStr)
-		if err != nil {
+		if err != nil && !errors.Is(err, strconv.ErrRange) {
 			a.respondError(w, http.StatusBadRequest, "Invalid blocks parameter")
 			return
 		}
