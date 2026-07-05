@@ -19,9 +19,16 @@ type StatusResponse struct {
 	Uptime           string           `json:"uptime"`
 	LastIndexedTime  time.Time        `json:"last_indexed_time"`
 	Backfill         BackfillResponse `json:"backfill"`
-	// EarliestIndexedBlock and LatestIndexedBlock bound the network's indexed
-	// coverage, letting consumers distinguish a block below the indexing start
-	// from one not yet produced. Omitted when nothing is indexed yet.
+	// EarliestIndexedBlock and LatestIndexedBlock are the MIN/MAX indexed
+	// block numbers: best-effort coverage bounds, not a contiguity guarantee.
+	// The range can contain transient interior gaps (failed blocks awaiting
+	// retry, out-of-order commits) that the indexer's gap scanner closes, and
+	// the lower bound can briefly sit above the configured indexing start
+	// while its first blocks retry. Consumers should treat the bounds as a
+	// messaging heuristic ("likely before our history" / "not yet indexed"),
+	// not as proof that a block inside the range is present. Both fields are
+	// omitted when nothing is indexed yet or the bounds are temporarily
+	// unavailable — absence means unknown, not an empty chain.
 	EarliestIndexedBlock *int64 `json:"earliest_indexed_block,omitempty"`
 	LatestIndexedBlock   *int64 `json:"latest_indexed_block,omitempty"`
 	FreshnessResponse
@@ -36,7 +43,9 @@ type indexedBlockCoverage struct {
 
 // getIndexedBlockCoverageFromDB reads the indexed block range for a network.
 // Coverage is additive status metadata, so failures degrade to absent bounds
-// instead of failing the whole /status response.
+// instead of failing the whole /status response — the wire contract defines
+// absence as unknown, so an error here is indistinguishable from an empty
+// network by design.
 func (a *API) getIndexedBlockCoverageFromDB(ctx context.Context, networkID int) indexedBlockCoverage {
 	var coverage indexedBlockCoverage
 	if err := a.db.GetContext(ctx, &coverage, queryIndexedBlockCoverage, networkID); err != nil {
@@ -50,7 +59,7 @@ func (a *API) getIndexedBlockCoverageFromDB(ctx context.Context, networkID int) 
 
 // GetIndexerStatus godoc
 // @Summary Get indexer status
-// @Description Retrieve the current status of the indexer, including the indexed block coverage range (earliest_indexed_block / latest_indexed_block)
+// @Description Retrieve the current status of the indexer, including best-effort indexed block coverage bounds (earliest_indexed_block / latest_indexed_block). The bounds are MIN/MAX of indexed blocks: the range may contain transient interior gaps, and both fields are omitted when coverage is unknown (nothing indexed yet, or the bounds are temporarily unavailable).
 // @Tags status
 // @Accept json
 // @Produce json

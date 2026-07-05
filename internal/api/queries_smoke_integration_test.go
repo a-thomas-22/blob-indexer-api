@@ -68,9 +68,12 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 	`, now); err != nil {
 		t.Fatalf("seed mempool blob: %v", err)
 	}
+	// Block 99 is deliberately missing: the coverage bounds are documented as
+	// sparse extremes, so an interior gap (a failed block awaiting retry) must
+	// not shrink the reported range.
 	if _, err := sqlxDB.Exec(`
 		INSERT INTO indexed_blocks (chain_id, block_number, block_hash, parent_hash)
-		VALUES (1, 98, '0xhash98', '0xhash97'), (1, 99, '0xhash99', '0xhash98'), (1, 100, '0xhash100', '0xhash99')
+		VALUES (1, 98, '0xhash98', '0xhash97'), (1, 100, '0xhash100', '0xhash99')
 	`); err != nil {
 		t.Fatalf("seed indexed blocks: %v", err)
 	}
@@ -170,6 +173,7 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		if err := sqlxDB.GetContext(ctx, &coverage, queryIndexedBlockCoverage, 1); err != nil {
 			t.Fatalf("queryIndexedBlockCoverage: %v", err)
 		}
+		// The seeded rows skip block 99: bounds span the interior gap.
 		if coverage.EarliestIndexedBlock == nil || *coverage.EarliestIndexedBlock != 98 {
 			t.Fatalf("expected earliest indexed block 98, got %+v", coverage)
 		}

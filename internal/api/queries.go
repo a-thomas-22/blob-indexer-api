@@ -961,8 +961,10 @@ const (
 	// from indexed_blocks, the canonical per-block coverage record (the indexer
 	// writes one row per indexed block and uses it for gap detection). The
 	// (chain_id, block_number) primary key turns both aggregates into single
-	// index probes, so this stays cheap under /status polling. Both bounds are
-	// NULL when the network has no indexed blocks.
+	// index probes, so this stays cheap under /status polling. The bounds are
+	// sparse extremes, not a contiguity claim: the range can contain interior
+	// gaps while failed blocks retry and the gap scanner backfills. Both
+	// bounds are NULL when the network has no indexed blocks.
 	queryIndexedBlockCoverage = `
 		SELECT
 			MIN(block_number) AS earliest_indexed_block,
