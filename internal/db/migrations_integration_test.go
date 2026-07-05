@@ -3,6 +3,7 @@
 package db
 
 import (
+	"context"
 	"errors"
 	"os"
 	"testing"
@@ -346,6 +347,11 @@ func TestMigrationsDownThenUp(t *testing.T) {
 	defer db.Close()
 	resetSchema(t, db)
 
+	latest, err := LatestMigrationVersion()
+	if err != nil {
+		t.Fatalf("LatestMigrationVersion: %v", err)
+	}
+
 	m := migrator(t, db)
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("migrate up: %v", err)
@@ -355,10 +361,6 @@ func TestMigrationsDownThenUp(t *testing.T) {
 	}
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("migrate up again: %v", err)
-	}
-	latest, err := LatestMigrationVersion()
-	if err != nil {
-		t.Fatalf("LatestMigrationVersion: %v", err)
 	}
 	v, dirty, err := m.Version()
 	if err != nil {
@@ -833,6 +835,181 @@ func TestBlockMetricsRollupThresholdCounts(t *testing.T) {
 	}
 	for _, bucketSeconds := range []int{3600, 21600, 86400} {
 		assertRollupThresholdCounts(t, db, bucketSeconds, 5, 3, 1)
+	}
+}
+
+// TestFineChartRollupsLifecycle exercises the fine (60s) chart rollup bucket
+// added by the fine_chart_rollups migration: statement triggers maintain fine buckets for rows
+// inside the retention window and skip rows outside it, the indexer's
+// chunked backfill statement recomputes buckets from raw rows (full replace),
+// and pruning removes expired fine rows without touching coarse buckets.
+func TestFineChartRollupsLifecycle(t *testing.T) {
+	sqlxDB, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer sqlxDB.Close()
+	resetSchema(t, sqlxDB)
+
+	m := migrator(t, sqlxDB)
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate up: %v", err)
+	}
+
+	testDB := &DB{DB: sqlxDB}
+	ctx := context.Background()
+
+	recent := time.Now().UTC().Truncate(time.Minute).Add(-10 * time.Minute)
+	old := time.Now().UTC().Truncate(time.Minute).Add(-72 * time.Hour)
+
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO block_metrics (
+			chain_id, block_number, block_timestamp, blob_count,
+			blob_gas_used, blob_gas_target, blob_gas_limit,
+			excess_blob_gas, blob_base_fee, utilization_ratio,
+			blob_params_target, blob_params_max, update_fraction
+		) VALUES
+			(1, 200, $1, 1, 131072, 393216, 786432, 0, 10, 0.333333, 3, 6, 0),
+			(1, 201, $2, 1, 131072, 393216, 786432, 0, 30, 0.333333, 3, 6, 0),
+			(1, 100, $3, 1, 131072, 393216, 786432, 0, 50, 0.333333, 3, 6, 0)
+	`, recent, recent.Add(12*time.Second), old); err != nil {
+		t.Fatalf("insert block metrics: %v", err)
+	}
+
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES
+			(1, 200, 0, '0xf1', '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Rollup A', 131072, 10, 1, 100, $1, 11, 131072),
+			(1, 201, 0, '0xf2', '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Rollup A', 131072, 30, 1, 100, $2, 33, 131072),
+			(1, 100, 0, '0xf3', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '', 131072, 50, 1, 300, $3, 55, 131072)
+	`, recent, recent.Add(12*time.Second), old); err != nil {
+		t.Fatalf("insert blobs: %v", err)
+	}
+
+	// Triggers maintain the fine bucket for recent rows...
+	assertFineBlobBucket(t, sqlxDB, recent, fineBlobBucketCheck{
+		blobCount: 2, blobBytes: 262144, totalCost: 200, sumSizeBaseFee: 131072*10 + 131072*30,
+	})
+	var fineBlocks struct {
+		BlockCount int64  `db:"block_count"`
+		Median     string `db:"median_blob_base_fee"`
+	}
+	if err := sqlxDB.Get(&fineBlocks, `
+		SELECT block_count, median_blob_base_fee::text AS median_blob_base_fee
+		FROM block_metrics_rollups
+		WHERE chain_id = 1 AND bucket_seconds = 60 AND bucket_start = $1
+	`, recent); err != nil {
+		t.Fatalf("get fine block bucket: %v", err)
+	}
+	if fineBlocks.BlockCount != 2 || fineBlocks.Median != "10" {
+		t.Fatalf("fine block bucket = %+v, want 2 blocks with median 10", fineBlocks)
+	}
+
+	// ...and skip rows older than the retention window, which still land in
+	// the coarse buckets.
+	assertFineBucketCounts(t, sqlxDB, old, 0, 0)
+	var oldHourly int
+	if err := sqlxDB.Get(&oldHourly, `
+		SELECT COUNT(*) FROM blob_chart_rollups
+		WHERE chain_id = 1 AND bucket_seconds = 3600 AND bucket_start = date_trunc('hour', $1::timestamp)
+	`, old); err != nil {
+		t.Fatalf("count old hourly buckets: %v", err)
+	}
+	if oldHourly != 1 {
+		t.Fatalf("expected old row to land in the hourly bucket, got %d rows", oldHourly)
+	}
+
+	// Deleting an out-of-retention row refreshes coarse buckets only and must
+	// not resurrect fine buckets for it.
+	if _, err := sqlxDB.Exec(`DELETE FROM blobs WHERE chain_id = 1 AND tx_hash = '0xf3'`); err != nil {
+		t.Fatalf("delete old blob: %v", err)
+	}
+	assertFineBucketCounts(t, sqlxDB, old, 0, 0)
+
+	// The chunked backfill fully replaces bucket contents from raw rows.
+	if _, err := sqlxDB.Exec(`
+		UPDATE blob_chart_rollups SET blob_count = 999, total_cost_wei = 0
+		WHERE chain_id = 1 AND bucket_seconds = 60 AND bucket_start = $1
+	`, recent); err != nil {
+		t.Fatalf("corrupt fine bucket: %v", err)
+	}
+	if err := testDB.BackfillFineChartRollupsChunk(ctx, 1, recent.Add(-time.Minute), recent.Add(time.Minute)); err != nil {
+		t.Fatalf("backfill chunk: %v", err)
+	}
+	assertFineBlobBucket(t, sqlxDB, recent, fineBlobBucketCheck{
+		blobCount: 2, blobBytes: 262144, totalCost: 200, sumSizeBaseFee: 131072*10 + 131072*30,
+	})
+
+	// Pruning removes fine buckets older than the cutoff and leaves coarse
+	// buckets alone.
+	deleted, err := testDB.PruneFineChartRollups(ctx, 1, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if deleted < 2 {
+		t.Fatalf("expected prune to delete the fine buckets, got %d rows", deleted)
+	}
+	assertFineBucketCounts(t, sqlxDB, recent, 0, 0)
+	var hourlyLeft int
+	if err := sqlxDB.Get(&hourlyLeft, `
+		SELECT COUNT(*) FROM blob_chart_rollups WHERE chain_id = 1 AND bucket_seconds = 3600
+	`); err != nil {
+		t.Fatalf("count hourly buckets after prune: %v", err)
+	}
+	if hourlyLeft == 0 {
+		t.Fatal("prune must not remove coarse buckets")
+	}
+}
+
+type fineBlobBucketCheck struct {
+	blobCount      int64
+	blobBytes      int64
+	totalCost      int64
+	sumSizeBaseFee int64
+}
+
+func assertFineBlobBucket(t *testing.T, db *sqlx.DB, bucketStart time.Time, want fineBlobBucketCheck) {
+	t.Helper()
+	var got struct {
+		BlobCount      int64 `db:"blob_count"`
+		BlobBytes      int64 `db:"blob_bytes"`
+		TotalCost      int64 `db:"total_cost_wei"`
+		SumSizeBaseFee int64 `db:"sum_size_base_fee"`
+	}
+	if err := db.Get(&got, `
+		SELECT blob_count, blob_bytes, total_cost_wei::bigint AS total_cost_wei, sum_size_base_fee::bigint AS sum_size_base_fee
+		FROM blob_chart_rollups
+		WHERE chain_id = 1 AND bucket_seconds = 60 AND bucket_start = $1
+	`, bucketStart); err != nil {
+		t.Fatalf("get fine blob bucket at %s: %v", bucketStart, err)
+	}
+	if got.BlobCount != want.blobCount || got.BlobBytes != want.blobBytes ||
+		got.TotalCost != want.totalCost || got.SumSizeBaseFee != want.sumSizeBaseFee {
+		t.Fatalf("fine blob bucket = %+v, want %+v", got, want)
+	}
+}
+
+func assertFineBucketCounts(t *testing.T, db *sqlx.DB, bucketStart time.Time, wantBlobRows, wantBlockRows int) {
+	t.Helper()
+	var blobRows, blockRows int
+	if err := db.Get(&blobRows, `
+		SELECT COUNT(*) FROM blob_chart_rollups
+		WHERE chain_id = 1 AND bucket_seconds = 60 AND bucket_start = $1
+	`, bucketStart); err != nil {
+		t.Fatalf("count fine blob buckets: %v", err)
+	}
+	if err := db.Get(&blockRows, `
+		SELECT COUNT(*) FROM block_metrics_rollups
+		WHERE chain_id = 1 AND bucket_seconds = 60 AND bucket_start = $1
+	`, bucketStart); err != nil {
+		t.Fatalf("count fine block buckets: %v", err)
+	}
+	if blobRows != wantBlobRows || blockRows != wantBlockRows {
+		t.Fatalf("fine buckets at %s = %d blob rows / %d block rows, want %d / %d",
+			bucketStart, blobRows, blockRows, wantBlobRows, wantBlockRows)
 	}
 }
 

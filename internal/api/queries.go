@@ -633,6 +633,110 @@ const (
 		ORDER BY wb.ord
 	`
 
+	// queryFineRollupCoverageStart reports the earliest fine (60s) rollup
+	// bucket for a network. Fine buckets are trigger-maintained from the
+	// fine_chart_rollups migration onward and backfilled across the retention
+	// window by the indexer, so a
+	// window or chart range starting before this timestamp is not fully
+	// covered and must fall back to raw scans. block_metrics_rollups is the
+	// coverage signal because blocks are continuous while blob buckets are
+	// sparse. MIN is a sound signal because the backfill runs newest-first in
+	// atomic chunks: completed fine coverage is always contiguous from this
+	// timestamp to now, even if a backfill run aborted partway.
+	queryFineRollupCoverageStart = `
+		SELECT MIN(bucket_start) FROM block_metrics_rollups
+		WHERE chain_id = $1 AND bucket_seconds = 60
+	`
+
+	// queryRollingStatsWindowsFine serves rolling windows up to the raw cutoff
+	// from fine (60s) chart rollups instead of raw scans, reading O(minutes)
+	// pre-aggregated rows. Windows align down to the last completed minute, so
+	// results lag real time by up to 60 seconds and always span exactly the
+	// advertised duration. Sums, averages,
+	// and unique-sender counts are exact over the aligned window (per-sender
+	// bucket rows keep COUNT(DISTINCT) exact); median and p95 are estimated
+	// from per-minute medians: the window median is the median of minute
+	// medians, and the window p95 is the 95th percentile of minute medians.
+	// Minute buckets (~5 blocks) are much finer than fee variation, so a
+	// minute's median stands in for its blocks and percentiles across minutes
+	// track the true per-blob percentiles closely — unlike the hourly path's
+	// median-of-bucket-p95s, which at this granularity would collapse toward
+	// the median because a single minute has almost no internal spread.
+	queryRollingStatsWindowsFine = `
+		WITH requested_windows AS (
+			SELECT window_label, duration_seconds, ord
+			FROM unnest($2::text[], $3::bigint[]) WITH ORDINALITY AS u(window_label, duration_seconds, ord)
+		),
+		window_bounds AS (
+			SELECT
+				window_label,
+				duration_seconds,
+				ord,
+				date_trunc('minute', $4::timestamp) - (duration_seconds * INTERVAL '1 second') AS start_time,
+				date_trunc('minute', $4::timestamp) AS end_time
+			FROM requested_windows
+		),
+		blob_windows AS (
+			SELECT
+				wb.ord,
+				COALESCE(SUM(r.blob_count), 0)::bigint AS total_blobs,
+				COALESCE(SUM(r.blob_gas_used), 0)::bigint AS total_blob_gas_used,
+				COALESCE(SUM(r.total_cost_wei), 0) AS total_cost_wei,
+				COUNT(DISTINCT r.from_address) AS unique_senders,
+				CASE
+					WHEN COALESCE(SUM(r.blob_bytes), 0) > 0 THEN SUM(r.sum_size_base_fee) / SUM(r.blob_bytes)
+					ELSE 0
+				END AS average_blob_base_fee
+			FROM window_bounds wb
+			LEFT JOIN blob_chart_rollups r
+				ON r.chain_id = $1
+				AND r.bucket_seconds = 60
+				AND r.bucket_start >= wb.start_time
+				AND r.bucket_start < wb.end_time
+			GROUP BY wb.ord
+		),
+		metric_windows AS (
+			SELECT
+				wb.ord,
+				CASE
+					WHEN COALESCE(SUM(r.block_count), 0) > 0 THEN SUM(r.sum_utilization) / SUM(r.block_count)
+					ELSE 0
+				END AS average_utilization,
+				COALESCE(SUM(r.block_count), 0)::bigint AS total_blocks,
+				COALESCE(SUM(r.blocks_above_target), 0)::bigint AS blocks_above_target,
+				COALESCE(SUM(r.blocks_at_max), 0)::bigint AS blocks_at_max,
+				COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY r.median_blob_base_fee), 0) AS median_blob_base_fee,
+				COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY r.median_blob_base_fee), 0) AS p95_blob_base_fee
+			FROM window_bounds wb
+			LEFT JOIN block_metrics_rollups r
+				ON r.chain_id = $1
+				AND r.bucket_seconds = 60
+				AND r.bucket_start >= wb.start_time
+				AND r.bucket_start < wb.end_time
+			GROUP BY wb.ord
+		)
+		SELECT
+			wb.window_label AS stats_window,
+			wb.duration_seconds,
+			wb.start_time,
+			wb.end_time,
+			COALESCE(bs.average_blob_base_fee, 0) AS average_blob_base_fee,
+			COALESCE(bms.median_blob_base_fee, 0) AS median_blob_base_fee,
+			COALESCE(bms.p95_blob_base_fee, 0) AS p95_blob_base_fee,
+			COALESCE(bs.total_blobs, 0) AS total_blobs,
+			COALESCE(bs.total_blob_gas_used, 0) AS total_blob_gas_used,
+			COALESCE(bs.total_cost_wei, 0) AS total_cost_wei,
+			COALESCE(bs.unique_senders, 0) AS unique_senders,
+			COALESCE(bms.average_utilization, 0) AS average_utilization,
+			COALESCE(bms.total_blocks, 0) AS total_blocks,
+			COALESCE(bms.blocks_above_target, 0) AS blocks_above_target,
+			COALESCE(bms.blocks_at_max, 0) AS blocks_at_max
+		FROM window_bounds wb
+		LEFT JOIN blob_windows bs ON bs.ord = wb.ord
+		LEFT JOIN metric_windows bms ON bms.ord = wb.ord
+		ORDER BY wb.ord
+	`
+
 	// queryRollingStatsWindowsRollup serves rolling windows longer than the raw
 	// cutoff from hourly chart rollups, staying O(buckets x senders) instead of
 	// scanning raw rows. Windows align down to the rollup hour: the end is the

@@ -172,23 +172,27 @@ type Indexer struct {
 	// pendingTxResubBaseBackoff is the initial resubscribe backoff; a field so
 	// tests can shrink it. Defaults to pendingTxResubscribeBaseBackoff.
 	pendingTxResubBaseBackoff time.Duration
-	ctx                       context.Context
-	cancel                    context.CancelFunc
-	wg                        sync.WaitGroup
-	lastIndexedBlock          uint64 // accessed with sync/atomic
-	indexerVersion            string
-	mu                        sync.Mutex // protects DB metadata writes
-	dbWriteMu                 sync.Mutex // serializes same-network writes that fire summary rollup triggers
-	blockTaskCh               chan BlockTask
-	useWebsocket              bool
-	blockSub                  *ethereum.BlockSubscription
-	pendingTxSub              *ethereum.PendingTxSubscription
-	mempoolPollingStarted     uint32
-	failedBlocks              map[uint64]int // block number -> cumulative failure count
-	failedBlockNextRetry      map[uint64]time.Time
-	failedBlocksMu            sync.Mutex
-	reorgDetected             uint32              // atomic flag: 1 = reorg detected, main loop should reset
-	chainConfig               *params.ChainConfig // go-ethereum chain config for fork-aware blob math
+	// fineRollupPruneInterval is how often expired fine chart rollup buckets
+	// are pruned; a field so tests can shrink it. Defaults to
+	// defaultFineRollupPruneInterval.
+	fineRollupPruneInterval time.Duration
+	ctx                     context.Context
+	cancel                  context.CancelFunc
+	wg                      sync.WaitGroup
+	lastIndexedBlock        uint64 // accessed with sync/atomic
+	indexerVersion          string
+	mu                      sync.Mutex // protects DB metadata writes
+	dbWriteMu               sync.Mutex // serializes same-network writes that fire summary rollup triggers
+	blockTaskCh             chan BlockTask
+	useWebsocket            bool
+	blockSub                *ethereum.BlockSubscription
+	pendingTxSub            *ethereum.PendingTxSubscription
+	mempoolPollingStarted   uint32
+	failedBlocks            map[uint64]int // block number -> cumulative failure count
+	failedBlockNextRetry    map[uint64]time.Time
+	failedBlocksMu          sync.Mutex
+	reorgDetected           uint32              // atomic flag: 1 = reorg detected, main loop should reset
+	chainConfig             *params.ChainConfig // go-ethereum chain config for fork-aware blob math
 }
 
 // New creates a new indexer
@@ -230,6 +234,7 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		gapScanInterval:           cfg.Indexer.GapScanInterval,
 		maxReorgDepth:             cfg.Indexer.MaxReorgDepth,
 		pendingTxResubBaseBackoff: pendingTxResubscribeBaseBackoff,
+		fineRollupPruneInterval:   defaultFineRollupPruneInterval,
 		ctx:                       indexerCtx,
 		cancel:                    cancel,
 		indexerVersion:            cfg.Indexer.Version,
@@ -417,6 +422,16 @@ func (i *Indexer) Start() error {
 		}
 	} else {
 		i.startMempoolIndexer()
+	}
+
+	// Backfill fine chart rollups for the retention window, then prune expired
+	// fine buckets periodically.
+	if i.db != nil && i.fineRollupPruneInterval > 0 {
+		i.wg.Add(1)
+		go func() {
+			defer i.wg.Done()
+			i.runFineRollupMaintenance()
+		}()
 	}
 
 	// Start periodic cleanup of stale pending blobs
