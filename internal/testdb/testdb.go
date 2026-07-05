@@ -57,6 +57,9 @@ func ensureDatabase(t *testing.T, adminURL, name string) {
 		t.Fatalf("connect to TEST_DB_URL for database creation: %v", err)
 	}
 	defer admin.Close()
+	// pg_advisory_lock is session-scoped; pin the pool to one connection so
+	// the lock, the existence check, and CREATE DATABASE share a session.
+	admin.SetMaxOpenConns(1)
 
 	if _, err := admin.Exec("SELECT pg_advisory_lock($1)", lockKey); err != nil {
 		t.Fatalf("acquire test-database advisory lock: %v", err)
