@@ -674,10 +674,12 @@ func TestPoller_Run_ReconnectTriggersScan(t *testing.T) {
 	}
 
 	listener := &fakeListener{notifCh: make(chan *pq.Notification)}
-	var emitEvent func(pq.ListenerEventType)
+	// The factory runs inside the Run goroutine; hand the callback over via a
+	// channel rather than a shared variable.
+	emitEventCh := make(chan func(pq.ListenerEventType), 1)
 	poller := NewPoller(blockDB.mock(), hub, testNetworks(), time.Hour, time.Hour)
 	poller.listenerFactory = func(onEvent func(pq.ListenerEventType)) blockListener {
-		emitEvent = onEvent
+		emitEventCh <- onEvent
 		return listener
 	}
 
@@ -697,7 +699,12 @@ func TestPoller_Run_ReconnectTriggersScan(t *testing.T) {
 		<-done
 	}()
 
-	waitFor(t, func() bool { return emitEvent != nil })
+	var emitEvent func(pq.ListenerEventType)
+	select {
+	case emitEvent = <-emitEventCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener factory was not invoked")
+	}
 	emitEvent(pq.ListenerEventReconnected)
 
 	waitFor(t, func() bool {
