@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.6](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.5...blob-indexer-chart-v0.6.6) (2026-07-05)
+
+
+### Bug Fixes
+
+* **api:** address [#239](https://github.com/a-thomas-22/blob-indexer-api/issues/239)/[#250](https://github.com/a-thomas-22/blob-indexer-api/issues/250) review comments + Cloudflare-aware WS client IP ([#251](https://github.com/a-thomas-22/blob-indexer-api/issues/251)) ([fc67285](https://github.com/a-thomas-22/blob-indexer-api/commit/fc67285ca839f8767de6ebe2cbd0c6dbdeaf6706))
+* **helm:** source RPC URLs from a Secret and add liveness probes ([#240](https://github.com/a-thomas-22/blob-indexer-api/issues/240)) ([a484db1](https://github.com/a-thomas-22/blob-indexer-api/commit/a484db1b575b65dce4a45eb3bf217efd1deaa7da))
+* **helm:** update chart app version to 0.9.0 ([04608a4](https://github.com/a-thomas-22/blob-indexer-api/commit/04608a43a381617690f19f1db94efca8f86e5095))
+
+
+### Performance Improvements
+
+* heavy caching for blob-flow views + delta-based write-path triggers ([#272](https://github.com/a-thomas-22/blob-indexer-api/issues/272)) ([5edd091](https://github.com/a-thomas-22/blob-indexer-api/commit/5edd091675409e5f5153bfd09b207b179acd3bf1))
+
 ## [0.6.5](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.4...blob-indexer-chart-v0.6.5) (2026-06-14)
 
 
