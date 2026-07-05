@@ -154,15 +154,19 @@ const (
 	// variants) from chart rollups so windows stay O(buckets x senders) instead
 	// of scanning raw blobs. The 1h window reads fine (60s) buckets aligned down
 	// to the minute; wider windows read hourly buckets aligned down to the hour.
-	// Bucket alignment keeps the result byte-stable between bucket boundaries,
-	// so the in-process, ETag, edge, and browser cache layers all keep serving
-	// one entry instead of drifting per request. Fine buckets are
-	// trigger-maintained in the same transaction as blob inserts (48h
-	// retention), so a 1h window is fully covered on any database whose
-	// fine-rollup migration is at least an hour old. Windows cover confirmed
-	// blobs only; exact last-seen times come from blob_user_stats. The trailing
-	// from_address sort key makes ordering — and therefore pagination — fully
-	// deterministic across ties.
+	// Windows have only the aligned lower bound and extend through the
+	// in-progress bucket: results stay current through now (a leaderboard that
+	// excluded the open bucket would lag by up to a full bucket), while the
+	// bound itself moves only at bucket boundaries, so request-time jitter
+	// never shifts the window and every cache layer (in-process, ETag, edge,
+	// browser) serves one entry per URL between data changes. The traded cost
+	// is that a window spans up to one extra bucket of history beyond its
+	// nominal width. Fine buckets are trigger-maintained in the same
+	// transaction as blob inserts (48h retention), so a 1h window is fully
+	// covered on any database whose fine-rollup migration is at least an hour
+	// old. Windows cover confirmed blobs only; exact last-seen times come from
+	// blob_user_stats. The trailing from_address sort key makes ordering — and
+	// therefore pagination — fully deterministic across ties.
 	queryTopBlobUsersWithOptions = `
 		WITH window_params AS (
 			SELECT

@@ -329,7 +329,7 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 // @Accept json
 // @Produce json
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
-// @Param range query string false "Time range to aggregate (default: all)" Enums(1h, 24h, 7d, 30d, all)
+// @Param range query string false "Time range to aggregate; echoed back in meta.range (default: all)" Enums(1h, 24h, 7d, 30d, all)
 // @Param window query string false "Deprecated alias for range" Enums(1h, 24h, 7d, 30d, all)
 // @Success 200 {object} Response{data=UserBreakdownResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
@@ -343,10 +343,17 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	window, _, err := parseUserRangeOption(r)
+	window, explicitWindow, err := parseUserRangeOption(r)
 	if err != nil {
 		a.respondError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	// Same explicit-only meta echo as getTopBlobUsers, so the range contract
+	// is uniform across the /users endpoints.
+	var meta interface{}
+	if explicitWindow {
+		meta = usersRangeMeta{Range: string(window)}
 	}
 
 	logger.Debug("Getting blob user breakdown",
@@ -358,7 +365,11 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 	if cached, ok := a.breakdownCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		a.cacheMu.RUnlock()
 		setCacheControl(w, aggregateCacheTTL, aggregateEdgeTTL)
-		a.respondSuccess(w, cached.response)
+		a.respondJSON(w, http.StatusOK, Response{
+			Success: true,
+			Data:    cached.response,
+			Meta:    meta,
+		})
 		return
 	}
 	a.cacheMu.RUnlock()
@@ -424,7 +435,11 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 	response, _ := value.(UserBreakdownResponse)
 
 	setCacheControl(w, aggregateCacheTTL, aggregateEdgeTTL)
-	a.respondSuccess(w, response)
+	a.respondJSON(w, http.StatusOK, Response{
+		Success: true,
+		Data:    response,
+		Meta:    meta,
+	})
 }
 
 // GetUserByAddress godoc

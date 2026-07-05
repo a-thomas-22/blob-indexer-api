@@ -489,6 +489,9 @@ func TestGetUserBreakdown_DefaultAllUsesRollup(t *testing.T) {
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
 	}
+	if strings.Contains(w.Body.String(), `"meta"`) {
+		t.Fatalf("expected no meta on omitted range, got %s", w.Body.String())
+	}
 }
 
 func TestGetUserBreakdown_InvalidWindow(t *testing.T) {
@@ -528,6 +531,9 @@ func TestGetUserBreakdown_RangeParam(t *testing.T) {
 	wantArgs := []interface{}{42, "30d"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+	if !strings.Contains(w.Body.String(), `"meta":{"range":"30d"}`) {
+		t.Fatalf("expected meta range echo, got %s", w.Body.String())
 	}
 }
 
