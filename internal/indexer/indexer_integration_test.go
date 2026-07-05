@@ -156,27 +156,27 @@ func TestIntegrationInsertPendingBlobsMultiRow(t *testing.T) {
 	ctx := context.Background()
 
 	pending := []models.Blob{
-		integrationBlob(-1, 0, "0xpending", "0xccc", false),
-		integrationBlob(-1, 0, "0xpending", "0xccc", false),
+		integrationBlob(models.PendingBlockNumber, 0, "0xpending", "0xccc", false),
+		integrationBlob(models.PendingBlockNumber, 0, "0xpending", "0xccc", false),
 	}
 
-	// First poll: no existing rows → mismatch path → one multi-row INSERT.
+	// First poll: one multi-row upsert into mempool_blobs at the per-tx
+	// blob ordinals 0..N-1.
 	if err := idx.insertPendingBlobs(pending); err != nil {
 		t.Fatalf("insertPendingBlobs() first poll error = %v", err)
 	}
 
 	var indices []int
 	if err := database.SelectContext(ctx, &indices,
-		"SELECT blob_index FROM blobs WHERE chain_id = $1 AND block_number < 0 ORDER BY blob_index", integrationChainID); err != nil {
+		"SELECT blob_index FROM mempool_blobs WHERE chain_id = $1 ORDER BY blob_index", integrationChainID); err != nil {
 		t.Fatalf("read pending indices: %v", err)
 	}
 	if len(indices) != 2 || indices[0] != 0 || indices[1] != 1 {
 		t.Fatalf("expected pending blob_index [0 1], got %v", indices)
 	}
 
-	// Second poll with changed fee data: steady-state path → one
-	// UPDATE ... FROM (VALUES ...). Indices must stay stable and the new
-	// values must land.
+	// Second poll with changed fee data hits the ON CONFLICT DO UPDATE arm:
+	// same rows, stable ordinals, new values.
 	pending[0].TipPerBlobGas = "7"
 	pending[1].TipPerBlobGas = "7"
 	if err := idx.insertPendingBlobs(pending); err != nil {
@@ -188,7 +188,7 @@ func TestIntegrationInsertPendingBlobsMultiRow(t *testing.T) {
 		Tip       string `db:"tip_per_blob_gas"`
 	}
 	if err := database.SelectContext(ctx, &rows,
-		"SELECT blob_index, tip_per_blob_gas FROM blobs WHERE chain_id = $1 AND block_number < 0 ORDER BY blob_index", integrationChainID); err != nil {
+		"SELECT blob_index, tip_per_blob_gas FROM mempool_blobs WHERE chain_id = $1 ORDER BY blob_index", integrationChainID); err != nil {
 		t.Fatalf("read pending rows: %v", err)
 	}
 	if len(rows) != 2 {
@@ -203,7 +203,20 @@ func TestIntegrationInsertPendingBlobsMultiRow(t *testing.T) {
 		t.Fatalf("expected stable blob_index [0 1], got [%d %d]", rows[0].BlobIndex, rows[1].BlobIndex)
 	}
 
-	// Pending rows are unconfirmed and must not count into network stats.
+	// A poll that sees fewer blobs for the tx trims the surplus ordinals.
+	if err := idx.insertPendingBlobs(pending[:1]); err != nil {
+		t.Fatalf("insertPendingBlobs() shrink poll error = %v", err)
+	}
+	if err := database.SelectContext(ctx, &indices,
+		"SELECT blob_index FROM mempool_blobs WHERE chain_id = $1 ORDER BY blob_index", integrationChainID); err != nil {
+		t.Fatalf("read trimmed indices: %v", err)
+	}
+	if len(indices) != 1 || indices[0] != 0 {
+		t.Fatalf("expected trimmed blob_index [0], got %v", indices)
+	}
+
+	// Pending rows live outside blobs and must not count into network stats
+	// or the per-sender rollups.
 	var confirmed int64
 	if err := database.GetContext(ctx, &confirmed,
 		"SELECT COALESCE((SELECT total_confirmed_blobs FROM network_blob_stats WHERE chain_id = $1), 0)", integrationChainID); err != nil {
@@ -211,6 +224,40 @@ func TestIntegrationInsertPendingBlobsMultiRow(t *testing.T) {
 	}
 	if confirmed != 0 {
 		t.Fatalf("expected 0 confirmed blobs from pending rows, got %d", confirmed)
+	}
+	var senderRows int
+	if err := database.GetContext(ctx, &senderRows,
+		"SELECT COUNT(*) FROM blob_user_stats WHERE chain_id = $1", integrationChainID); err != nil {
+		t.Fatalf("read blob_user_stats: %v", err)
+	}
+	if senderRows != 0 {
+		t.Fatalf("expected no blob_user_stats rows from pending blobs, got %d", senderRows)
+	}
+
+	// Once the tx is confirmed in blobs, further polls are a no-op and do not
+	// resurrect pending rows.
+	confirmedBlob := integrationBlob(200, 0, "0xpending", "0xccc", true)
+	indexedBlock := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 200, BlockHash: "0xhash200", ParentHash: "0xparent200"}
+	if err := idx.insertBlockData([]models.Blob{confirmedBlob}, indexedBlock, nil); err != nil {
+		t.Fatalf("insertBlockData() promote error = %v", err)
+	}
+	var pendingLeft int
+	if err := database.GetContext(ctx, &pendingLeft,
+		"SELECT COUNT(*) FROM mempool_blobs WHERE chain_id = $1", integrationChainID); err != nil {
+		t.Fatalf("count pending after promotion: %v", err)
+	}
+	if pendingLeft != 0 {
+		t.Fatalf("expected promotion to clear mempool_blobs, got %d rows", pendingLeft)
+	}
+	if err := idx.insertPendingBlobs(pending[:1]); err != nil {
+		t.Fatalf("insertPendingBlobs() post-confirm poll error = %v", err)
+	}
+	if err := database.GetContext(ctx, &pendingLeft,
+		"SELECT COUNT(*) FROM mempool_blobs WHERE chain_id = $1", integrationChainID); err != nil {
+		t.Fatalf("count pending after post-confirm poll: %v", err)
+	}
+	if pendingLeft != 0 {
+		t.Fatalf("expected confirmed tx to suppress pending rows, got %d rows", pendingLeft)
 	}
 }
 

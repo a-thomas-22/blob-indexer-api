@@ -182,7 +182,8 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 		}
 	}
 
-	// Add a few pending blobs
+	// Add a few pending blobs to the dedicated mempool table. blob_index is
+	// the per-transaction blob ordinal; each seeded tx carries one blob.
 	for i := 0; i < 5; i++ {
 		// Select a random rollup
 		rollupIndex := i % len(knownRollups)
@@ -191,8 +192,7 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 		// Create a pending blob
 		blob := models.Blob{
 			ChainID:           seedChainID,
-			BlockNumber:       -1, // Pending (internal sentinel)
-			BlobIndex:         i,  // distinct per pending row
+			BlobIndex:         0,
 			TxHash:            fmt.Sprintf("0xpending%064x", i),
 			FromAddress:       rollup.Address,
 			UserAttribution:   rollup.Name,
@@ -206,28 +206,26 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 
 		// Insert the pending blob
 		query := `
-			INSERT INTO blobs (
-				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			INSERT INTO mempool_blobs (
+				chain_id, tx_hash, blob_index, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-				timestamp, confirmed
+				timestamp
 			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 			)
-			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
-				tx_hash = $4,
-				from_address = $5,
-				user_attribution = $6,
-				blob_size_bytes = $7,
-				base_fee_per_blob_gas = $8,
-				tip_per_blob_gas = $9,
-				total_cost_wei = $10,
-				timestamp = $11,
-				confirmed = $12
+			ON CONFLICT (chain_id, tx_hash, blob_index) DO UPDATE SET
+				from_address = $4,
+				user_attribution = $5,
+				blob_size_bytes = $6,
+				base_fee_per_blob_gas = $7,
+				tip_per_blob_gas = $8,
+				total_cost_wei = $9,
+				timestamp = $10
 		`
 		_, err := database.ExecContext(ctx, query,
-			blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
+			blob.ChainID, blob.TxHash, blob.BlobIndex, blob.FromAddress, blob.UserAttribution,
 			blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-			blob.Timestamp, blob.Confirmed,
+			blob.Timestamp,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert pending blob %d: %w", i, err)

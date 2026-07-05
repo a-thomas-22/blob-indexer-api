@@ -138,7 +138,7 @@ func TestPoller_NoChange_NoBroadcast(t *testing.T) {
 			return nil
 		},
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			if strings.Contains(query, "confirmed = false") {
+			if strings.Contains(query, "FROM mempool_blobs") {
 				blobs := dest.(*[]models.Blob)
 				*blobs = []models.Blob{}
 			}
@@ -283,7 +283,7 @@ func TestPoller_MempoolDiff_AddAndRemove(t *testing.T) {
 			return nil
 		},
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-			if strings.Contains(query, "confirmed = false") {
+			if strings.Contains(query, "FROM mempool_blobs") {
 				blobs := dest.(*[]models.Blob)
 				pollCycle++
 				switch {

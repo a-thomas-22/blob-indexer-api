@@ -132,10 +132,13 @@ func TestRefreshBlobList_SyncsClaimsAndReattributesExistingBlobs(t *testing.T) {
 	mock.ExpectExec("UPDATE blobs").
 		WithArgs(1, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec("UPDATE mempool_blobs").
+		WithArgs(1, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE blobs").
 		WithArgs("Base", 1, testBlobListAddress, int64(100)).
 		WillReturnResult(sqlmock.NewResult(0, 2))
-	mock.ExpectExec("UPDATE blobs").
+	mock.ExpectExec("UPDATE mempool_blobs").
 		WithArgs("Base", 1, testBlobListAddress).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()

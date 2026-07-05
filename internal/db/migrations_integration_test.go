@@ -353,9 +353,8 @@ func TestNetworkBlobStatsMigrationMaintainsSummary(t *testing.T) {
 	})
 }
 
-// TestMigrationsDownThenUp validates that reversible migrations round-trip.
-// Migration 9 is intentionally irreversible (its down is a no-op), so we only
-// step back to the most recent reversible boundary.
+// TestMigrationsDownThenUp validates that migrations above the consolidated
+// baseline round-trip: step back to the baseline, then re-apply to latest.
 func TestMigrationsDownThenUp(t *testing.T) {
 	db, err := sqlx.Connect("postgres", integrationDBURL(t))
 	if err != nil {
@@ -368,13 +367,15 @@ func TestMigrationsDownThenUp(t *testing.T) {
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("migrate up: %v", err)
 	}
-	// Step back to 7 (before the per-blob migrations). 8.down restores the
-	// unique pending index; 9.down is a no-op marker.
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		t.Fatalf("migrate down to 7: %v", err)
+	if err := m.Migrate(1); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate down to baseline: %v", err)
 	}
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("migrate up again: %v", err)
+	}
+	latest, err := LatestMigrationVersion()
+	if err != nil {
+		t.Fatalf("LatestMigrationVersion: %v", err)
 	}
 	v, dirty, err := m.Version()
 	if err != nil {
@@ -383,9 +384,109 @@ func TestMigrationsDownThenUp(t *testing.T) {
 	if dirty {
 		t.Fatal("schema dirty after down/up")
 	}
-	if v != 1 {
-		t.Fatalf("expected version 1, got %d", v)
+	if v != latest {
+		t.Fatalf("expected version %d, got %d", latest, v)
 	}
+}
+
+// TestMempoolBlobsMigration verifies migration 2: pending rows move to the
+// dedicated UNLOGGED mempool_blobs table, legacy block_number < 0 sentinel
+// rows are purged from blobs (including their blob_user_stats contribution),
+// and the dead pending partial index is dropped.
+func TestMempoolBlobsMigration(t *testing.T) {
+	db, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	resetSchema(t, db)
+
+	m := migrator(t, db)
+	if err := m.Migrate(1); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to baseline: %v", err)
+	}
+
+	// Seed one confirmed and one legacy pending sentinel row (baseline schema
+	// keeps pending rows in blobs). The default mainnet network (chain 1) is
+	// inserted by the baseline migration.
+	t0 := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
+		) VALUES
+			(1, 100, 0, '0xconfirmed', '0xfrom', '', 131072, 10, 2, 100, $1, true, 12, 131072),
+			(1, -1, 0, '0xpending', '0xfrom', '', 131072, 50, 10, 500, $1, false, 60, 131072)
+	`, t0); err != nil {
+		t.Fatalf("seed blobs: %v", err)
+	}
+
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to latest: %v", err)
+	}
+
+	var legacyPending int
+	if err := db.Get(&legacyPending, `SELECT COUNT(*) FROM blobs WHERE block_number < 0`); err != nil {
+		t.Fatalf("count legacy pending rows: %v", err)
+	}
+	if legacyPending != 0 {
+		t.Fatalf("expected legacy pending rows to be purged, got %d", legacyPending)
+	}
+	var confirmed int
+	if err := db.Get(&confirmed, `SELECT COUNT(*) FROM blobs WHERE chain_id = 1`); err != nil {
+		t.Fatalf("count confirmed rows: %v", err)
+	}
+	if confirmed != 1 {
+		t.Fatalf("expected the confirmed row to survive, got %d rows", confirmed)
+	}
+
+	// The purge must also remove the pending contribution from blob_user_stats
+	// via the delete trigger (the rollup is confirmed-only now).
+	assertBlobUserStats(t, db, "0xfrom", 1, 100)
+
+	// The dead partial index is gone.
+	var indexExists bool
+	if err := db.Get(&indexExists, `
+		SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_blobs_pending_chain_tx_hash')
+	`); err != nil {
+		t.Fatalf("check partial index: %v", err)
+	}
+	if indexExists {
+		t.Fatal("expected idx_blobs_pending_chain_tx_hash to be dropped")
+	}
+
+	// mempool_blobs is UNLOGGED and accepts the indexer's upsert shape.
+	var persistence string
+	if err := db.Get(&persistence, `SELECT relpersistence FROM pg_class WHERE relname = 'mempool_blobs'`); err != nil {
+		t.Fatalf("check mempool_blobs persistence: %v", err)
+	}
+	if persistence != "u" {
+		t.Fatalf("expected mempool_blobs to be UNLOGGED (relpersistence 'u'), got %q", persistence)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := db.Exec(`
+			INSERT INTO mempool_blobs (
+				chain_id, tx_hash, blob_index, from_address, user_attribution,
+				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+				timestamp, max_fee_per_blob_gas, blob_gas_used
+			) VALUES (1, '0xmempool', 0, '0xfrom', '', 131072, 50, 10, 500, $1, 60, 131072)
+			ON CONFLICT (chain_id, tx_hash, blob_index) DO UPDATE SET timestamp = EXCLUDED.timestamp
+		`, t0.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatalf("upsert mempool blob (round %d): %v", i, err)
+		}
+	}
+	var mempoolRows int
+	if err := db.Get(&mempoolRows, `SELECT COUNT(*) FROM mempool_blobs WHERE chain_id = 1`); err != nil {
+		t.Fatalf("count mempool rows: %v", err)
+	}
+	if mempoolRows != 1 {
+		t.Fatalf("expected upsert to keep a single mempool row, got %d", mempoolRows)
+	}
+
+	// Pending rows no longer touch the analytical rollups: the mempool insert
+	// above must not have changed blob_user_stats.
+	assertBlobUserStats(t, db, "0xfrom", 1, 100)
 }
 
 func TestPublicAPIRollupsStayConsistent(t *testing.T) {
