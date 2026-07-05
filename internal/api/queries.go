@@ -155,17 +155,20 @@ const (
 	// blob hash and network. Every per-blob row carries its transaction's full
 	// hash list, so a containment match finds the carrying transaction — via
 	// idx_blobs_versioned_hashes (GIN) on blobs; mempool_blobs is a tiny
-	// seq-scanned table. Confirmed rows win over pending ones, the newest
-	// inclusion wins when identical blob content was posted more than once
-	// (same content ⇒ same versioned hash), and multi-blob transactions return
-	// their first blob, mirroring queryBlobByTxHash.
+	// seq-scanned table. When identical blob content was posted more than once
+	// (same content ⇒ same versioned hash): confirmed rows win over pending
+	// ones, then the newest inclusion by block, with timestamp DESC breaking
+	// pending ties (block_number is the shared -1 sentinel there) and tx_hash
+	// making same-block/same-poll ties deterministic. Within the selected
+	// transaction all keys before blob_index tie, so multi-blob transactions
+	// return their first blob, mirroring queryBlobByTxHash.
 	queryBlobByVersionedHash = `
 		SELECT ` + blobSelectColumns + ` FROM blobs
 		WHERE versioned_hashes @> ARRAY[$1::text] AND chain_id = $2
 		UNION ALL
 		SELECT ` + mempoolBlobSelectColumns + ` FROM mempool_blobs
 		WHERE versioned_hashes @> ARRAY[$1::text] AND chain_id = $2
-		ORDER BY confirmed DESC, block_number DESC, blob_index ASC
+		ORDER BY confirmed DESC, block_number DESC, timestamp DESC, tx_hash ASC, blob_index ASC
 		LIMIT 1
 	`
 

@@ -1225,10 +1225,12 @@ func TestBlockMetricsNotifyTrigger(t *testing.T) {
 	}
 }
 
-// TestBlobVersionedHashesMigration verifies migration 7: blobs and
+// TestBlobVersionedHashesMigration verifies migrations 7 and 8: blobs and
 // mempool_blobs gain the versioned_hashes TEXT[] column (staying NULL on
 // pre-migration rows), containment matches find newly written rows on both
-// tables, and the GIN index serving the /blob/by-hash lookup exists.
+// tables, and the GIN index serving the /blob/by-hash lookup exists. The
+// column add and the index build are separate migrations so the ADD COLUMN
+// ACCESS EXCLUSIVE lock is not held across the index build.
 func TestBlobVersionedHashesMigration(t *testing.T) {
 	db, err := sqlx.Connect("postgres", integrationDBURL(t))
 	if err != nil {

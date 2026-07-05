@@ -137,33 +137,17 @@ func (e *testEthRPC) GetTransactionByHash(_ context.Context, _ common.Hash) (int
 	return payload, nil
 }
 
-type testTxPoolRPC struct {
-	txs map[string]*types.Transaction
-}
-
-func (p *testTxPoolRPC) Content(_ context.Context) (map[string]*types.Transaction, error) {
-	if p.txs != nil {
-		return p.txs, nil
-	}
-	return map[string]*types.Transaction{}, nil
-}
-
+// newMockEthClient serves the eth namespace only. GetPendingTransactions
+// reads the pending block (eth_getBlockByNumber("pending", true)), which the
+// mock builds from testEthRPC.blockTxs — the client no longer calls
+// txpool_content, so no txpool service is registered.
 func newMockEthClient(t *testing.T, latest uint64) (*ethereum.Client, *testEthRPC) {
-	client, ethSvc, _ := newMockEthClientWithTxPool(t, latest)
-	return client, ethSvc
-}
-
-func newMockEthClientWithTxPool(t *testing.T, latest uint64) (*ethereum.Client, *testEthRPC, *testTxPoolRPC) {
 	t.Helper()
 
 	rpcServer := rpc.NewServer()
 	ethSvc := &testEthRPC{latest: latest}
 	if err := rpcServer.RegisterName("eth", ethSvc); err != nil {
 		t.Fatalf("failed to register eth rpc service: %v", err)
-	}
-	txPoolSvc := &testTxPoolRPC{}
-	if err := rpcServer.RegisterName("txpool", txPoolSvc); err != nil {
-		t.Fatalf("failed to register txpool rpc service: %v", err)
 	}
 
 	httpServer := httptest.NewServer(rpcServer)
@@ -175,7 +159,7 @@ func newMockEthClientWithTxPool(t *testing.T, latest uint64) (*ethereum.Client, 
 	}
 	t.Cleanup(client.Close)
 
-	return client, ethSvc, txPoolSvc
+	return client, ethSvc
 }
 
 func newMockIndexerDB(t *testing.T) (*db.DB, sqlmock.Sqlmock) {
@@ -2193,28 +2177,32 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS")).
 			WithArgs(idx.network.ChainID, txHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT blob_index FROM blobs")).
-			WithArgs(idx.network.ChainID, txHash).
-			WillReturnRows(sqlmock.NewRows([]string{"blob_index"}))
-		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs")).
-			WithArgs(idx.network.ChainID, txHash).
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
+			WithArgs(idx.network.ChainID, txHash, 1).
 			WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(blob_index)")).
-			WithArgs(idx.network.ChainID, int64(-1)).
-			WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(nil))
-		mock.ExpectExec("INSERT INTO blobs").
-			WithArgs(idx.network.ChainID, int64(-1), 0, txHash, sqlmock.AnyArg(), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), false, sqlmock.AnyArg(), sqlmock.AnyArg()).
+		mock.ExpectExec("INSERT INTO mempool_blobs").
+			WithArgs(idx.network.ChainID, txHash, 0, sqlmock.AnyArg(), "",
+				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+				versionedHashStrings(ethSvc.txByHash.BlobHashes())).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
 		idx.processPendingTransaction(ethSvc.txByHash.Hash())
+
+		// insertPendingBlobs swallows nothing here, but processPendingTransaction
+		// logs-and-drops DB errors, so the expectations must be asserted
+		// explicitly for this to verify the mempool write path end to end.
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("pending insert expectations not met: %v", err)
+		}
 	})
 
 	t.Run("processPendingTransactions processes blob tx list", func(t *testing.T) {
 		idx := newTestIndexer()
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
-		client, _, txpool := newMockEthClientWithTxPool(t, 10)
+		client, ethSvc := newMockEthClient(t, 10)
 		idx.ethClient = client
 
 		key, err := crypto.GenerateKey()
@@ -2233,35 +2221,42 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			BlobFeeCap: uint256.NewInt(3),
 			BlobHashes: []common.Hash{{2}},
 		})
-		txpool.txs = map[string]*types.Transaction{blobTx.Hash().Hex(): blobTx}
+		// GetPendingTransactions reads the pending *block*
+		// (eth_getBlockByNumber("pending", true)), which the mock serves from
+		// blockTxs — not from the txpool service.
+		ethSvc.blockTxs = []*types.Transaction{blobTx}
 
 		txHash := blobTx.Hash().Hex()
 		mock.ExpectBegin()
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS")).
 			WithArgs(idx.network.ChainID, txHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT blob_index FROM blobs")).
-			WithArgs(idx.network.ChainID, txHash).
-			WillReturnRows(sqlmock.NewRows([]string{"blob_index"}))
-		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs")).
-			WithArgs(idx.network.ChainID, txHash).
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
+			WithArgs(idx.network.ChainID, txHash, 1).
 			WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(blob_index)")).
-			WithArgs(idx.network.ChainID, int64(-1)).
-			WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(nil))
-		mock.ExpectExec("INSERT INTO blobs").
-			WithArgs(idx.network.ChainID, int64(-1), 0, txHash, sqlmock.AnyArg(), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), false, sqlmock.AnyArg(), sqlmock.AnyArg()).
+		mock.ExpectExec("INSERT INTO mempool_blobs").
+			WithArgs(idx.network.ChainID, txHash, 0, sqlmock.AnyArg(), "",
+				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+				versionedHashStrings(blobTx.BlobHashes())).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
 		if err := idx.processPendingTransactions(); err != nil {
 			t.Fatalf("processPendingTransactions() error = %v", err)
 		}
+
+		// processPendingTransactions logs-and-continues on insert errors, so a
+		// nil return alone proves nothing about the write; assert the
+		// expectations to verify the mempool write path end to end.
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("pending insert expectations not met: %v", err)
+		}
 	})
 
 	t.Run("processPendingTransactions skips tx with sender error", func(t *testing.T) {
 		idx := newTestIndexer()
-		client, _, txpool := newMockEthClientWithTxPool(t, 10)
+		client, ethSvc := newMockEthClient(t, 10)
 		idx.ethClient = client
 
 		unsignedBlobTx := types.NewTx(&types.BlobTx{
@@ -2275,7 +2270,10 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			BlobFeeCap: uint256.NewInt(3),
 			BlobHashes: []common.Hash{{5}},
 		})
-		txpool.txs = map[string]*types.Transaction{unsignedBlobTx.Hash().Hex(): unsignedBlobTx}
+		// Served via the pending block (blockTxs), like the subtest above. No
+		// DB mock is installed, so reaching insertPendingBlobs would panic —
+		// the unsigned tx must be skipped at the sender step.
+		ethSvc.blockTxs = []*types.Transaction{unsignedBlobTx}
 
 		if err := idx.processPendingTransactions(); err != nil {
 			t.Fatalf("processPendingTransactions() error = %v", err)
@@ -2284,7 +2282,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 
 	t.Run("processPendingTransactions pending tx fetch error", func(t *testing.T) {
 		idx := newTestIndexer()
-		client, ethSvc, _ := newMockEthClientWithTxPool(t, 10)
+		client, ethSvc := newMockEthClient(t, 10)
 		idx.ethClient = client
 		ethSvc.failBlock = true // causes pending block lookup to fail
 
