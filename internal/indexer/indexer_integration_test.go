@@ -4,7 +4,6 @@ package indexer
 
 import (
 	"context"
-	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
+	"github.com/a-thomas-22/blob-indexer-api/internal/testdb"
 )
 
 // These tests exercise the multi-row INSERT/UPDATE statements the indexer
@@ -24,14 +24,12 @@ import (
 
 const integrationChainID = 424242
 
-// newIntegrationIndexer resets the TEST_DB_URL database, applies migrations,
-// registers a test network, and returns an Indexer wired to the real DB.
+// newIntegrationIndexer resets this package's dedicated test database
+// (derived from TEST_DB_URL), applies migrations, registers a test network,
+// and returns an Indexer wired to the real DB.
 func newIntegrationIndexer(t *testing.T) (*Indexer, *db.DB) {
 	t.Helper()
-	url := os.Getenv("TEST_DB_URL")
-	if url == "" {
-		t.Skip("TEST_DB_URL not set; skipping integration test")
-	}
+	url := testdb.URL(t, "indexer")
 
 	raw, err := sqlx.Connect("postgres", url)
 	if err != nil {

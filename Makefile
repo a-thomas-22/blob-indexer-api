@@ -54,11 +54,11 @@ test-race: swagger
 	$(GOTEST) -v -race ./...
 
 # Integration tests against a real Postgres. Set TEST_DB_URL to a throwaway
-# database; the tests reset its public schema. Tests are gated by the
-# `integration` build tag so they don't run by default. -p 1 serializes the
-# packages because each one resets the shared schema.
+# database; each package resets the public schema of its own derived database
+# (internal/testdb), so package binaries can run in parallel. Tests are gated
+# by the `integration` build tag so they don't run by default.
 test-integration: swagger
-	$(GOTEST) -tags integration -count=1 -p 1 -v ./internal/db/... ./internal/indexer/... ./internal/api/...
+	$(GOTEST) -tags integration -count=1 -v ./internal/db/... ./internal/indexer/... ./internal/api/...
 
 lint: swagger
 	golangci-lint run ./...
