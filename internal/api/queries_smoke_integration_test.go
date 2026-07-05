@@ -321,7 +321,8 @@ func TestUserWindowQueriesAgainstRealPostgres(t *testing.T) {
 
 // TestWSPollerQueriesAgainstRealPostgres validates the WebSocket poller's and
 // snapshot builder's query text against a real schema, including type
-// unification of block_number scans into uint64 slices.
+// unification of block_number scans into uint64 slices. The /block/{number}
+// endpoint's single-block lookup shares the seeded data.
 func TestWSPollerQueriesAgainstRealPostgres(t *testing.T) {
 	url := testdb.URL(t, "api")
 	sqlxDB, err := sqlx.Connect("postgres", url)
@@ -387,6 +388,19 @@ func TestWSPollerQueriesAgainstRealPostgres(t *testing.T) {
 		}
 		if len(numbers) != 2 || numbers[0] != 100 || numbers[1] != 101 {
 			t.Fatalf("got %v, want [100 101]", numbers)
+		}
+	})
+
+	t.Run("queryBlockMetricsForBlock", func(t *testing.T) {
+		var metric models.BlockMetrics
+		if err := sqlxDB.GetContext(ctx, &metric, queryBlockMetricsForBlock, 1, int64(100)); err != nil {
+			t.Fatalf("queryBlockMetricsForBlock: %v", err)
+		}
+		if metric.BlockNumber != 100 || metric.BlobCount != 1 {
+			t.Fatalf("unexpected metric: %+v", metric)
+		}
+		if err := sqlxDB.GetContext(ctx, &metric, queryBlockMetricsForBlock, 1, int64(999)); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for unindexed block, got %v", err)
 		}
 	})
 
