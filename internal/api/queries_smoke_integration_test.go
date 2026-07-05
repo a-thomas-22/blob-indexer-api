@@ -54,8 +54,8 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		INSERT INTO blobs (
 			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, confirmed, max_fee_per_blob_gas, blob_gas_used
-		) VALUES (1, 100, 0, '0xconfirmed', '0xfrom', 'Rollup', 131072, 10, 2, 100, $1, true, 12, 131072)
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES (1, 100, 0, '0xconfirmed', '0xfrom', 'Rollup', 131072, 10, 2, 100, $1, 12, 131072)
 	`, now); err != nil {
 		t.Fatalf("seed confirmed blob: %v", err)
 	}

@@ -151,7 +151,7 @@ func TestIntegrationInsertBlockDataMultiRow(t *testing.T) {
 	}
 }
 
-func TestIntegrationInsertPendingBlobsMultiRow(t *testing.T) {
+func TestIntegrationInsertPendingBlobsUpsert(t *testing.T) {
 	idx, database := newIntegrationIndexer(t)
 	ctx := context.Background()
 
