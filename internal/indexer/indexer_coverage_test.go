@@ -2246,22 +2246,43 @@ func expectHandleReorgThroughDeletes(t *testing.T, idx *Indexer, mock sqlmock.Sq
 // A reorg that lands while a prior invalidated range is still unrecovered
 // (crash loop, back-to-back reorgs) must widen the persisted marker, never
 // narrow it — narrowing would let the completion check clear the marker while
-// part of the older range is still missing.
+// part of the older range is still missing. The live signal must cover the
+// merged range whenever the prior marker may never have been queued in this
+// process, and only the fresh range once it provably was.
 func TestHandleReorg_MergesPersistedRecoveryMarker(t *testing.T) {
 	tests := []struct {
-		name        string
-		priorRows   [][2]string
-		wantFrom    string
-		wantThrough string
+		name string
+		// alreadySignaled marks the prior marker's range as queued in this
+		// process, which narrows the live signal to the fresh range.
+		alreadySignaled   bool
+		priorRows         [][2]string
+		wantFrom          string
+		wantThrough       string
+		wantSignalFrom    uint64
+		wantSignalThrough uint64
 	}{
 		{
-			name: "prior wider range widens the merged marker",
+			name: "prior wider range widens the merged marker and the live signal",
 			priorRows: [][2]string{
 				{models.MetadataReorgRewindFrom, "2"},
 				{models.MetadataReorgInvalidatedThrough, "9"},
 			},
-			wantFrom:    "2",
-			wantThrough: "9",
+			wantFrom:          "2",
+			wantThrough:       "9",
+			wantSignalFrom:    2,
+			wantSignalThrough: 9,
+		},
+		{
+			name:            "already-signaled prior range keeps the live signal fresh",
+			alreadySignaled: true,
+			priorRows: [][2]string{
+				{models.MetadataReorgRewindFrom, "2"},
+				{models.MetadataReorgInvalidatedThrough, "9"},
+			},
+			wantFrom:          "2",
+			wantThrough:       "9",
+			wantSignalFrom:    5,
+			wantSignalThrough: 7,
 		},
 		{
 			name: "prior narrower range is absorbed",
@@ -2269,8 +2290,10 @@ func TestHandleReorg_MergesPersistedRecoveryMarker(t *testing.T) {
 				{models.MetadataReorgRewindFrom, "6"},
 				{models.MetadataReorgInvalidatedThrough, "6"},
 			},
-			wantFrom:    "5",
-			wantThrough: "7",
+			wantFrom:          "5",
+			wantThrough:       "7",
+			wantSignalFrom:    5,
+			wantSignalThrough: 7,
 		},
 		{
 			name: "corrupt prior values are overwritten",
@@ -2278,8 +2301,10 @@ func TestHandleReorg_MergesPersistedRecoveryMarker(t *testing.T) {
 				{models.MetadataReorgRewindFrom, "not-a-number"},
 				{models.MetadataReorgInvalidatedThrough, "also-bad"},
 			},
-			wantFrom:    "5",
-			wantThrough: "7",
+			wantFrom:          "5",
+			wantThrough:       "7",
+			wantSignalFrom:    5,
+			wantSignalThrough: 7,
 		},
 	}
 
@@ -2289,6 +2314,9 @@ func TestHandleReorg_MergesPersistedRecoveryMarker(t *testing.T) {
 			idxDB, mock := newMockIndexerDB(t)
 			idx.db = idxDB
 			idx.ethClient, _ = newMockEthClient(t, 10)
+			if tt.alreadySignaled {
+				atomic.StoreUint32(&idx.reorgRecoverySignaled, 1)
+			}
 
 			expectHandleReorgThroughDeletes(t, idx, mock)
 			priorMarker := sqlmock.NewRows([]string{"key", "value"})
@@ -2309,10 +2337,8 @@ func TestHandleReorg_MergesPersistedRecoveryMarker(t *testing.T) {
 			if err := idx.handleReorg(5); !errors.Is(err, errReorgDetected) {
 				t.Fatalf("expected errReorgDetected, got %v", err)
 			}
-			// The in-memory signal carries only the fresh range; the persisted
-			// merge exists for crash recovery.
-			if from, through := idx.consumeReorgReset(); from != 5 || through != 7 {
-				t.Fatalf("expected live signal [5 7], got [%d %d]", from, through)
+			if from, through := idx.consumeReorgReset(); from != tt.wantSignalFrom || through != tt.wantSignalThrough {
+				t.Fatalf("expected live signal [%d %d], got [%d %d]", tt.wantSignalFrom, tt.wantSignalThrough, from, through)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatalf("unmet sqlmock expectations: %v", err)
@@ -2502,6 +2528,31 @@ func TestCompleteReorgRecovery(t *testing.T) {
 				AddRow(models.MetadataReorgRewindFrom, "5").
 				AddRow(models.MetadataReorgInvalidatedThrough, "9"))
 	}
+	// expectForbiddenDelete registers the marker DELETE as the final
+	// expectation so requireForbiddenDelete can prove it never ran.
+	expectForbiddenDelete := func(idx *Indexer, mock sqlmock.Sqlmock) {
+		mock.ExpectExec("DELETE FROM indexer_metadata").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+			WillReturnResult(sqlmock.NewResult(0, 2))
+	}
+	// requireForbiddenDelete asserts the DELETE registered as the final
+	// expectation was NOT consumed while every earlier expectation was.
+	// sqlmock cannot forbid a statement outright and the code under test
+	// swallows unexpected-call errors, so the guard is inverted: if the
+	// forbidden delete ran, all expectations are met and the test fails.
+	requireForbiddenDelete := func(t *testing.T, mock sqlmock.Sqlmock) {
+		t.Helper()
+		err := mock.ExpectationsWereMet()
+		if err == nil {
+			t.Fatal("forbidden DELETE FROM indexer_metadata was executed")
+		}
+		if !strings.Contains(err.Error(), "DELETE FROM indexer_metadata") {
+			t.Fatalf("expected the forbidden delete to be the unmet expectation, got: %v", err)
+		}
+		if strings.Contains(err.Error(), "SELECT key, value") || strings.Contains(err.Error(), "WITH indexed") {
+			t.Fatalf("an expectation before the forbidden delete was not consumed: %v", err)
+		}
+	}
 
 	t.Run("clears marker once range is covered", func(t *testing.T) {
 		idx := newTestIndexer()
@@ -2523,21 +2574,46 @@ func TestCompleteReorgRecovery(t *testing.T) {
 		}
 	})
 
-	t.Run("keeps marker while a gap remains", func(t *testing.T) {
+	t.Run("keeps marker and re-raises recovery once while a gap remains", func(t *testing.T) {
 		idx := newTestIndexer()
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
 
+		// First tick: no recovery signal was ever raised in this process
+		// (startup seeding lost it), so the scanner must re-raise the range —
+		// without this, the marker would stay inert until the next restart.
 		expectMarker(idx, mock)
 		mock.ExpectQuery("WITH indexed AS").
 			WithArgs(idx.network.ChainID, uint64(5), uint64(9)).
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(7)))
+		expectForbiddenDelete(idx, mock)
 
 		idx.maybeCompleteReorgRecovery()
 
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Fatalf("marker must not be deleted while block 7 is missing: %v", err)
+		if atomic.LoadUint32(&idx.reorgDetected) != 1 {
+			t.Fatal("expected the gap scanner to re-raise recovery for a never-signaled marker")
 		}
+		if from, through := idx.consumeReorgReset(); from != 5 || through != 9 {
+			t.Fatalf("expected re-raised range [5 9], got [%d %d]", from, through)
+		}
+		requireForbiddenDelete(t, mock)
+
+		// Second tick: the range is queued now — still incomplete, so the
+		// marker stays, but the scanner must not re-queue the range again.
+		idxDB2, mock2 := newMockIndexerDB(t)
+		idx.db = idxDB2
+		expectMarker(idx, mock2)
+		mock2.ExpectQuery("WITH indexed AS").
+			WithArgs(idx.network.ChainID, uint64(5), uint64(9)).
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(7)))
+		expectForbiddenDelete(idx, mock2)
+
+		idx.maybeCompleteReorgRecovery()
+
+		if atomic.LoadUint32(&idx.reorgDetected) != 0 {
+			t.Fatal("expected no second re-raise for an already-signaled marker")
+		}
+		requireForbiddenDelete(t, mock2)
 	})
 
 	t.Run("epoch change between scan and delete aborts the clear", func(t *testing.T) {
@@ -2551,12 +2627,11 @@ func TestCompleteReorgRecovery(t *testing.T) {
 		mock.ExpectQuery("WITH indexed AS").
 			WithArgs(idx.network.ChainID, uint64(5), uint64(9)).
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(10)))
+		expectForbiddenDelete(idx, mock)
 
 		idx.completeReorgRecoveryIfCovered(0)
 
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Fatalf("marker must not be deleted across an epoch change: %v", err)
-		}
+		requireForbiddenDelete(t, mock)
 	})
 
 	t.Run("no marker is a no-op", func(t *testing.T) {
@@ -2567,12 +2642,11 @@ func TestCompleteReorgRecovery(t *testing.T) {
 		mock.ExpectQuery("SELECT key, value").
 			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
 			WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
+		expectForbiddenDelete(idx, mock)
 
 		idx.maybeCompleteReorgRecovery()
 
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Fatalf("unmet sqlmock expectations: %v", err)
-		}
+		requireForbiddenDelete(t, mock)
 	})
 
 	t.Run("nil database is a no-op", func(t *testing.T) {
@@ -2590,12 +2664,11 @@ func TestCompleteReorgRecovery(t *testing.T) {
 		mock.ExpectQuery("SELECT key, value").
 			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
 			WillReturnError(errors.New("marker read failed"))
+		expectForbiddenDelete(idx, mock)
 
 		idx.maybeCompleteReorgRecovery()
 
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Fatalf("unmet sqlmock expectations: %v", err)
-		}
+		requireForbiddenDelete(t, mock)
 	})
 
 	t.Run("coverage scan error keeps marker", func(t *testing.T) {
@@ -2607,12 +2680,11 @@ func TestCompleteReorgRecovery(t *testing.T) {
 		mock.ExpectQuery("WITH indexed AS").
 			WithArgs(idx.network.ChainID, uint64(5), uint64(9)).
 			WillReturnError(errors.New("coverage scan failed"))
+		expectForbiddenDelete(idx, mock)
 
 		idx.maybeCompleteReorgRecovery()
 
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Fatalf("unmet sqlmock expectations: %v", err)
-		}
+		requireForbiddenDelete(t, mock)
 	})
 
 	t.Run("delete error is non-fatal", func(t *testing.T) {
@@ -2686,8 +2758,11 @@ func TestRunGapScanner_CompletesReorgRecovery(t *testing.T) {
 // it would never be re-indexed.
 func TestStart_LatestStartRecoversPersistedReorgMarker(t *testing.T) {
 	idx := newTestIndexer()
-	idx.pollingInterval = 500 * time.Millisecond
-	idx.mempoolPollingInterval = 500 * time.Millisecond
+	// Long intervals keep the walker's first tick far beyond the test's
+	// lifetime: runBlockIndexer consumes the reorg signal on its tick, and the
+	// assertions below must read it first.
+	idx.pollingInterval = 10 * time.Minute
+	idx.mempoolPollingInterval = 10 * time.Minute
 	idx.network.StartBlock = "LATEST"
 	idx.startupGapScanBlocks = 1000
 

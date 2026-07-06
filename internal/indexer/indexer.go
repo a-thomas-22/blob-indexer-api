@@ -205,6 +205,14 @@ type Indexer struct {
 	reorgRangeMu            sync.Mutex
 	reorgRewindFrom         uint64 // first invalidated block (fork point + 1)
 	reorgInvalidatedThrough uint64 // highest block deleted by the reorg
+	// reorgRecoverySignaled records whether any reorg recovery signal has been
+	// raised in this process (atomic; 1 = signaled). It distinguishes "the
+	// persisted marker's range is already queued here" from "the marker was
+	// only recovered from disk and its signal was lost": startup seeding is
+	// best-effort, so after a failed marker read the full marker range must be
+	// (re-)signaled — by the next reorg or the gap scanner — or it would stay
+	// inert until the next restart.
+	reorgRecoverySignaled uint32
 	// reorgEpoch counts destructive block-range cleanups (reorg rewinds,
 	// reindex deletes). processBlock samples it before fetching a block via
 	// RPC and insertBlockData rejects the insert if it changed: a worker
@@ -1715,7 +1723,8 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 	// LATEST-start network resumes at the current tip, skipping it forever.
 	// Failure aborts the whole transaction — deleting without the marker
 	// recreates exactly that hole.
-	if err := i.mergeReorgRecoveryMarker(tx, forkBlock+1, invalidatedThrough); err != nil {
+	markerFrom, markerThrough, err := i.mergeReorgRecoveryMarker(tx, forkBlock+1, invalidatedThrough)
+	if err != nil {
 		return err
 	}
 
@@ -1741,8 +1750,18 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 	// otherwise land it as soon as it acquires the lock.
 	atomic.AddUint64(&i.reorgEpoch, 1)
 
-	// Signal the main indexer loop to re-index the invalidated range
-	i.signalReorgReset(forkBlock+1, invalidatedThrough)
+	// Signal the main indexer loop to re-index the invalidated range. If no
+	// recovery signal has been raised in this process yet, a prior marker's
+	// range may never have been queued (startup seeding is best-effort), so
+	// widen the signal to the merged marker. Otherwise the prior range is
+	// already queued here and the fresh range suffices — blindly re-signaling
+	// a large mostly-recovered marker would restart a long re-walk from
+	// scratch on every subsequent tip reorg.
+	signalFrom, signalThrough := forkBlock+1, invalidatedThrough
+	if atomic.CompareAndSwapUint32(&i.reorgRecoverySignaled, 0, 1) {
+		signalFrom, signalThrough = markerFrom, markerThrough
+	}
+	i.signalReorgReset(signalFrom, signalThrough)
 
 	return fmt.Errorf("reorg handled, rewound from %d to %d: %w", fromBlock, forkBlock, errReorgDetected)
 }
@@ -1784,9 +1803,10 @@ func (i *Indexer) consumeReorgReset() (from, through uint64) {
 // mergeReorgRecoveryMarker upserts the persisted reorg recovery marker inside
 // the reorg deletion transaction, widening any existing unrecovered range so
 // back-to-back reorgs (or a crash loop) never narrow it. Unparseable existing
-// values cannot widen anything and are overwritten.
-func (i *Indexer) mergeReorgRecoveryMarker(tx *sqlx.Tx, rewindFrom, invalidatedThrough uint64) error {
-	markerFrom, markerThrough := rewindFrom, invalidatedThrough
+// values cannot widen anything and are overwritten. Returns the merged range
+// that was persisted.
+func (i *Indexer) mergeReorgRecoveryMarker(tx *sqlx.Tx, rewindFrom, invalidatedThrough uint64) (markerFrom, markerThrough uint64, err error) {
+	markerFrom, markerThrough = rewindFrom, invalidatedThrough
 
 	var rows []indexerMetadataRow
 	if err := tx.SelectContext(i.ctx, &rows, `
@@ -1795,7 +1815,7 @@ func (i *Indexer) mergeReorgRecoveryMarker(tx *sqlx.Tx, rewindFrom, invalidatedT
 		WHERE chain_id = $1
 			AND key IN ($2, $3)
 	`, i.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough); err != nil {
-		return fmt.Errorf("failed to read reorg recovery marker: %w", err)
+		return 0, 0, fmt.Errorf("failed to read reorg recovery marker: %w", err)
 	}
 	for _, row := range rows {
 		prev, parseErr := strconv.ParseUint(row.Value, 10, 64)
@@ -1803,7 +1823,8 @@ func (i *Indexer) mergeReorgRecoveryMarker(tx *sqlx.Tx, rewindFrom, invalidatedT
 			logger.Error("Overwriting unparseable reorg recovery marker value",
 				zap.String("network", i.network.Name),
 				zap.String("metadata_key", row.Key),
-				zap.String("metadata_value", row.Value))
+				zap.String("metadata_value", row.Value),
+				zap.Error(parseErr))
 			continue
 		}
 		switch row.Key {
@@ -1825,9 +1846,9 @@ func (i *Indexer) mergeReorgRecoveryMarker(tx *sqlx.Tx, rewindFrom, invalidatedT
 	`, i.network.ChainID,
 		models.MetadataReorgRewindFrom, strconv.FormatUint(markerFrom, 10),
 		models.MetadataReorgInvalidatedThrough, strconv.FormatUint(markerThrough, 10)); err != nil {
-		return fmt.Errorf("failed to persist reorg recovery marker: %w", err)
+		return 0, 0, fmt.Errorf("failed to persist reorg recovery marker: %w", err)
 	}
-	return nil
+	return markerFrom, markerThrough, nil
 }
 
 // getReorgRecoveryMarker reads the persisted reorg recovery marker. ok is
@@ -1904,6 +1925,7 @@ func (i *Indexer) seedReorgRecoveryFromMarker() {
 		zap.Uint64("rewind_from", from),
 		zap.Uint64("invalidated_through", through))
 	i.signalReorgReset(from, through)
+	atomic.StoreUint32(&i.reorgRecoverySignaled, 1)
 }
 
 // maybeCompleteReorgRecovery clears the persisted reorg recovery marker once
@@ -1949,6 +1971,20 @@ func (i *Indexer) completeReorgRecoveryIfCovered(fetchEpoch uint64) {
 		return
 	}
 	if firstGap <= through {
+		// If no recovery signal was ever raised in this process, the marker
+		// range was never queued — startup seeding is best-effort and can lose
+		// it to a transient read error, which would otherwise leave the marker
+		// inert until the next restart. Re-raise it exactly once.
+		if atomic.CompareAndSwapUint32(&i.reorgRecoverySignaled, 0, 1) {
+			logger.Warn("Re-raising recovery for a reorg marker that was never signaled in this process",
+				zap.String("event", "reorg_marker_recovery_reraised"),
+				zap.String("network", i.network.Name),
+				zap.Int("chain_id", i.network.ChainID),
+				zap.Uint64("rewind_from", from),
+				zap.Uint64("invalidated_through", through))
+			i.signalReorgReset(from, through)
+			return
+		}
 		logger.Debug("Reorg-invalidated range not fully re-indexed yet, keeping marker",
 			zap.String("network", i.network.Name),
 			zap.Uint64("rewind_from", from),

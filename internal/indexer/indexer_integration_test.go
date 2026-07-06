@@ -490,6 +490,13 @@ func TestIntegrationReorgRecoveryMarkerLifecycle(t *testing.T) {
 		t.Fatalf("expected errReorgDetected from handleReorg, got %v", err)
 	}
 
+	// No recovery signal was raised in this process before the reorg, so the
+	// prior marker's range may never have been queued: the live signal must
+	// cover the merged range, not just the fresh [5, 8].
+	if from, through := idx.consumeReorgReset(); from != 5 || through != 9 {
+		t.Fatalf("expected merged live signal [5 9], got [%d %d]", from, through)
+	}
+
 	var surviving []int64
 	if err := database.SelectContext(ctx, &surviving,
 		"SELECT block_number FROM indexed_blocks WHERE chain_id = $1 ORDER BY block_number", integrationChainID); err != nil {
