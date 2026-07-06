@@ -379,6 +379,12 @@ func (i *Indexer) Start() error {
 		i.seedStartupGapRecovery(lastBlock)
 	}
 
+	// A reorg persisted its invalidated range but the process died before the
+	// re-queued blocks committed. The startup gap scan above cannot see this
+	// hole: it only looks below the watermark, and the reorg rewound the
+	// watermark to the fork point — the deleted range sits entirely above it.
+	i.seedReorgRecoveryFromMarker()
+
 	// Pending rows live in mempool_blobs; purge any legacy block_number < 0
 	// sentinel rows an old binary may have written into blobs between the
 	// mempool_blobs migration and this binary taking over. One-shot and
@@ -1703,6 +1709,16 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 		return fmt.Errorf("failed to delete reorged indexed blocks: %w", err)
 	}
 
+	// Persist the invalidated range in the same transaction as the deletions.
+	// The in-memory reorgDetected signal dies with the process: a crash before
+	// the re-queued blocks commit would otherwise lose the range, and a
+	// LATEST-start network resumes at the current tip, skipping it forever.
+	// Failure aborts the whole transaction — deleting without the marker
+	// recreates exactly that hole.
+	if err := i.mergeReorgRecoveryMarker(tx, forkBlock+1, invalidatedThrough); err != nil {
+		return err
+	}
+
 	// Reset lastIndexedBlock to the fork point
 	atomic.StoreUint64(&i.lastIndexedBlock, forkBlock)
 	i.mu.Lock()
@@ -1763,6 +1779,210 @@ func (i *Indexer) consumeReorgReset() (from, through uint64) {
 	through = i.reorgInvalidatedThrough
 	atomic.StoreUint32(&i.reorgDetected, 0)
 	return from, through
+}
+
+// mergeReorgRecoveryMarker upserts the persisted reorg recovery marker inside
+// the reorg deletion transaction, widening any existing unrecovered range so
+// back-to-back reorgs (or a crash loop) never narrow it. Unparseable existing
+// values cannot widen anything and are overwritten.
+func (i *Indexer) mergeReorgRecoveryMarker(tx *sqlx.Tx, rewindFrom, invalidatedThrough uint64) error {
+	markerFrom, markerThrough := rewindFrom, invalidatedThrough
+
+	var rows []indexerMetadataRow
+	if err := tx.SelectContext(i.ctx, &rows, `
+		SELECT key, value
+		FROM indexer_metadata
+		WHERE chain_id = $1
+			AND key IN ($2, $3)
+	`, i.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough); err != nil {
+		return fmt.Errorf("failed to read reorg recovery marker: %w", err)
+	}
+	for _, row := range rows {
+		prev, parseErr := strconv.ParseUint(row.Value, 10, 64)
+		if parseErr != nil {
+			logger.Error("Overwriting unparseable reorg recovery marker value",
+				zap.String("network", i.network.Name),
+				zap.String("metadata_key", row.Key),
+				zap.String("metadata_value", row.Value))
+			continue
+		}
+		switch row.Key {
+		case models.MetadataReorgRewindFrom:
+			if prev < markerFrom {
+				markerFrom = prev
+			}
+		case models.MetadataReorgInvalidatedThrough:
+			if prev > markerThrough {
+				markerThrough = prev
+			}
+		}
+	}
+
+	if _, err := tx.ExecContext(i.ctx, `
+		INSERT INTO indexer_metadata (chain_id, key, value)
+		VALUES ($1, $2, $3), ($1, $4, $5)
+		ON CONFLICT (chain_id, key) DO UPDATE SET value = EXCLUDED.value
+	`, i.network.ChainID,
+		models.MetadataReorgRewindFrom, strconv.FormatUint(markerFrom, 10),
+		models.MetadataReorgInvalidatedThrough, strconv.FormatUint(markerThrough, 10)); err != nil {
+		return fmt.Errorf("failed to persist reorg recovery marker: %w", err)
+	}
+	return nil
+}
+
+// getReorgRecoveryMarker reads the persisted reorg recovery marker. ok is
+// false when no marker exists; a half-written, unparseable, or inverted
+// marker (impossible from mergeReorgRecoveryMarker, so operator damage) is
+// returned as an error so callers surface it instead of acting on it.
+func (i *Indexer) getReorgRecoveryMarker() (from, through uint64, ok bool, err error) {
+	var rows []indexerMetadataRow
+	query := `
+		SELECT key, value
+		FROM indexer_metadata
+		WHERE chain_id = $1
+			AND key IN ($2, $3)
+	`
+	if err := i.db.SelectContext(i.ctx, &rows, query,
+		i.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough); err != nil {
+		return 0, 0, false, fmt.Errorf("failed to read reorg recovery marker: %w", err)
+	}
+	if len(rows) == 0 {
+		return 0, 0, false, nil
+	}
+
+	var haveFrom, haveThrough bool
+	for _, row := range rows {
+		value, parseErr := strconv.ParseUint(row.Value, 10, 64)
+		if parseErr != nil {
+			return 0, 0, false, fmt.Errorf("failed to parse reorg recovery marker %s=%q: %w", row.Key, row.Value, parseErr)
+		}
+		switch row.Key {
+		case models.MetadataReorgRewindFrom:
+			from = value
+			haveFrom = true
+		case models.MetadataReorgInvalidatedThrough:
+			through = value
+			haveThrough = true
+		}
+	}
+	if !haveFrom || !haveThrough {
+		return 0, 0, false, fmt.Errorf("reorg recovery marker is half-written: have rewind_from=%t invalidated_through=%t", haveFrom, haveThrough)
+	}
+	if from > through {
+		return 0, 0, false, fmt.Errorf("reorg recovery marker range is inverted: [%d %d]", from, through)
+	}
+	return from, through, true, nil
+}
+
+// seedReorgRecoveryFromMarker re-raises the reorg signal for a persisted
+// invalidated range whose re-indexing a crash interrupted. The main loop then
+// re-walks it exactly like a live reorg; without this, a LATEST-start network
+// resumes at the current tip and the rewound range stays lost forever.
+// Best-effort like seedStartupGapRecovery: a broken marker must not block
+// startup, and it is left in place for operator inspection.
+func (i *Indexer) seedReorgRecoveryFromMarker() {
+	if i.db == nil {
+		return
+	}
+
+	from, through, ok, err := i.getReorgRecoveryMarker()
+	if err != nil {
+		logger.Error("Failed to read reorg recovery marker at startup",
+			zap.String("network", i.network.Name),
+			zap.Int("chain_id", i.network.ChainID),
+			zap.Error(err))
+		return
+	}
+	if !ok {
+		return
+	}
+
+	logger.Warn("Recovering reorg-invalidated range persisted before a crash",
+		zap.String("event", "reorg_marker_recovery"),
+		zap.String("network", i.network.Name),
+		zap.Int("chain_id", i.network.ChainID),
+		zap.Uint64("rewind_from", from),
+		zap.Uint64("invalidated_through", through))
+	i.signalReorgReset(from, through)
+}
+
+// maybeCompleteReorgRecovery clears the persisted reorg recovery marker once
+// indexed_blocks provably covers the invalidated range again. Runs on the gap
+// scanner tick; a marker is present only in the window between a reorg and
+// the re-indexing of its range, so the common case is one cheap metadata read.
+func (i *Indexer) maybeCompleteReorgRecovery() {
+	i.completeReorgRecoveryIfCovered(atomic.LoadUint64(&i.reorgEpoch))
+}
+
+// completeReorgRecoveryIfCovered verifies coverage of the marker range and
+// deletes the marker. fetchEpoch is the reorgEpoch sampled before the marker
+// was read: a destructive cleanup (reorg rewind, reindex delete) committing
+// between the coverage scan and the delete re-opens holes the scan never saw,
+// so the delete is fenced the same way insertBlockData fences stale fetches.
+// The coverage scan itself runs outside dbWriteMu — it can span millions of
+// rows and must not stall block inserts. Best-effort: on any error the marker
+// stays put and the next gap-scan tick retries.
+func (i *Indexer) completeReorgRecoveryIfCovered(fetchEpoch uint64) {
+	if i.db == nil {
+		return
+	}
+
+	from, through, ok, err := i.getReorgRecoveryMarker()
+	if err != nil {
+		logger.Error("Failed to read reorg recovery marker",
+			zap.String("network", i.network.Name),
+			zap.Int("chain_id", i.network.ChainID),
+			zap.Error(err))
+		return
+	}
+	if !ok {
+		return
+	}
+
+	firstGap, err := i.db.GetFirstUnindexedBlock(i.ctx, i.network.ChainID, from, through)
+	if err != nil {
+		logger.Error("Failed to verify reorg recovery coverage, keeping marker",
+			zap.String("network", i.network.Name),
+			zap.Uint64("rewind_from", from),
+			zap.Uint64("invalidated_through", through),
+			zap.Error(err))
+		return
+	}
+	if firstGap <= through {
+		logger.Debug("Reorg-invalidated range not fully re-indexed yet, keeping marker",
+			zap.String("network", i.network.Name),
+			zap.Uint64("rewind_from", from),
+			zap.Uint64("invalidated_through", through),
+			zap.Uint64("first_unindexed_block", firstGap))
+		return
+	}
+
+	unlockWrites := i.lockDBWrites()
+	defer unlockWrites()
+
+	if atomic.LoadUint64(&i.reorgEpoch) != fetchEpoch {
+		// A cleanup committed while the coverage scan ran; its handler already
+		// re-persisted (and possibly widened) the marker. Re-verify next tick.
+		return
+	}
+
+	if _, err := i.db.ExecContext(i.ctx, `
+		DELETE FROM indexer_metadata
+		WHERE chain_id = $1
+			AND key IN ($2, $3)
+	`, i.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough); err != nil {
+		logger.Error("Failed to clear reorg recovery marker",
+			zap.String("network", i.network.Name),
+			zap.Error(err))
+		return
+	}
+
+	logger.Info("Reorg-invalidated range fully re-indexed, cleared recovery marker",
+		zap.String("event", "reorg_marker_recovered"),
+		zap.String("network", i.network.Name),
+		zap.Int("chain_id", i.network.ChainID),
+		zap.Uint64("rewind_from", from),
+		zap.Uint64("invalidated_through", through))
 }
 
 // blobInsertColumns is the number of columns written per row when inserting
@@ -2553,6 +2773,7 @@ func (i *Indexer) runGapScanner() {
 			return
 		case <-ticker.C:
 			i.retryFailedBlocks()
+			i.maybeCompleteReorgRecovery()
 		}
 	}
 }
