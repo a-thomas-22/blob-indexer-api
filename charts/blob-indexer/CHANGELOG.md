@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.8](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.7...blob-indexer-chart-v0.6.8) (2026-07-06)
+
+
+### Bug Fixes
+
+* **helm:** render all indexer config keys in the ConfigMap ([#291](https://github.com/a-thomas-22/blob-indexer-api/issues/291)) ([888499a](https://github.com/a-thomas-22/blob-indexer-api/commit/888499a345dd23f87526c0a3f17ab4acfb7cc39c))
+* **helm:** update chart app version to 0.11.0 ([0de26c6](https://github.com/a-thomas-22/blob-indexer-api/commit/0de26c607d76aea8253d3f7ed3ca78fb604c5102))
+
 ## [0.6.7](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.6...blob-indexer-chart-v0.6.7) (2026-07-05)
 
 
