@@ -203,6 +203,25 @@ appConfig:
     batch_size: 500
     polling_interval: "15s"
     mempool_polling_interval: "30s"
+    # Max age for pending blobs before the mempool cleanup removes them.
+    mempool_ttl: "30m"
+    # How often the stale pending-blob cleanup runs.
+    mempool_cleanup_interval: "5m"
+    # Parallel block-processing workers per network.
+    worker_count: 4
+    max_block_retries: 3
+    # How often the indexer scans for gaps in indexed blocks.
+    gap_scan_interval: "5m"
+    # Deepest chain reorg the indexer will unwind.
+    max_reorg_depth: 64
+    # Blocks below the persisted last_indexed_block watermark scanned for gaps
+    # at startup (parallel workers commit out of order, so a crash can leave
+    # unindexed blocks below the watermark). Zero or negative disables the
+    # scan.
+    startup_gap_scan_blocks: 10000
+    # Proactive RPC requests-per-second cap per network; 0 = no client-side
+    # limiting.
+    rpc_rate_limit: 0
   attribution:
     blob_list_enabled: true
     blob_list_base_url: "https://raw.githubusercontent.com/ahkc4/blob-list/main/artifacts/by-chain"

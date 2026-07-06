@@ -2,6 +2,8 @@ package models
 
 import (
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // PendingBlockNumber is the internal sentinel used in Blob.BlockNumber for
@@ -37,6 +39,11 @@ type Blob struct {
 	MaxFeePerBlobGas  *string   `db:"max_fee_per_blob_gas"` // Nullable for pre-migration rows
 	BlobGasUsed       *int64    `db:"blob_gas_used"`        // Nullable for pre-migration rows
 	VersionedHash     *string   `db:"versioned_hash"`       // Nullable for pre-migration rows
+	// VersionedHashes is the transaction's full ordered list of EIP-4844
+	// versioned blob hashes. Not a stored column: the API's blob projections
+	// compute it from the sibling rows' versioned_hash values, so it is empty
+	// for rows indexed before the versioned-hash migration.
+	VersionedHashes pq.StringArray `db:"versioned_hashes"`
 }
 
 // BlobUser represents a known blob transaction sender

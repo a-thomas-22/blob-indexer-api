@@ -56,6 +56,16 @@ type BlobResponse struct {
 	MaxCostWei           *string   `json:"max_cost_wei,omitempty"`
 	HeadroomWei          *string   `json:"fee_cap_headroom_wei,omitempty"`
 	HeadroomPercent      *string   `json:"fee_cap_headroom_percent,omitempty"`
+	// VersionedHash is this blob's own EIP-4844 versioned hash
+	// (0x01-prefixed). blob_index cannot locate the blob within
+	// versioned_hashes — for confirmed rows it is the block-wide ordinal —
+	// so this field is what identifies the row's blob. Omitted for rows
+	// indexed before versioned hashes were stored.
+	VersionedHash *string `json:"versioned_hash,omitempty" example:"0x01a1f8730e4064f7dd90279b721b25e28c07fc3e16d5fd4a26e6d3d5e9e0dbeb"`
+	// VersionedHashes is the carrying transaction's full ordered list of
+	// EIP-4844 versioned blob hashes (0x01-prefixed). Omitted for rows
+	// indexed before versioned hashes were stored.
+	VersionedHashes []string `json:"versioned_hashes,omitempty" example:"0x01a1f8730e4064f7dd90279b721b25e28c07fc3e16d5fd4a26e6d3d5e9e0dbeb"`
 }
 
 // BlockPricingResponse represents block-level blob pricing data
@@ -219,6 +229,8 @@ func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
 		MaxFeePerBlobGas:      blob.MaxFeePerBlobGas,
 		MaxFeePerBlobGasGwei:  formatOptionalWeiAsGwei(blob.MaxFeePerBlobGas),
 		BlobGasUsed:           blob.BlobGasUsed,
+		VersionedHash:         blob.VersionedHash,
+		VersionedHashes:       []string(blob.VersionedHashes),
 	}
 	response.RealizedCostWei, response.MaxCostWei, response.HeadroomWei, response.HeadroomPercent = deriveBlobCostFields(blob)
 	return response
@@ -720,6 +732,78 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 
 	// A confirmed blob at a tx hash is immutable, so it is safely cacheable.
 	// Pending rows stay uncached since they change as the tx confirms/drops.
+	if blob.Confirmed {
+		setCacheControl(w, confirmedBlobCacheTTL, confirmedBlobEdgeTTL)
+	}
+	a.respondSuccess(w, toBlobResponse(blob, network.Name))
+}
+
+// GetBlobByVersionedHash godoc
+// @Summary Get blob by EIP-4844 versioned hash
+// @Description Retrieve the blob transaction carrying the given versioned blob hash (0x01-prefixed, 32 bytes). The returned blob is the matching blob row itself: versioned_hash echoes the matched hash and versioned_hashes lists the carrying transaction's full hash list (blob_index keeps its usual semantics — block-wide ordinal for confirmed rows, transaction-local for pending ones). Confirmed inclusions win over pending ones; when identical blob content was posted more than once (same content means the same versioned hash), the newest inclusion as of evaluation is returned — confirmed responses are briefly cacheable, so a repost may be reflected only after the cache TTL, and any cached answer remains a valid carrying transaction.
+// @Tags blobs
+// @Accept json
+// @Produce json
+// @Param network query string false "Network name or chain ID (default: first enabled network)"
+// @Param versionedHash path string true "EIP-4844 versioned blob hash (0x01-prefixed, 32 bytes)"
+// @Success 200 {object} Response{data=BlobResponse} "Success"
+// @Failure 400 {object} Response "Bad request"
+// @Failure 404 {object} Response "Blob not found"
+// @Failure 500 {object} Response "Internal server error"
+// @Router /blob/by-hash/{versionedHash} [get]
+func (a *API) GetBlobByVersionedHash(w http.ResponseWriter, r *http.Request) {
+	network, err := a.getNetworkFromRequest(r)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	versionedHash := chi.URLParam(r, "versionedHash")
+	if versionedHash == "" {
+		a.respondError(w, http.StatusBadRequest, "Versioned hash is required")
+		return
+	}
+	if !strings.HasPrefix(versionedHash, "0x") || !common.IsHexHash(versionedHash) {
+		a.respondError(w, http.StatusBadRequest, "Invalid versioned hash format")
+		return
+	}
+	// The indexer stores hashes in go-ethereum's lowercase hex encoding, so
+	// normalize before the version check and the (case-sensitive) equality
+	// match on versioned_hash.
+	versionedHash = strings.ToLower(versionedHash)
+	// A versioned blob hash's first byte is the version — 0x01 is EIP-4844's
+	// VERSIONED_HASH_VERSION_KZG, the only version that exists.
+	if !strings.HasPrefix(versionedHash, "0x01") {
+		a.respondError(w, http.StatusBadRequest, "Invalid versioned hash: expected 0x01 version prefix")
+		return
+	}
+
+	logger.Debug("Getting blob by versioned hash",
+		zap.String("network", network.Name),
+		zap.String("versioned_hash", versionedHash))
+
+	var blob models.Blob
+	if err := a.db.GetContext(r.Context(), &blob, queryBlobByVersionedHash, versionedHash, network.ChainID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			logger.Warn("Blob not found by versioned hash",
+				zap.String("network", network.Name),
+				zap.String("versioned_hash", versionedHash),
+				zap.Error(err))
+			a.respondError(w, http.StatusNotFound, "Blob not found")
+			return
+		}
+		logger.Error("Failed to get blob by versioned hash",
+			zap.String("network", network.Name),
+			zap.String("versioned_hash", versionedHash),
+			zap.Error(err))
+		a.respondError(w, http.StatusInternalServerError, "Failed to get blob")
+		return
+	}
+
+	// Same policy as the tx-hash lookup: cache confirmed results only. A rare
+	// duplicate posting of the same blob content can later change which
+	// transaction is newest, but any cached answer remains a valid carrying
+	// transaction, so the short TTL is acceptable.
 	if blob.Confirmed {
 		setCacheControl(w, confirmedBlobCacheTTL, confirmedBlobEdgeTTL)
 	}
