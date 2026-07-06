@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.11.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.10.0...blob-indexer-api-v0.11.0) (2026-07-06)
+
+
+### Features
+
+* **api:** add /search endpoint resolving typed matches for the search modal ([#288](https://github.com/a-thomas-22/blob-indexer-api/issues/288)) ([015b080](https://github.com/a-thomas-22/blob-indexer-api/commit/015b080cd81b3b6c5118cc9da867a07d20983eb2))
+* **api:** add GET /block/{number} for single indexed block lookup ([#286](https://github.com/a-thomas-22/blob-indexer-api/issues/286)) ([e7d3bba](https://github.com/a-thomas-22/blob-indexer-api/commit/e7d3bba2ea5003cb8ecbafc6a401c2712669997b))
+* **api:** add indexed block coverage bounds to /status ([#285](https://github.com/a-thomas-22/blob-indexer-api/issues/285)) ([07b3e55](https://github.com/a-thomas-22/blob-indexer-api/commit/07b3e55de5e9f5b189865b590166d9972b87b769))
+* **api:** blob lookup by EIP-4844 versioned hash ([#289](https://github.com/a-thomas-22/blob-indexer-api/issues/289)) ([6f52fc3](https://github.com/a-thomas-22/blob-indexer-api/commit/6f52fc3ddb2bddc23f862649e8914b45e0d2f469))
+* **api:** raise /blob/pricing blocks cap to 512 for a true 1h window ([#282](https://github.com/a-thomas-22/blob-indexer-api/issues/282)) ([11ec0a8](https://github.com/a-thomas-22/blob-indexer-api/commit/11ec0a89222413a5bf01ac2eb0bf676184c00c4b))
+* **api:** time-range filtering for /users via range param ([#283](https://github.com/a-thomas-22/blob-indexer-api/issues/283)) ([ca5d4ec](https://github.com/a-thomas-22/blob-indexer-api/commit/ca5d4ec84ab1155ed70875b7e5da6dbd0b604393))
+
+
+### Bug Fixes
+
+* **helm:** render all indexer config keys in the ConfigMap ([#291](https://github.com/a-thomas-22/blob-indexer-api/issues/291)) ([888499a](https://github.com/a-thomas-22/blob-indexer-api/commit/888499a345dd23f87526c0a3f17ab4acfb7cc39c))
+* **indexer:** fence stale-fork inserts against reorg cleanup and trim surplus blob rows ([#287](https://github.com/a-thomas-22/blob-indexer-api/issues/287)) ([8f44e7f](https://github.com/a-thomas-22/blob-indexer-api/commit/8f44e7f812c5b15af48502daeaeb3d525658454b))
+* **indexer:** persist reorg-invalidated range so a crash cannot orphan it ([#292](https://github.com/a-thomas-22/blob-indexer-api/issues/292)) ([da1e448](https://github.com/a-thomas-22/blob-indexer-api/commit/da1e4480c8790ef64fddd156066913c5c82f8cf5))
+* **indexer:** recover blocks orphaned below the watermark after a crash ([#290](https://github.com/a-thomas-22/blob-indexer-api/issues/290)) ([4e16252](https://github.com/a-thomas-22/blob-indexer-api/commit/4e162522dfff543090e465a2c03c62045e2d460f))
+* **indexer:** stop tip-gap catch-up from orphaning the historical backfill ([#281](https://github.com/a-thomas-22/blob-indexer-api/issues/281)) ([5bb2a0f](https://github.com/a-thomas-22/blob-indexer-api/commit/5bb2a0fc9cc33a8dc031f7b8a0ea7851b0926ac1))
+
 ## [0.10.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.9.0...blob-indexer-api-v0.10.0) (2026-07-05)
 
 
