@@ -43,8 +43,16 @@ data:
     indexer:
       version: {{ .Values.appConfig.indexer.version | quote }}
       batch_size: {{ .Values.appConfig.indexer.batch_size }}
-      polling_interval: {{ .Values.appConfig.indexer.polling_interval }}
-      mempool_polling_interval: {{ .Values.appConfig.indexer.mempool_polling_interval }}
+      polling_interval: {{ .Values.appConfig.indexer.polling_interval | quote }}
+      mempool_polling_interval: {{ .Values.appConfig.indexer.mempool_polling_interval | quote }}
+      mempool_ttl: {{ .Values.appConfig.indexer.mempool_ttl | quote }}
+      mempool_cleanup_interval: {{ .Values.appConfig.indexer.mempool_cleanup_interval | quote }}
+      worker_count: {{ .Values.appConfig.indexer.worker_count }}
+      max_block_retries: {{ .Values.appConfig.indexer.max_block_retries }}
+      gap_scan_interval: {{ .Values.appConfig.indexer.gap_scan_interval | quote }}
+      max_reorg_depth: {{ .Values.appConfig.indexer.max_reorg_depth }}
+      startup_gap_scan_blocks: {{ .Values.appConfig.indexer.startup_gap_scan_blocks }}
+      rpc_rate_limit: {{ .Values.appConfig.indexer.rpc_rate_limit }}
     attribution:
       blob_list_enabled: {{ .Values.appConfig.attribution.blob_list_enabled }}
       blob_list_base_url: {{ .Values.appConfig.attribution.blob_list_base_url | quote }}
