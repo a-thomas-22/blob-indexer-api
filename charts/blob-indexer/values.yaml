@@ -216,7 +216,8 @@ appConfig:
     max_reorg_depth: 64
     # Blocks below the persisted last_indexed_block watermark scanned for gaps
     # at startup (parallel workers commit out of order, so a crash can leave
-    # unindexed blocks below the watermark). 0 disables the scan.
+    # unindexed blocks below the watermark). Zero or negative disables the
+    # scan.
     startup_gap_scan_blocks: 10000
     # Proactive RPC requests-per-second cap per network; 0 = no client-side
     # limiting.

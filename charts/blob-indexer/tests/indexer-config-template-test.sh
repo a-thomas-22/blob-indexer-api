@@ -13,9 +13,11 @@ RELEASE=indexer-config-test
 FULLNAME="${RELEASE}-blob-indexer"
 
 # Derive the expected key set from the Go struct so a field added to
-# IndexerConfig without chart plumbing fails this test.
+# IndexerConfig without chart plumbing fails this test. The sed strips tag
+# options (e.g. `yaml:"key,omitempty"`) and the grep drops `yaml:"-"` fields.
 expected_keys=$(awk '/^type IndexerConfig struct {/,/^}/' "$REPO_DIR/internal/config/config.go" \
-  | grep -o 'yaml:"[a-z_]*"' | sed 's/yaml:"\(.*\)"/\1/' | sort | paste -sd, -)
+  | grep -o 'yaml:"[^"]*"' | sed 's/^yaml:"//; s/"$//; s/,.*//' | grep -v '^-$' | grep -v '^$' \
+  | sort | paste -sd, -)
 if [ -z "$expected_keys" ]; then
   echo "Failed to extract IndexerConfig yaml keys from internal/config/config.go" >&2
   exit 1
