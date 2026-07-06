@@ -173,6 +173,13 @@ const (
 	MetadataBackfillTargetBlock  = "backfill_target_block"
 	MetadataBackfillUpdatedAt    = "backfill_updated_at"
 	MetadataBackfillCompletedAt  = "backfill_completed_at"
+	// MetadataReorgRewindFrom / MetadataReorgInvalidatedThrough persist the
+	// block range a reorg invalidated, written in the same transaction as the
+	// reorg deletions. They survive a crash between the deletions and the
+	// re-indexing of the range, and are cleared only once indexed_blocks
+	// provably covers the range again.
+	MetadataReorgRewindFrom         = "reorg_rewind_from"
+	MetadataReorgInvalidatedThrough = "reorg_invalidated_through"
 )
 
 // FormatMetadataTimestamp serializes metadata timestamps consistently.

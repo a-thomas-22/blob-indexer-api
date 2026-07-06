@@ -4,6 +4,8 @@ package indexer
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strconv"
 	"testing"
 	"time"
@@ -433,5 +435,146 @@ func TestIntegrationStartupGapRecovery(t *testing.T) {
 	defer idx.failedBlocksMu.Unlock()
 	if len(idx.failedBlocks) != 2 || idx.failedBlocks[103] != 1 || idx.failedBlocks[105] != 1 {
 		t.Fatalf("expected exactly blocks 103 and 105 seeded, got %v", idx.failedBlocks)
+	}
+}
+
+// TestIntegrationReorgRecoveryMarkerLifecycle walks the persisted reorg
+// recovery marker through its full life against real Postgres: handleReorg
+// merges it into the deletion transaction, a fresh indexer (simulating the
+// post-crash process) recovers the range from it, and the completion check
+// keeps it while gaps remain and clears it once indexed_blocks covers the
+// range again. This validates the marker upsert/read/delete SQL and the
+// GetFirstUnindexedBlock verification, which sqlmock cannot.
+func TestIntegrationReorgRecoveryMarkerLifecycle(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+
+	idx.maxReorgDepth = 64
+	idx.ethClient, _ = newMockEthClient(t, 10)
+
+	// Blocks 1-4 match the canonical chain; 5-8 carry stale-fork hashes. Block
+	// 6 holds a blob so the reorg deletion has data to sweep.
+	for blockNumber := uint64(1); blockNumber <= 8; blockNumber++ {
+		hash := fmt.Sprintf("0xstale%d", blockNumber)
+		parent := fmt.Sprintf("0xstale%d", blockNumber-1)
+		if blockNumber <= 4 {
+			canonical, err := idx.ethClient.GetBlockByNumber(ctx, blockNumber)
+			if err != nil {
+				t.Fatalf("get canonical block %d: %v", blockNumber, err)
+			}
+			hash = canonical.Hash().Hex()
+			parent = canonical.ParentHash().Hex()
+		}
+		var blobs []models.Blob
+		if blockNumber == 6 {
+			blobs = []models.Blob{integrationBlob(int64(blockNumber), 0, "0xreorgtx", "0xddd", true)}
+		}
+		indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: int64(blockNumber), BlockHash: hash, ParentHash: parent}
+		if err := idx.insertBlockData(blobs, indexed, nil, 0); err != nil {
+			t.Fatalf("insertBlockData(%d): %v", blockNumber, err)
+		}
+	}
+
+	// A prior reorg left an unrecovered marker [6, 9]; the new reorg's range
+	// [5, 8] must merge with it, not clobber it.
+	if err := database.SetNetworkMetadataBatch(ctx, integrationChainID, []db.MetadataKV{
+		{Key: models.MetadataReorgRewindFrom, Value: "6"},
+		{Key: models.MetadataReorgInvalidatedThrough, Value: "9"},
+	}); err != nil {
+		t.Fatalf("seed prior marker: %v", err)
+	}
+
+	// Block 5's parent mismatches: handleReorg walks back, confirms 4 as the
+	// fork point, and deletes everything above it.
+	if err := idx.handleReorg(5); !errors.Is(err, errReorgDetected) {
+		t.Fatalf("expected errReorgDetected from handleReorg, got %v", err)
+	}
+
+	// No recovery signal was raised in this process before the reorg, so the
+	// prior marker's range may never have been queued: the live signal must
+	// cover the merged range, not just the fresh [5, 8].
+	if from, through := idx.consumeReorgReset(); from != 5 || through != 9 {
+		t.Fatalf("expected merged live signal [5 9], got [%d %d]", from, through)
+	}
+
+	var surviving []int64
+	if err := database.SelectContext(ctx, &surviving,
+		"SELECT block_number FROM indexed_blocks WHERE chain_id = $1 ORDER BY block_number", integrationChainID); err != nil {
+		t.Fatalf("read surviving indexed blocks: %v", err)
+	}
+	if len(surviving) != 4 || surviving[0] != 1 || surviving[3] != 4 {
+		t.Fatalf("expected only blocks 1-4 to survive the reorg, got %v", surviving)
+	}
+	var blobCount int
+	if err := database.GetContext(ctx, &blobCount,
+		"SELECT COUNT(*) FROM blobs WHERE chain_id = $1", integrationChainID); err != nil {
+		t.Fatalf("count blobs after reorg: %v", err)
+	}
+	if blobCount != 0 {
+		t.Fatalf("expected reorged blobs deleted, got %d rows", blobCount)
+	}
+	watermark, err := database.GetNetworkMetadata(ctx, integrationChainID, models.MetadataLastIndexedBlock)
+	if err != nil {
+		t.Fatalf("read watermark: %v", err)
+	}
+	if watermark != "4" {
+		t.Fatalf("expected watermark rewound to 4, got %q", watermark)
+	}
+	assertMarker := func(wantFrom, wantThrough string) {
+		t.Helper()
+		gotFrom, err := database.GetNetworkMetadata(ctx, integrationChainID, models.MetadataReorgRewindFrom)
+		if err != nil {
+			t.Fatalf("read marker rewind_from: %v", err)
+		}
+		gotThrough, err := database.GetNetworkMetadata(ctx, integrationChainID, models.MetadataReorgInvalidatedThrough)
+		if err != nil {
+			t.Fatalf("read marker invalidated_through: %v", err)
+		}
+		if gotFrom != wantFrom || gotThrough != wantThrough {
+			t.Fatalf("expected marker [%s %s], got [%s %s]", wantFrom, wantThrough, gotFrom, gotThrough)
+		}
+	}
+	assertMarker("5", "9")
+
+	// Simulate the crash: a fresh indexer instance must recover the merged
+	// range from the marker alone.
+	recovered := NewForTest(database, &config.Config{}, idx.GetNetworkInfo(), 4)
+	recovered.seedReorgRecoveryFromMarker()
+	from, through := recovered.consumeReorgReset()
+	if from != 5 || through != 9 {
+		t.Fatalf("expected recovered range [5 9], got [%d %d]", from, through)
+	}
+
+	// The range is still missing: the completion check must keep the marker.
+	recovered.maybeCompleteReorgRecovery()
+	assertMarker("5", "9")
+
+	// Re-index the invalidated range (canonical hashes this time).
+	for blockNumber := uint64(5); blockNumber <= 9; blockNumber++ {
+		canonical, err := idx.ethClient.GetBlockByNumber(ctx, blockNumber)
+		if err != nil {
+			t.Fatalf("get canonical block %d: %v", blockNumber, err)
+		}
+		indexed := models.IndexedBlock{
+			ChainID:     integrationChainID,
+			BlockNumber: int64(blockNumber),
+			BlockHash:   canonical.Hash().Hex(),
+			ParentHash:  canonical.ParentHash().Hex(),
+		}
+		if err := recovered.insertBlockData(nil, indexed, nil, 0); err != nil {
+			t.Fatalf("reindex insertBlockData(%d): %v", blockNumber, err)
+		}
+	}
+
+	// Coverage is verifiable now: the completion check must clear the marker.
+	recovered.maybeCompleteReorgRecovery()
+	var markerRows int
+	if err := database.GetContext(ctx, &markerRows,
+		"SELECT COUNT(*) FROM indexer_metadata WHERE chain_id = $1 AND key IN ($2, $3)",
+		integrationChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough); err != nil {
+		t.Fatalf("count marker rows: %v", err)
+	}
+	if markerRows != 0 {
+		t.Fatalf("expected marker cleared after full re-index, got %d rows", markerRows)
 	}
 }

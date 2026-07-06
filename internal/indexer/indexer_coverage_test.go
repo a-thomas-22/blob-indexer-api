@@ -1902,6 +1902,12 @@ func TestCheckForReorg_DetectsMismatchAndRewinds(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2")).
 		WithArgs(idx.network.ChainID, uint64(5)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT key, value").
+		WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+		WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, "5", models.MetadataReorgInvalidatedThrough, "8").
+		WillReturnResult(sqlmock.NewResult(1, 2))
 	mock.ExpectExec("INSERT INTO indexer_metadata").
 		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, "4").
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -1943,6 +1949,12 @@ func TestHandleReorg_SuccessAndError(t *testing.T) {
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2")).
 			WithArgs(idx.network.ChainID, forkBlock+1).
 			WillReturnResult(sqlmock.NewResult(0, 2))
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+			WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
+		mock.ExpectExec("INSERT INTO indexer_metadata").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, "5", models.MetadataReorgInvalidatedThrough, "7").
+			WillReturnResult(sqlmock.NewResult(1, 2))
 		mock.ExpectExec("INSERT INTO indexer_metadata").
 			WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(forkBlock, 10)).
 			WillReturnResult(sqlmock.NewResult(1, 1))
@@ -2079,6 +2091,12 @@ func TestInsertBlockData_ReorgFencesStaleFetch(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2")).
 		WithArgs(idx.network.ChainID, forkBlock+1).
 		WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectQuery("SELECT key, value").
+		WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+		WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, "5", models.MetadataReorgInvalidatedThrough, "8").
+		WillReturnResult(sqlmock.NewResult(1, 2))
 	mock.ExpectExec("INSERT INTO indexer_metadata").
 		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(forkBlock, 10)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -2131,6 +2149,12 @@ func TestHandleReorg_DepthCapExhausted(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2")).
 		WithArgs(idx.network.ChainID, forkBlock+1).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT key, value").
+		WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+		WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, "8", models.MetadataReorgInvalidatedThrough, "10").
+		WillReturnResult(sqlmock.NewResult(1, 2))
 	mock.ExpectExec("INSERT INTO indexer_metadata").
 		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(forkBlock, 10)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -2172,6 +2196,607 @@ func TestHandleReorg_StoredHashDBErrorAborts(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unexpected/unmet sqlmock expectations (no delete should occur): %v", err)
+	}
+}
+
+// expectHandleReorgThroughDeletes registers the sqlmock expectations for
+// handleReorg(5) up to and including the three range DELETEs: fork walk
+// confirming block 4 as the fork point, then MAX(block_number)=7 bounding the
+// invalidated range at [5, 7].
+func expectHandleReorgThroughDeletes(t *testing.T, idx *Indexer, mock sqlmock.Sqlmock) {
+	t.Helper()
+
+	forkBlock := uint64(4)
+	block, err := idx.ethClient.GetBlockByNumber(context.Background(), forkBlock)
+	if err != nil {
+		t.Fatalf("failed to get fork block: %v", err)
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT block_hash FROM indexed_blocks WHERE chain_id = $1 AND block_number = $2")).
+		WithArgs(idx.network.ChainID, forkBlock).
+		WillReturnRows(sqlmock.NewRows([]string{"block_hash"}).AddRow(block.Hash().Hex()))
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT MAX(block_number) FROM indexed_blocks WHERE chain_id = $1")).
+		WithArgs(idx.network.ChainID).
+		WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(int64(7)))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, int64(forkBlock+1)).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM block_metrics WHERE chain_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, int64(forkBlock+1)).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2")).
+		WithArgs(idx.network.ChainID, forkBlock+1).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+}
+
+// A reorg that lands while a prior invalidated range is still unrecovered
+// (crash loop, back-to-back reorgs) must widen the persisted marker, never
+// narrow it — narrowing would let the completion check clear the marker while
+// part of the older range is still missing. The live signal must cover the
+// merged range whenever the prior marker may never have been queued in this
+// process, and only the fresh range once it provably was.
+func TestHandleReorg_MergesPersistedRecoveryMarker(t *testing.T) {
+	tests := []struct {
+		name string
+		// alreadySignaled marks the prior marker's range as queued in this
+		// process, which narrows the live signal to the fresh range.
+		alreadySignaled   bool
+		priorRows         [][2]string
+		wantFrom          string
+		wantThrough       string
+		wantSignalFrom    uint64
+		wantSignalThrough uint64
+	}{
+		{
+			name: "prior wider range widens the merged marker and the live signal",
+			priorRows: [][2]string{
+				{models.MetadataReorgRewindFrom, "2"},
+				{models.MetadataReorgInvalidatedThrough, "9"},
+			},
+			wantFrom:          "2",
+			wantThrough:       "9",
+			wantSignalFrom:    2,
+			wantSignalThrough: 9,
+		},
+		{
+			name:            "already-signaled prior range keeps the live signal fresh",
+			alreadySignaled: true,
+			priorRows: [][2]string{
+				{models.MetadataReorgRewindFrom, "2"},
+				{models.MetadataReorgInvalidatedThrough, "9"},
+			},
+			wantFrom:          "2",
+			wantThrough:       "9",
+			wantSignalFrom:    5,
+			wantSignalThrough: 7,
+		},
+		{
+			name: "prior narrower range is absorbed",
+			priorRows: [][2]string{
+				{models.MetadataReorgRewindFrom, "6"},
+				{models.MetadataReorgInvalidatedThrough, "6"},
+			},
+			wantFrom:          "5",
+			wantThrough:       "7",
+			wantSignalFrom:    5,
+			wantSignalThrough: 7,
+		},
+		{
+			name: "corrupt prior values are overwritten",
+			priorRows: [][2]string{
+				{models.MetadataReorgRewindFrom, "not-a-number"},
+				{models.MetadataReorgInvalidatedThrough, "also-bad"},
+			},
+			wantFrom:          "5",
+			wantThrough:       "7",
+			wantSignalFrom:    5,
+			wantSignalThrough: 7,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx := newTestIndexer()
+			idxDB, mock := newMockIndexerDB(t)
+			idx.db = idxDB
+			idx.ethClient, _ = newMockEthClient(t, 10)
+			if tt.alreadySignaled {
+				atomic.StoreUint32(&idx.reorgRecoverySignaled, 1)
+			}
+
+			expectHandleReorgThroughDeletes(t, idx, mock)
+			priorMarker := sqlmock.NewRows([]string{"key", "value"})
+			for _, row := range tt.priorRows {
+				priorMarker.AddRow(row[0], row[1])
+			}
+			mock.ExpectQuery("SELECT key, value").
+				WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+				WillReturnRows(priorMarker)
+			mock.ExpectExec("INSERT INTO indexer_metadata").
+				WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, tt.wantFrom, models.MetadataReorgInvalidatedThrough, tt.wantThrough).
+				WillReturnResult(sqlmock.NewResult(1, 2))
+			mock.ExpectExec("INSERT INTO indexer_metadata").
+				WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, "4").
+				WillReturnResult(sqlmock.NewResult(1, 1))
+			mock.ExpectCommit()
+
+			if err := idx.handleReorg(5); !errors.Is(err, errReorgDetected) {
+				t.Fatalf("expected errReorgDetected, got %v", err)
+			}
+			if from, through := idx.consumeReorgReset(); from != tt.wantSignalFrom || through != tt.wantSignalThrough {
+				t.Fatalf("expected live signal [%d %d], got [%d %d]", tt.wantSignalFrom, tt.wantSignalThrough, from, through)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sqlmock expectations: %v", err)
+			}
+		})
+	}
+}
+
+// Committing the deletions without the marker would recreate the crash hole
+// the marker exists to close, so a marker persist failure must roll the whole
+// cleanup back and leave every indexed row and the watermark untouched.
+func TestHandleReorg_MarkerPersistFailureAbortsCleanup(t *testing.T) {
+	t.Run("marker read error", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+		idx.ethClient, _ = newMockEthClient(t, 10)
+		atomic.StoreUint64(&idx.lastIndexedBlock, 8)
+
+		expectHandleReorgThroughDeletes(t, idx, mock)
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+			WillReturnError(errors.New("marker read failed"))
+		mock.ExpectRollback()
+
+		err := idx.handleReorg(5)
+		if err == nil || !strings.Contains(err.Error(), "failed to read reorg recovery marker") {
+			t.Fatalf("expected marker read error, got %v", err)
+		}
+		if errors.Is(err, errReorgDetected) {
+			t.Fatal("aborted cleanup must not report the reorg as handled")
+		}
+		if atomic.LoadUint32(&idx.reorgDetected) != 0 {
+			t.Fatal("expected no reorg signal after aborted cleanup")
+		}
+		if got := atomic.LoadUint64(&idx.reorgEpoch); got != 0 {
+			t.Fatalf("expected reorgEpoch unchanged after aborted cleanup, got %d", got)
+		}
+		if got := idx.GetLastIndexedBlock(); got != 8 {
+			t.Fatalf("expected watermark unchanged at 8 after aborted cleanup, got %d", got)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	t.Run("marker write error", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+		idx.ethClient, _ = newMockEthClient(t, 10)
+		atomic.StoreUint64(&idx.lastIndexedBlock, 8)
+
+		expectHandleReorgThroughDeletes(t, idx, mock)
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+			WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
+		mock.ExpectExec("INSERT INTO indexer_metadata").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, "5", models.MetadataReorgInvalidatedThrough, "7").
+			WillReturnError(errors.New("marker write failed"))
+		mock.ExpectRollback()
+
+		err := idx.handleReorg(5)
+		if err == nil || !strings.Contains(err.Error(), "failed to persist reorg recovery marker") {
+			t.Fatalf("expected marker write error, got %v", err)
+		}
+		if errors.Is(err, errReorgDetected) {
+			t.Fatal("aborted cleanup must not report the reorg as handled")
+		}
+		if got := idx.GetLastIndexedBlock(); got != 8 {
+			t.Fatalf("expected watermark unchanged at 8 after aborted cleanup, got %d", got)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+}
+
+func TestSeedReorgRecoveryFromMarker(t *testing.T) {
+	t.Run("marker raises the reorg signal", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+			WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).
+				AddRow(models.MetadataReorgRewindFrom, "451").
+				AddRow(models.MetadataReorgInvalidatedThrough, "520"))
+
+		idx.seedReorgRecoveryFromMarker()
+
+		if atomic.LoadUint32(&idx.reorgDetected) != 1 {
+			t.Fatal("expected persisted marker to raise the reorg signal")
+		}
+		if from, through := idx.consumeReorgReset(); from != 451 || through != 520 {
+			t.Fatalf("expected recovered range [451 520], got [%d %d]", from, through)
+		}
+	})
+
+	t.Run("no marker is a no-op", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+			WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
+
+		idx.seedReorgRecoveryFromMarker()
+
+		if atomic.LoadUint32(&idx.reorgDetected) != 0 {
+			t.Fatal("expected no reorg signal without a marker")
+		}
+	})
+
+	t.Run("nil database is a no-op", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.db = nil
+
+		idx.seedReorgRecoveryFromMarker()
+
+		if atomic.LoadUint32(&idx.reorgDetected) != 0 {
+			t.Fatal("expected no reorg signal without a database")
+		}
+	})
+
+	t.Run("read error is non-fatal", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+			WillReturnError(errors.New("marker read failed"))
+
+		idx.seedReorgRecoveryFromMarker()
+
+		if atomic.LoadUint32(&idx.reorgDetected) != 0 {
+			t.Fatal("expected no reorg signal on marker read error")
+		}
+	})
+
+	t.Run("broken markers are surfaced, not acted on", func(t *testing.T) {
+		brokenMarkers := map[string][][2]string{
+			"half-written": {
+				{models.MetadataReorgRewindFrom, "451"},
+			},
+			"unparseable": {
+				{models.MetadataReorgRewindFrom, "not-a-number"},
+				{models.MetadataReorgInvalidatedThrough, "520"},
+			},
+			"inverted range": {
+				{models.MetadataReorgRewindFrom, "520"},
+				{models.MetadataReorgInvalidatedThrough, "451"},
+			},
+		}
+		for name, rows := range brokenMarkers {
+			t.Run(name, func(t *testing.T) {
+				idx := newTestIndexer()
+				idxDB, mock := newMockIndexerDB(t)
+				idx.db = idxDB
+
+				markerRows := sqlmock.NewRows([]string{"key", "value"})
+				for _, row := range rows {
+					markerRows.AddRow(row[0], row[1])
+				}
+				mock.ExpectQuery("SELECT key, value").
+					WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+					WillReturnRows(markerRows)
+
+				idx.seedReorgRecoveryFromMarker()
+
+				if atomic.LoadUint32(&idx.reorgDetected) != 0 {
+					t.Fatal("expected no reorg signal from a broken marker")
+				}
+			})
+		}
+	})
+}
+
+func TestCompleteReorgRecovery(t *testing.T) {
+	expectMarker := func(idx *Indexer, mock sqlmock.Sqlmock) {
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+			WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).
+				AddRow(models.MetadataReorgRewindFrom, "5").
+				AddRow(models.MetadataReorgInvalidatedThrough, "9"))
+	}
+	// expectForbiddenDelete registers the marker DELETE as the final
+	// expectation so requireForbiddenDelete can prove it never ran.
+	expectForbiddenDelete := func(idx *Indexer, mock sqlmock.Sqlmock) {
+		mock.ExpectExec("DELETE FROM indexer_metadata").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+			WillReturnResult(sqlmock.NewResult(0, 2))
+	}
+	// requireForbiddenDelete asserts the DELETE registered as the final
+	// expectation was NOT consumed while every earlier expectation was.
+	// sqlmock cannot forbid a statement outright and the code under test
+	// swallows unexpected-call errors, so the guard is inverted: if the
+	// forbidden delete ran, all expectations are met and the test fails.
+	requireForbiddenDelete := func(t *testing.T, mock sqlmock.Sqlmock) {
+		t.Helper()
+		err := mock.ExpectationsWereMet()
+		if err == nil {
+			t.Fatal("forbidden DELETE FROM indexer_metadata was executed")
+		}
+		if !strings.Contains(err.Error(), "DELETE FROM indexer_metadata") {
+			t.Fatalf("expected the forbidden delete to be the unmet expectation, got: %v", err)
+		}
+		if strings.Contains(err.Error(), "SELECT key, value") || strings.Contains(err.Error(), "WITH indexed") {
+			t.Fatalf("an expectation before the forbidden delete was not consumed: %v", err)
+		}
+	}
+
+	t.Run("clears marker once range is covered", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		expectMarker(idx, mock)
+		mock.ExpectQuery("WITH indexed AS").
+			WithArgs(idx.network.ChainID, uint64(5), uint64(9)).
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(10)))
+		mock.ExpectExec("DELETE FROM indexer_metadata").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+			WillReturnResult(sqlmock.NewResult(0, 2))
+
+		idx.maybeCompleteReorgRecovery()
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	t.Run("keeps marker and re-raises recovery once while a gap remains", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		// First tick: no recovery signal was ever raised in this process
+		// (startup seeding lost it), so the scanner must re-raise the range —
+		// without this, the marker would stay inert until the next restart.
+		expectMarker(idx, mock)
+		mock.ExpectQuery("WITH indexed AS").
+			WithArgs(idx.network.ChainID, uint64(5), uint64(9)).
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(7)))
+		expectForbiddenDelete(idx, mock)
+
+		idx.maybeCompleteReorgRecovery()
+
+		if atomic.LoadUint32(&idx.reorgDetected) != 1 {
+			t.Fatal("expected the gap scanner to re-raise recovery for a never-signaled marker")
+		}
+		if from, through := idx.consumeReorgReset(); from != 5 || through != 9 {
+			t.Fatalf("expected re-raised range [5 9], got [%d %d]", from, through)
+		}
+		requireForbiddenDelete(t, mock)
+
+		// Second tick: the range is queued now — still incomplete, so the
+		// marker stays, but the scanner must not re-queue the range again.
+		idxDB2, mock2 := newMockIndexerDB(t)
+		idx.db = idxDB2
+		expectMarker(idx, mock2)
+		mock2.ExpectQuery("WITH indexed AS").
+			WithArgs(idx.network.ChainID, uint64(5), uint64(9)).
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(7)))
+		expectForbiddenDelete(idx, mock2)
+
+		idx.maybeCompleteReorgRecovery()
+
+		if atomic.LoadUint32(&idx.reorgDetected) != 0 {
+			t.Fatal("expected no second re-raise for an already-signaled marker")
+		}
+		requireForbiddenDelete(t, mock2)
+	})
+
+	t.Run("epoch change between scan and delete aborts the clear", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+		// A reorg/reindex cleanup committed after the caller sampled epoch 0.
+		atomic.StoreUint64(&idx.reorgEpoch, 1)
+
+		expectMarker(idx, mock)
+		mock.ExpectQuery("WITH indexed AS").
+			WithArgs(idx.network.ChainID, uint64(5), uint64(9)).
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(10)))
+		expectForbiddenDelete(idx, mock)
+
+		idx.completeReorgRecoveryIfCovered(0)
+
+		requireForbiddenDelete(t, mock)
+	})
+
+	t.Run("no marker is a no-op", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+			WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
+		expectForbiddenDelete(idx, mock)
+
+		idx.maybeCompleteReorgRecovery()
+
+		requireForbiddenDelete(t, mock)
+	})
+
+	t.Run("nil database is a no-op", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.db = nil
+
+		idx.maybeCompleteReorgRecovery()
+	})
+
+	t.Run("marker read error keeps marker", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectQuery("SELECT key, value").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+			WillReturnError(errors.New("marker read failed"))
+		expectForbiddenDelete(idx, mock)
+
+		idx.maybeCompleteReorgRecovery()
+
+		requireForbiddenDelete(t, mock)
+	})
+
+	t.Run("coverage scan error keeps marker", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		expectMarker(idx, mock)
+		mock.ExpectQuery("WITH indexed AS").
+			WithArgs(idx.network.ChainID, uint64(5), uint64(9)).
+			WillReturnError(errors.New("coverage scan failed"))
+		expectForbiddenDelete(idx, mock)
+
+		idx.maybeCompleteReorgRecovery()
+
+		requireForbiddenDelete(t, mock)
+	})
+
+	t.Run("delete error is non-fatal", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		expectMarker(idx, mock)
+		mock.ExpectQuery("WITH indexed AS").
+			WithArgs(idx.network.ChainID, uint64(5), uint64(9)).
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(10)))
+		mock.ExpectExec("DELETE FROM indexer_metadata").
+			WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+			WillReturnError(errors.New("delete failed"))
+
+		idx.maybeCompleteReorgRecovery()
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+}
+
+// The gap scanner tick is what eventually retires a recovered marker.
+func TestRunGapScanner_CompletesReorgRecovery(t *testing.T) {
+	idx := newTestIndexer()
+	idx.gapScanInterval = 5 * time.Millisecond
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	mock.ExpectQuery("SELECT key, value").
+		WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+		WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).
+			AddRow(models.MetadataReorgRewindFrom, "5").
+			AddRow(models.MetadataReorgInvalidatedThrough, "9"))
+	mock.ExpectQuery("WITH indexed AS").
+		WithArgs(idx.network.ChainID, uint64(5), uint64(9)).
+		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(uint64(10)))
+	mock.ExpectExec("DELETE FROM indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+
+	done := make(chan struct{})
+	go func() {
+		idx.runGapScanner()
+		close(done)
+	}()
+
+	deadline := time.After(2 * time.Second)
+	for mock.ExpectationsWereMet() != nil {
+		select {
+		case <-deadline:
+			t.Fatalf("gap scanner never cleared the recovered marker: %v", mock.ExpectationsWereMet())
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	idx.cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("gap scanner did not stop after cancel")
+	}
+}
+
+// Regression test for the crash hole this marker closes: a LATEST-start
+// network resumes at the current tip after a crash, and the startup gap scan
+// only looks below the watermark — which the reorg rewound to the fork point.
+// The deleted range sits entirely above it, so without the persisted marker
+// it would never be re-indexed.
+func TestStart_LatestStartRecoversPersistedReorgMarker(t *testing.T) {
+	idx := newTestIndexer()
+	// Long intervals keep the walker's first tick far beyond the test's
+	// lifetime: runBlockIndexer consumes the reorg signal on its tick, and the
+	// assertions below must read it first.
+	idx.pollingInterval = 10 * time.Minute
+	idx.mempoolPollingInterval = 10 * time.Minute
+	idx.network.StartBlock = "LATEST"
+	idx.startupGapScanBlocks = 1000
+
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+	idx.ethClient, _ = newMockEthClient(t, 1000)
+	idx.attribution = attribution.NewService(idxDB)
+	idx.attribution.SetChainID(idx.network.ChainID)
+
+	// A reorg rewound the watermark to fork point 500, deleted [451, 520], and
+	// the process crashed before any of the range was re-indexed.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM indexer_metadata WHERE chain_id = $1 AND key = $2")).
+		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock).
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("500"))
+	// resolveConfiguredStartBlock records the chain head it resolved LATEST to.
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataCurrentChainHead, "1000", models.MetadataChainHeadUpdatedAt, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 2))
+	// Backfill inactive: determineStartBlock jumps ahead to the tip (1000).
+	mock.ExpectQuery("SELECT key, value").
+		WithArgs(idx.network.ChainID, models.MetadataBackfillActive, models.MetadataBackfillCurrentBlock, models.MetadataBackfillTargetBlock).
+		WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).AddRow(models.MetadataBackfillActive, "false"))
+	// The startup gap scan window ends at the watermark and sees nothing.
+	mock.ExpectQuery("WITH bounds AS").
+		WithArgs(idx.network.ChainID, uint64(0), uint64(500), 1000).
+		WillReturnRows(sqlmock.NewRows([]string{"block_number"}))
+	// The persisted marker is the only remaining trace of the deleted range.
+	mock.ExpectQuery("SELECT key, value").
+		WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+		WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).
+			AddRow(models.MetadataReorgRewindFrom, "451").
+			AddRow(models.MetadataReorgInvalidatedThrough, "520"))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE chain_id = $1 AND block_number < 0")).
+		WithArgs(idx.network.ChainID).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := idx.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer idx.Stop()
+
+	if atomic.LoadUint32(&idx.reorgDetected) != 1 {
+		t.Fatal("expected the persisted reorg marker to raise the reorg signal at startup")
+	}
+	from, through := idx.consumeReorgReset()
+	if from != 451 || through != 520 {
+		t.Fatalf("expected recovered range [451 520], got [%d %d]", from, through)
 	}
 }
 
@@ -2318,6 +2943,12 @@ func TestBlockProcessingWorker_ReorgDoesNotAdvanceWatermark(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2")).
 		WithArgs(idx.network.ChainID, forkBlock+1).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT key, value").
+		WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, models.MetadataReorgInvalidatedThrough).
+		WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(idx.network.ChainID, models.MetadataReorgRewindFrom, "5", models.MetadataReorgInvalidatedThrough, "5").
+		WillReturnResult(sqlmock.NewResult(1, 2))
 	mock.ExpectExec("INSERT INTO indexer_metadata").
 		WithArgs(idx.network.ChainID, models.MetadataLastIndexedBlock, strconv.FormatUint(forkBlock, 10)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
