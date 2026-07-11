@@ -499,6 +499,26 @@ func TestDeleteStalePendingBlobs(t *testing.T) {
 	}
 }
 
+func TestDeleteStaleBlobReplacements(t *testing.T) {
+	db, mock := newMockDB(t)
+	cutoff := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_replacements WHERE chain_id = $1 AND replaced_at < $2")).
+		WithArgs(1, cutoff).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+
+	pruned, err := db.DeleteStaleBlobReplacements(context.Background(), 1, cutoff)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pruned != 3 {
+		t.Errorf("expected 3 pruned, got %d", pruned)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestConnectAndMigrations_InvalidURL(t *testing.T) {
 	ctx := context.Background()
 	dbCfg := config.DatabaseConfig{

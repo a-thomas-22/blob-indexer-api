@@ -92,6 +92,12 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 	`); err != nil {
 		t.Fatalf("seed indexed blocks: %v", err)
 	}
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO blob_replacements (chain_id, replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at)
+		VALUES (1, '0xreplaced', '0xpendingtx', '0xfrom', 7, $1)
+	`, now); err != nil {
+		t.Fatalf("seed blob replacement: %v", err)
+	}
 
 	t.Run("queryMempoolBlobs", func(t *testing.T) {
 		var blobs []models.Blob
@@ -120,6 +126,37 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		}
 		if pressure.PendingBlobCount != 1 || pressure.LikelyIncludable != 1 {
 			t.Fatalf("unexpected pressure aggregate: %+v", pressure)
+		}
+	})
+
+	t.Run("queryBlobReplacements", func(t *testing.T) {
+		var events []models.BlobReplacement
+		if err := sqlxDB.SelectContext(ctx, &events, queryBlobReplacements, 1, 10, 0); err != nil {
+			t.Fatalf("queryBlobReplacements: %v", err)
+		}
+		if len(events) != 1 || events[0].ReplacedTxHash != "0xreplaced" || events[0].ReplacementTxHash != "0xpendingtx" || events[0].Nonce != 7 {
+			t.Fatalf("unexpected replacement events: %+v", events)
+		}
+	})
+
+	t.Run("queryBlobReplacementsByTxHash", func(t *testing.T) {
+		// Matches on either side of the replacement; a hash the log never saw
+		// returns empty rather than erroring.
+		for _, hash := range []string{"0xreplaced", "0xpendingtx"} {
+			var events []models.BlobReplacement
+			if err := sqlxDB.SelectContext(ctx, &events, queryBlobReplacementsByTxHash, 1, hash, 10, 0); err != nil {
+				t.Fatalf("queryBlobReplacementsByTxHash(%s): %v", hash, err)
+			}
+			if len(events) != 1 {
+				t.Fatalf("expected 1 event for %s, got %+v", hash, events)
+			}
+		}
+		var events []models.BlobReplacement
+		if err := sqlxDB.SelectContext(ctx, &events, queryBlobReplacementsByTxHash, 1, "0xunknown", 10, 0); err != nil {
+			t.Fatalf("queryBlobReplacementsByTxHash(unknown): %v", err)
+		}
+		if len(events) != 0 {
+			t.Fatalf("expected no events for unknown hash, got %+v", events)
 		}
 	})
 

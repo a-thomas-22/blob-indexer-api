@@ -52,6 +52,19 @@ type Blob struct {
 	Nonce uint64 `db:"-"`
 }
 
+// BlobReplacement records a pending blob transaction the indexer evicted
+// because the sender reused its nonce: a fee-bumped replacement observed
+// either in the mempool or as a confirmed transaction. One row per replaced
+// hash; a re-observed replacement upserts so the latest replacement wins.
+type BlobReplacement struct {
+	ChainID           int       `db:"chain_id"`
+	ReplacedTxHash    string    `db:"replaced_tx_hash"`
+	ReplacementTxHash string    `db:"replacement_tx_hash"`
+	FromAddress       string    `db:"from_address"`
+	Nonce             int64     `db:"nonce"`
+	ReplacedAt        time.Time `db:"replaced_at"`
+}
+
 // BlobUser represents a known blob transaction sender
 type BlobUser struct {
 	ID          int64     `db:"id"`

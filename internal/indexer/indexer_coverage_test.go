@@ -1441,7 +1441,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 			WithArgs(blob.ChainID, blob.TxHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND from_address = $2 AND nonce = $3 AND tx_hash <> $4")).
-			WithArgs(blob.ChainID, blob.FromAddress, int64(blob.Nonce), blob.TxHash).
+			WithArgs(blob.ChainID, blob.FromAddress, int64(blob.Nonce), blob.TxHash, blob.Timestamp).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND tx_hash = $2 AND blob_index >= $3")).
 			WithArgs(blob.ChainID, blob.TxHash, 1).
@@ -1475,7 +1475,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 			WithArgs(blob.ChainID, blob.TxHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND from_address = $2 AND nonce = $3 AND tx_hash <> $4")).
-			WithArgs(blob.ChainID, blob.FromAddress, int64(blob.Nonce), blob.TxHash).
+			WithArgs(blob.ChainID, blob.FromAddress, int64(blob.Nonce), blob.TxHash, blob.Timestamp).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
 			WithArgs(blob.ChainID, blob.TxHash, 3).
@@ -1525,7 +1525,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 			WithArgs(blob.ChainID, blob.TxHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
-			WithArgs(blob.ChainID, blob.FromAddress, int64(blob.Nonce), blob.TxHash).
+			WithArgs(blob.ChainID, blob.FromAddress, int64(blob.Nonce), blob.TxHash, blob.Timestamp).
 			WillReturnError(errors.New("superseded delete failed"))
 		mock.ExpectRollback()
 
@@ -1546,7 +1546,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 			WithArgs(blob.ChainID, blob.TxHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
-			WithArgs(blob.ChainID, blob.FromAddress, int64(blob.Nonce), blob.TxHash).
+			WithArgs(blob.ChainID, blob.FromAddress, int64(blob.Nonce), blob.TxHash, blob.Timestamp).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
 			WithArgs(blob.ChainID, blob.TxHash, 1).
@@ -1570,7 +1570,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 			WithArgs(blob.ChainID, blob.TxHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
-			WithArgs(blob.ChainID, blob.FromAddress, int64(blob.Nonce), blob.TxHash).
+			WithArgs(blob.ChainID, blob.FromAddress, int64(blob.Nonce), blob.TxHash, blob.Timestamp).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
 			WithArgs(blob.ChainID, blob.TxHash, 1).
@@ -1620,7 +1620,7 @@ func TestInsertBlockData(t *testing.T) {
 		mock.ExpectExec("DELETE FROM mempool_blobs WHERE").
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec("DELETE FROM mempool_blobs m").
-			WithArgs(blob.ChainID, sqlmock.AnyArg(), sqlmock.AnyArg()).
+			WithArgs(blob.ChainID, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), blob.Timestamp).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec("INSERT INTO blobs").
 			WithArgs(blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
@@ -1843,7 +1843,7 @@ func TestProcessBlock_WithBlobTransaction(t *testing.T) {
 	mock.ExpectExec("DELETE FROM mempool_blobs WHERE").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("DELETE FROM mempool_blobs m").
-		WithArgs(idx.network.ChainID, sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs(idx.network.ChainID, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("INSERT INTO blobs").
 		WithArgs(
@@ -3218,7 +3218,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			WithArgs(idx.network.ChainID, txHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
-			WithArgs(idx.network.ChainID, sqlmock.AnyArg(), int64(1), txHash).
+			WithArgs(idx.network.ChainID, sqlmock.AnyArg(), int64(1), txHash, sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
 			WithArgs(idx.network.ChainID, txHash, 1).
@@ -3275,7 +3275,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			WithArgs(idx.network.ChainID, txHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
-			WithArgs(idx.network.ChainID, sqlmock.AnyArg(), int64(2), txHash).
+			WithArgs(idx.network.ChainID, sqlmock.AnyArg(), int64(2), txHash, sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs")).
 			WithArgs(idx.network.ChainID, txHash, 1).

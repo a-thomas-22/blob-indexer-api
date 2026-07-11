@@ -88,6 +88,12 @@ const (
 	// pendingTxResubscribeMaxBackoff caps the exponential backoff between
 	// resubscribe attempts.
 	pendingTxResubscribeMaxBackoff = 8 * time.Second
+
+	// blobReplacementRetention bounds how long blob_replacements rows are
+	// kept; pruned on the mempool cleanup ticker. A week keeps the log
+	// useful for resolving a stale hash pasted days later while bounding
+	// the table to a trickle of rows (fee bumps are occasional events).
+	blobReplacementRetention = 7 * 24 * time.Hour
 )
 
 // errReorgDetected is returned when a chain reorganization is detected and handled
@@ -2098,6 +2104,7 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 		// Collect unique tx hashes to delete their pending counterparts, and
 		// each tx's (sender, nonce) to delete any pending tx it replaced.
 		txHashSet := make(map[string]struct{}, len(blobs))
+		txHashes := make([]string, 0, len(blobs))
 		senders := make([]string, 0, len(blobs))
 		nonces := make([]int64, 0, len(blobs))
 		for _, blob := range blobs {
@@ -2105,16 +2112,13 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				continue
 			}
 			txHashSet[blob.TxHash] = struct{}{}
+			txHashes = append(txHashes, blob.TxHash)
 			senders = append(senders, blob.FromAddress)
 			nonces = append(nonces, int64(blob.Nonce))
 		}
 
 		// Delete pending blob rows that are now being confirmed
-		if len(txHashSet) > 0 {
-			txHashes := make([]string, 0, len(txHashSet))
-			for h := range txHashSet {
-				txHashes = append(txHashes, h)
-			}
+		if len(txHashes) > 0 {
 			deleteQuery, deleteArgs, err := sqlx.In(
 				"DELETE FROM mempool_blobs WHERE chain_id = ? AND tx_hash IN (?)",
 				i.network.ChainID, txHashes,
@@ -2138,19 +2142,32 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			// hash never confirms, so the hash-based delete above cannot
 			// see it and only the TTL sweep would remove it. Legacy rows
 			// with NULL nonce never match and still age out via the sweep.
+			// Each evicted hash is recorded in blob_replacements in the
+			// same statement — the hash-based delete ran first, so only
+			// genuinely replaced hashes reach the log.
 			supersededRes, err := tx.ExecContext(i.ctx,
-				`DELETE FROM mempool_blobs m
-				 USING unnest($2::text[], $3::bigint[]) AS t(from_address, nonce)
-				 WHERE m.chain_id = $1 AND m.from_address = t.from_address AND m.nonce = t.nonce`,
-				i.network.ChainID, pq.Array(senders), pq.Array(nonces),
+				`WITH superseded AS (
+					DELETE FROM mempool_blobs m
+					USING unnest($2::text[], $3::bigint[], $4::text[]) AS t(from_address, nonce, replacement_tx_hash)
+					WHERE m.chain_id = $1 AND m.from_address = t.from_address AND m.nonce = t.nonce
+					RETURNING m.tx_hash, m.from_address, m.nonce, t.replacement_tx_hash
+				)
+				INSERT INTO blob_replacements (chain_id, replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at)
+				SELECT DISTINCT $1, tx_hash, replacement_tx_hash, from_address, nonce, $5::timestamp FROM superseded
+				ON CONFLICT (chain_id, replaced_tx_hash) DO UPDATE SET
+					replacement_tx_hash = EXCLUDED.replacement_tx_hash,
+					from_address = EXCLUDED.from_address,
+					nonce = EXCLUDED.nonce,
+					replaced_at = EXCLUDED.replaced_at`,
+				i.network.ChainID, pq.Array(senders), pq.Array(nonces), pq.Array(txHashes), blobs[0].Timestamp,
 			)
 			if err != nil {
 				return fmt.Errorf("failed to delete superseded pending blobs: %w", err)
 			}
 			if superseded, _ := supersededRes.RowsAffected(); superseded > 0 {
-				logger.Debug("Removed pending blobs superseded by confirmed transactions",
+				logger.Debug("Recorded pending blobs superseded by confirmed transactions",
 					zap.String("network", i.network.Name),
-					zap.Int64("superseded_count", superseded))
+					zap.Int64("superseded_tx_count", superseded))
 			}
 		}
 
@@ -2347,6 +2364,22 @@ func (i *Indexer) runMempoolCleanup() {
 					zap.String("network", i.network.Name),
 					zap.Int64("deleted_count", deleted))
 			}
+
+			replacementCutoff := time.Now().Add(-blobReplacementRetention)
+			unlockWrites = i.lockDBWrites()
+			pruned, err := i.db.DeleteStaleBlobReplacements(i.ctx, i.network.ChainID, replacementCutoff)
+			unlockWrites()
+			if err != nil {
+				logger.Error("Failed to prune stale blob replacements",
+					zap.String("network", i.network.Name),
+					zap.Error(err))
+				continue
+			}
+			if pruned > 0 {
+				logger.Info("Pruned stale blob replacements",
+					zap.String("network", i.network.Name),
+					zap.Int64("pruned_count", pruned))
+			}
 		}
 	}
 }
@@ -2449,19 +2482,31 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	// A fee-bumped replacement reuses the sender's nonce under a new hash.
 	// The superseded hash never confirms, so without this delete its rows
 	// would sit in the pending view until the TTL sweep. Legacy rows with
-	// NULL nonce never match and still age out via the sweep.
+	// NULL nonce never match and still age out via the sweep. Each evicted
+	// hash is recorded in blob_replacements in the same statement — once the
+	// rows are gone the observation is otherwise lost.
 	supersededRes, err := tx.ExecContext(i.ctx,
-		`DELETE FROM mempool_blobs WHERE chain_id = $1 AND from_address = $2 AND nonce = $3 AND tx_hash <> $4`,
-		networkID, blobs[0].FromAddress, int64(blobs[0].Nonce), txHash,
+		`WITH superseded AS (
+			DELETE FROM mempool_blobs WHERE chain_id = $1 AND from_address = $2 AND nonce = $3 AND tx_hash <> $4
+			RETURNING tx_hash
+		)
+		INSERT INTO blob_replacements (chain_id, replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at)
+		SELECT DISTINCT $1, tx_hash, $4, $2, $3, $5::timestamp FROM superseded
+		ON CONFLICT (chain_id, replaced_tx_hash) DO UPDATE SET
+			replacement_tx_hash = EXCLUDED.replacement_tx_hash,
+			from_address = EXCLUDED.from_address,
+			nonce = EXCLUDED.nonce,
+			replaced_at = EXCLUDED.replaced_at`,
+		networkID, blobs[0].FromAddress, int64(blobs[0].Nonce), txHash, blobs[0].Timestamp,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to delete superseded pending blobs (tx: %s): %w", txHash, err)
 	}
 	if superseded, _ := supersededRes.RowsAffected(); superseded > 0 {
-		logger.Debug("Removed pending blobs superseded by replacement transaction",
+		logger.Debug("Recorded pending blobs superseded by replacement transaction",
 			zap.String("network", i.network.Name),
 			zap.String("tx_hash", txHash),
-			zap.Int64("superseded_count", superseded))
+			zap.Int64("superseded_tx_count", superseded))
 	}
 
 	// Trim surplus rows if the tx's blob count shrank under us.

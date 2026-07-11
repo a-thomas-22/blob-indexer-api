@@ -344,3 +344,14 @@ func (db *DB) DeleteStalePendingBlobs(ctx context.Context, networkID int, cutoff
 	}
 	return res.RowsAffected()
 }
+
+// DeleteStaleBlobReplacements removes replacement records older than the given
+// cutoff time.
+func (db *DB) DeleteStaleBlobReplacements(ctx context.Context, networkID int, cutoff time.Time) (int64, error) {
+	query := "DELETE FROM blob_replacements WHERE chain_id = $1 AND replaced_at < $2"
+	res, err := db.ExecContext(ctx, query, networkID, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}

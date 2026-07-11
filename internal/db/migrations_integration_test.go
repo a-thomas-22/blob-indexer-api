@@ -1377,3 +1377,69 @@ func TestMempoolBlobNonceMigration(t *testing.T) {
 		t.Fatalf("expected (from, nonce) predicate to match only 0xpost, got %v", matched)
 	}
 }
+
+// TestBlobReplacementsMigration verifies migration 9: the blob_replacements
+// event log exists as a regular LOGGED table (replacement observations are
+// not reconstructible, unlike mempool_blobs), keyed one row per replaced
+// hash with upsert-on-reobservation semantics, and carries the replaced_at
+// index serving the list endpoint and retention pruning.
+func TestBlobReplacementsMigration(t *testing.T) {
+	db, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	resetSchema(t, db)
+
+	m := migrator(t, db)
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to latest: %v", err)
+	}
+
+	var persistence string
+	if err := db.Get(&persistence, `SELECT relpersistence FROM pg_class WHERE relname = 'blob_replacements'`); err != nil {
+		t.Fatalf("check blob_replacements persistence: %v", err)
+	}
+	if persistence != "p" {
+		t.Fatalf("expected blob_replacements to be LOGGED (relpersistence 'p'), got %q", persistence)
+	}
+
+	t0 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	upsert := `
+		INSERT INTO blob_replacements (chain_id, replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at)
+		VALUES (1, '0xold', $1, '0xfrom', 7, $2)
+		ON CONFLICT (chain_id, replaced_tx_hash) DO UPDATE SET
+			replacement_tx_hash = EXCLUDED.replacement_tx_hash,
+			replaced_at = EXCLUDED.replaced_at
+	`
+	if _, err := db.Exec(upsert, "0xbump1", t0); err != nil {
+		t.Fatalf("insert replacement record: %v", err)
+	}
+	if _, err := db.Exec(upsert, "0xbump2", t0.Add(time.Minute)); err != nil {
+		t.Fatalf("upsert replacement record: %v", err)
+	}
+	var replacement string
+	if err := db.Get(&replacement, `SELECT replacement_tx_hash FROM blob_replacements WHERE chain_id = 1 AND replaced_tx_hash = '0xold'`); err != nil {
+		t.Fatalf("read replacement record: %v", err)
+	}
+	if replacement != "0xbump2" {
+		t.Fatalf("expected re-observation to upsert replacement to 0xbump2, got %q", replacement)
+	}
+	var count int
+	if err := db.Get(&count, `SELECT COUNT(*) FROM blob_replacements WHERE chain_id = 1`); err != nil {
+		t.Fatalf("count replacement records: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one row per replaced hash, got %d", count)
+	}
+
+	var indexExists bool
+	if err := db.Get(&indexExists, `
+		SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_blob_replacements_chain_replaced_at')
+	`); err != nil {
+		t.Fatalf("check replaced_at index: %v", err)
+	}
+	if !indexExists {
+		t.Fatal("expected idx_blob_replacements_chain_replaced_at to exist")
+	}
+}

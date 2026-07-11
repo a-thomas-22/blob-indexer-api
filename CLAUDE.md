@@ -46,7 +46,7 @@ Both share the same database. Production deployments run migrations with the ded
 - PostgreSQL with golang-migrate (migrations in `internal/db/migrations/`)
 - Migrations run via `cmd/migrate`, `make db-migrate`, Helm-managed migration containers, or local `database.run_migrations: true`
 - Migration authoring rules (fast DDL-only files, no explicit transaction control, idempotent, heavy backfills chunked outside schema migrations): see `internal/db/migrations/README.md`. A dirty schema left by a killed migration run is auto-recovered by `db.RunMigrations` when verifiably safe.
-- Key tables: `blobs` (confirmed only), `mempool_blobs` (pending; UNLOGGED, reconstructible from the node's mempool), `networks`, `blob_users`, `indexer_metadata`, `indexed_blocks`, `block_metrics`
+- Key tables: `blobs` (confirmed only), `mempool_blobs` (pending; UNLOGGED, reconstructible from the node's mempool), `blob_replacements` (fee-bump eviction log; LOGGED, pruned after ~a week), `networks`, `blob_users`, `indexer_metadata`, `indexed_blocks`, `block_metrics`
 - Connection pooling: 25 max open, 10 idle
 
 ### API Routes
@@ -55,7 +55,7 @@ Canonical routes are under `/api/v1`. Legacy `/api/*` paths redirect to `/api/v1
 
 - `/api/v1/ws` — WebSocket updates
 - `/api/v1/networks`, `/api/v1/networks/{chainId}` — network listing and status
-- `/api/v1/blob/latest`, `/api/v1/blob/mempool`, `/api/v1/blob/pricing`, `/api/v1/blob/by-hash/{versionedHash}`, `/api/v1/blob/{txHash}` — blob queries
+- `/api/v1/blob/latest`, `/api/v1/blob/mempool`, `/api/v1/blob/pricing`, `/api/v1/blob/replacements`, `/api/v1/blob/by-hash/{versionedHash}`, `/api/v1/blob/{txHash}` — blob queries
 - `/api/v1/block/{number}` — single indexed block with its blobs (matches the WebSocket `new_block` payload)
 - `/api/v1/users` — top blob users
 - `/api/v1/stats` — historical stats

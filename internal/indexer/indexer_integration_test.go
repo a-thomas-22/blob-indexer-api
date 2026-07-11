@@ -375,21 +375,43 @@ func TestIntegrationMempoolReplacementCleanup(t *testing.T) {
 		}
 	}
 
+	type replacementRow struct {
+		ReplacedTxHash    string `db:"replaced_tx_hash"`
+		ReplacementTxHash string `db:"replacement_tx_hash"`
+		FromAddress       string `db:"from_address"`
+		Nonce             int64  `db:"nonce"`
+	}
+	replacements := func() []replacementRow {
+		t.Helper()
+		var rows []replacementRow
+		if err := database.SelectContext(ctx, &rows,
+			"SELECT replaced_tx_hash, replacement_tx_hash, from_address, nonce FROM blob_replacements WHERE chain_id = $1 ORDER BY replaced_tx_hash", integrationChainID); err != nil {
+			t.Fatalf("read blob replacements: %v", err)
+		}
+		return rows
+	}
+
 	// Sender S has tx 0xorig pending at nonce 7 (two blobs), plus an
 	// unrelated pending tx at nonce 8 that must survive every cleanup below.
 	insertPending(7, "0xorig", 2)
 	insertPending(8, "0xother", 1)
 
 	// A fee bump at the same (sender, nonce) under a new hash: seeing it
-	// pending must drop both of 0xorig's rows and only those.
+	// pending must drop both of 0xorig's rows and only those, and record
+	// the eviction — one event despite two deleted rows.
 	insertPending(7, "0xbump", 1)
 	if got := pendingTxHashes(); len(got) != 2 || got[0] != "0xbump" || got[1] != "0xother" {
 		t.Fatalf("expected pending [0xbump 0xother] after replacement, got %v", got)
 	}
+	if got := replacements(); len(got) != 1 ||
+		got[0] != (replacementRow{ReplacedTxHash: "0xorig", ReplacementTxHash: "0xbump", FromAddress: "0xsender", Nonce: 7}) {
+		t.Fatalf("expected replacement record [0xorig->0xbump], got %+v", got)
+	}
 
 	// A second bump confirms in a block without ever being seen pending.
 	// Storing the block must clear 0xbump via (sender, nonce) even though
-	// 0xbump's hash appears nowhere in the block.
+	// 0xbump's hash appears nowhere in the block, and record that eviction
+	// too — the log now holds the full chain 0xorig->0xbump->0xfinal.
 	final := integrationBlob(400, 0, "0xfinal", "0xsender", true)
 	final.Nonce = 7
 	indexedBlock := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 400, BlockHash: "0xhash400", ParentHash: "0xparent400"}
@@ -398,6 +420,11 @@ func TestIntegrationMempoolReplacementCleanup(t *testing.T) {
 	}
 	if got := pendingTxHashes(); len(got) != 1 || got[0] != "0xother" {
 		t.Fatalf("expected pending [0xother] after confirmation, got %v", got)
+	}
+	if got := replacements(); len(got) != 2 ||
+		got[0] != (replacementRow{ReplacedTxHash: "0xbump", ReplacementTxHash: "0xfinal", FromAddress: "0xsender", Nonce: 7}) ||
+		got[1] != (replacementRow{ReplacedTxHash: "0xorig", ReplacementTxHash: "0xbump", FromAddress: "0xsender", Nonce: 7}) {
+		t.Fatalf("expected replacement chain [0xbump->0xfinal, 0xorig->0xbump], got %+v", got)
 	}
 
 	// A row written by a pre-nonce binary holds NULL: no (sender, nonce)
@@ -415,6 +442,22 @@ func TestIntegrationMempoolReplacementCleanup(t *testing.T) {
 	insertPending(9, "0xnine", 1)
 	if got := pendingTxHashes(); len(got) != 3 || got[0] != "0xlegacy" || got[1] != "0xnine" || got[2] != "0xother" {
 		t.Fatalf("expected pending [0xlegacy 0xnine 0xother], got %v", got)
+	}
+	if got := replacements(); len(got) != 2 {
+		t.Fatalf("expected no new replacement records from non-replacing inserts, got %+v", got)
+	}
+
+	// Retention pruning removes aged records; both events carry the seeded
+	// 2026-07-01 timestamp, so a now-cutoff clears the log.
+	pruned, err := database.DeleteStaleBlobReplacements(ctx, integrationChainID, time.Now())
+	if err != nil {
+		t.Fatalf("DeleteStaleBlobReplacements() error = %v", err)
+	}
+	if pruned != 2 {
+		t.Fatalf("expected 2 pruned replacement records, got %d", pruned)
+	}
+	if got := replacements(); len(got) != 0 {
+		t.Fatalf("expected empty replacement log after pruning, got %+v", got)
 	}
 }
 
