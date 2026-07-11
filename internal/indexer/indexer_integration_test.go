@@ -427,6 +427,18 @@ func TestIntegrationMempoolReplacementCleanup(t *testing.T) {
 		t.Fatalf("expected replacement chain [0xbump->0xfinal, 0xorig->0xbump], got %+v", got)
 	}
 
+	// A stale pending observation of 0xbump — fetched before 0xfinal's block
+	// landed, stored after — must not resurrect it: the replacement record
+	// acts as a tombstone and suppresses the re-insert entirely, recording
+	// nothing new.
+	insertPending(7, "0xbump", 1)
+	if got := pendingTxHashes(); len(got) != 1 || got[0] != "0xother" {
+		t.Fatalf("expected tombstone to suppress stale 0xbump re-insert, got pending %v", got)
+	}
+	if got := replacements(); len(got) != 2 {
+		t.Fatalf("expected suppressed re-insert to record nothing, got %+v", got)
+	}
+
 	// A row written by a pre-nonce binary holds NULL: no (sender, nonce)
 	// cleanup may ever match it — NULL never equals — so it survives until
 	// the TTL sweep.

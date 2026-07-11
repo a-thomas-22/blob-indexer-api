@@ -2447,7 +2447,8 @@ func (i *Indexer) processPendingTransactions() error {
 // updates the same rows in place via ON CONFLICT; rows of a pending tx this
 // one replaces (same sender and nonce, different hash) are deleted, and if the
 // tx's blob count shrank, surplus rows are trimmed first. If the tx is already
-// confirmed, the call is a no-op.
+// confirmed, or already recorded as replaced in blob_replacements, the call is
+// a no-op.
 func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	if len(blobs) == 0 {
 		return nil
@@ -2464,18 +2465,27 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// If the tx is already confirmed, do not (re)create pending rows. The
-	// block_number >= 0 filter keeps legacy pending sentinel rows — which an
-	// old binary can still write into blobs during the deploy window — from
-	// suppressing mempool_blobs writes.
-	var hasConfirmed bool
+	// If the tx is already confirmed, or already observed replaced, do not
+	// (re)create pending rows. The block_number >= 0 filter keeps legacy
+	// pending sentinel rows — which an old binary can still write into blobs
+	// during the deploy window — from suppressing mempool_blobs writes. The
+	// blob_replacements check treats the eviction record as a tombstone: a
+	// pending fetch races the block path, so the block confirming this tx's
+	// replacement (same sender and nonce, different hash) can commit between
+	// this tx being fetched and stored here, and without the tombstone the
+	// dead tx would be resurrected into the pending view until the TTL
+	// sweep. Suppressing on a tombstone is safe: a node only re-admits a
+	// replaced tx via an explicit re-broadcast after its replacement
+	// vanished from the pool, which is rare and self-corrects on inclusion.
+	var suppressed bool
 	if err := tx.QueryRowContext(i.ctx,
-		`SELECT EXISTS (SELECT 1 FROM blobs WHERE chain_id = $1 AND tx_hash = $2 AND block_number >= 0)`,
+		`SELECT EXISTS (SELECT 1 FROM blobs WHERE chain_id = $1 AND tx_hash = $2 AND block_number >= 0)
+			OR EXISTS (SELECT 1 FROM blob_replacements WHERE chain_id = $1 AND replaced_tx_hash = $2)`,
 		networkID, txHash,
-	).Scan(&hasConfirmed); err != nil {
+	).Scan(&suppressed); err != nil {
 		return fmt.Errorf("failed to check confirmed blobs for pending tx: %w", err)
 	}
-	if hasConfirmed {
+	if suppressed {
 		return tx.Commit()
 	}
 
