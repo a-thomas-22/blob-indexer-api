@@ -1313,3 +1313,67 @@ func TestBlobVersionedHashesMigration(t *testing.T) {
 		t.Fatal("expected idx_blobs_chain_versioned_hash to exist")
 	}
 }
+
+// TestMempoolBlobNonceMigration verifies migration 8: mempool_blobs gains the
+// nullable nonce column driving the indexer's replacement cleanup. Rows
+// written before the migration stay NULL — they can never match a
+// (from_address, nonce) cleanup delete and only age out via the TTL sweep —
+// while new rows persist the sender's nonce and are matched by it.
+func TestMempoolBlobNonceMigration(t *testing.T) {
+	db, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	resetSchema(t, db)
+
+	m := migrator(t, db)
+	if err := m.Migrate(7); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to version 7: %v", err)
+	}
+
+	// Seed a pending row under the pre-migration schema.
+	t0 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`
+		INSERT INTO mempool_blobs (
+			chain_id, tx_hash, blob_index, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES (1, '0xpre', 0, '0xfrom', '', 131072, 50, 10, 500, $1, 60, 131072)
+	`, t0); err != nil {
+		t.Fatalf("seed pre-migration mempool blob: %v", err)
+	}
+
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to latest: %v", err)
+	}
+
+	var preNonce *int64
+	if err := db.Get(&preNonce, `SELECT nonce FROM mempool_blobs WHERE tx_hash = '0xpre'`); err != nil {
+		t.Fatalf("read pre-migration nonce: %v", err)
+	}
+	if preNonce != nil {
+		t.Fatalf("expected NULL nonce on pre-migration row, got %v", *preNonce)
+	}
+
+	// New rows persist the nonce, and the cleanup predicate matches exactly
+	// the non-NULL row for that (from_address, nonce).
+	if _, err := db.Exec(`
+		INSERT INTO mempool_blobs (
+			chain_id, tx_hash, blob_index, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used, nonce
+		) VALUES (1, '0xpost', 0, '0xfrom', '', 131072, 50, 10, 500, $1, 60, 131072, 7)
+	`, t0); err != nil {
+		t.Fatalf("insert post-migration mempool blob: %v", err)
+	}
+	var matched []string
+	if err := db.Select(&matched, `
+		SELECT tx_hash FROM mempool_blobs WHERE chain_id = 1 AND from_address = '0xfrom' AND nonce = 7
+	`); err != nil {
+		t.Fatalf("cleanup-predicate lookup: %v", err)
+	}
+	if len(matched) != 1 || matched[0] != "0xpost" {
+		t.Fatalf("expected (from, nonce) predicate to match only 0xpost, got %v", matched)
+	}
+}

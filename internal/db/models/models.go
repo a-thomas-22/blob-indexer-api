@@ -44,6 +44,12 @@ type Blob struct {
 	// compute it from the sibling rows' versioned_hash values, so it is empty
 	// for rows indexed before the versioned-hash migration.
 	VersionedHashes pq.StringArray `db:"versioned_hashes"`
+	// Nonce is the sender's account nonce. Persisted only on mempool_blobs
+	// rows (blobs has no nonce column), where it lets the indexer delete
+	// superseded pending rows when a fee-bumped replacement reuses the
+	// sender's nonce under a new hash. Excluded from scanning: no query
+	// selects it, and legacy pending rows hold NULL.
+	Nonce uint64 `db:"-"`
 }
 
 // BlobUser represents a known blob transaction sender

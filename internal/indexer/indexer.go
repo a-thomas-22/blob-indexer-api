@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 	"go.uber.org/zap"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
@@ -1425,6 +1426,7 @@ func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID in
 			MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
 			BlobGasUsed:       metrics.blobGasUsed,
 			VersionedHash:     &versionedHash,
+			Nonce:             tx.Nonce(),
 		})
 	}
 	return rows
@@ -1522,6 +1524,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 				MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
 				BlobGasUsed:       metrics.blobGasUsed,
 				VersionedHash:     &versionedHash,
+				Nonce:             tx.Nonce(),
 			})
 			blobIndex++
 		}
@@ -2027,7 +2030,7 @@ const blobInsertColumns = 14
 
 // mempoolBlobInsertColumns is the number of columns written per row when
 // upserting into mempool_blobs.
-const mempoolBlobInsertColumns = 13
+const mempoolBlobInsertColumns = 14
 
 // valuesPlaceholders builds a multi-row VALUES clause "($1,$2,...),($n,...),..."
 // for rows rows of width columns. casts, when non-nil, must have width entries
@@ -2092,10 +2095,18 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 
 	// Insert blobs using a prepared statement within the transaction
 	if len(blobs) > 0 {
-		// Collect unique tx hashes to delete their pending counterparts
+		// Collect unique tx hashes to delete their pending counterparts, and
+		// each tx's (sender, nonce) to delete any pending tx it replaced.
 		txHashSet := make(map[string]struct{}, len(blobs))
+		senders := make([]string, 0, len(blobs))
+		nonces := make([]int64, 0, len(blobs))
 		for _, blob := range blobs {
+			if _, seen := txHashSet[blob.TxHash]; seen {
+				continue
+			}
 			txHashSet[blob.TxHash] = struct{}{}
+			senders = append(senders, blob.FromAddress)
+			nonces = append(nonces, int64(blob.Nonce))
 		}
 
 		// Delete pending blob rows that are now being confirmed
@@ -2120,6 +2131,26 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				logger.Debug("Promoted pending blobs to confirmed",
 					zap.String("network", i.network.Name),
 					zap.Int64("promoted_count", promoted))
+			}
+
+			// A confirmed tx also invalidates any pending tx it replaced:
+			// same sender and nonce under a different hash. The replaced
+			// hash never confirms, so the hash-based delete above cannot
+			// see it and only the TTL sweep would remove it. Legacy rows
+			// with NULL nonce never match and still age out via the sweep.
+			supersededRes, err := tx.ExecContext(i.ctx,
+				`DELETE FROM mempool_blobs m
+				 USING unnest($2::text[], $3::bigint[]) AS t(from_address, nonce)
+				 WHERE m.chain_id = $1 AND m.from_address = t.from_address AND m.nonce = t.nonce`,
+				i.network.ChainID, pq.Array(senders), pq.Array(nonces),
+			)
+			if err != nil {
+				return fmt.Errorf("failed to delete superseded pending blobs: %w", err)
+			}
+			if superseded, _ := supersededRes.RowsAffected(); superseded > 0 {
+				logger.Debug("Removed pending blobs superseded by confirmed transactions",
+					zap.String("network", i.network.Name),
+					zap.Int64("superseded_count", superseded))
 			}
 		}
 
@@ -2377,11 +2408,13 @@ func (i *Indexer) processPendingTransactions() error {
 }
 
 // insertPendingBlobs upserts the per-blob pending rows for a single transaction
-// into mempool_blobs. All blobs in the slice must share the same ChainID and
-// TxHash. mempool_blobs.blob_index is the per-transaction blob ordinal
-// (0..N-1), so a re-poll of an already-tracked tx updates the same rows in
-// place via ON CONFLICT; if the tx's blob count shrank, surplus rows are
-// trimmed first. If the tx is already confirmed, the call is a no-op.
+// into mempool_blobs. All blobs in the slice must share the same ChainID,
+// TxHash, FromAddress, and Nonce. mempool_blobs.blob_index is the
+// per-transaction blob ordinal (0..N-1), so a re-poll of an already-tracked tx
+// updates the same rows in place via ON CONFLICT; rows of a pending tx this
+// one replaces (same sender and nonce, different hash) are deleted, and if the
+// tx's blob count shrank, surplus rows are trimmed first. If the tx is already
+// confirmed, the call is a no-op.
 func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	if len(blobs) == 0 {
 		return nil
@@ -2413,6 +2446,24 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 		return tx.Commit()
 	}
 
+	// A fee-bumped replacement reuses the sender's nonce under a new hash.
+	// The superseded hash never confirms, so without this delete its rows
+	// would sit in the pending view until the TTL sweep. Legacy rows with
+	// NULL nonce never match and still age out via the sweep.
+	supersededRes, err := tx.ExecContext(i.ctx,
+		`DELETE FROM mempool_blobs WHERE chain_id = $1 AND from_address = $2 AND nonce = $3 AND tx_hash <> $4`,
+		networkID, blobs[0].FromAddress, int64(blobs[0].Nonce), txHash,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to delete superseded pending blobs (tx: %s): %w", txHash, err)
+	}
+	if superseded, _ := supersededRes.RowsAffected(); superseded > 0 {
+		logger.Debug("Removed pending blobs superseded by replacement transaction",
+			zap.String("network", i.network.Name),
+			zap.String("tx_hash", txHash),
+			zap.Int64("superseded_count", superseded))
+	}
+
 	// Trim surplus rows if the tx's blob count shrank under us.
 	if _, err := tx.ExecContext(i.ctx,
 		`DELETE FROM mempool_blobs WHERE chain_id = $1 AND tx_hash = $2 AND blob_index >= $3`,
@@ -2428,7 +2479,7 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 		INSERT INTO mempool_blobs (
 			chain_id, tx_hash, blob_index, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash, nonce
 		) VALUES ` + valuesPlaceholders(len(blobs), mempoolBlobInsertColumns, nil) + `
 		ON CONFLICT (chain_id, tx_hash, blob_index) DO UPDATE SET
 			from_address = EXCLUDED.from_address,
@@ -2440,14 +2491,15 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 			timestamp = EXCLUDED.timestamp,
 			max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
 			blob_gas_used = EXCLUDED.blob_gas_used,
-			versioned_hash = EXCLUDED.versioned_hash
+			versioned_hash = EXCLUDED.versioned_hash,
+			nonce = EXCLUDED.nonce
 	`
 	upsertArgs := make([]interface{}, 0, len(blobs)*mempoolBlobInsertColumns)
 	for offset, b := range blobs {
 		upsertArgs = append(upsertArgs,
 			b.ChainID, b.TxHash, offset, b.FromAddress, b.UserAttribution,
 			b.BlobSizeBytes, b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostWei,
-			b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed, b.VersionedHash)
+			b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed, b.VersionedHash, int64(b.Nonce))
 	}
 	if _, err := tx.ExecContext(i.ctx, upsertQuery, upsertArgs...); err != nil {
 		return fmt.Errorf("failed to insert pending blobs (tx: %s): %w", txHash, err)

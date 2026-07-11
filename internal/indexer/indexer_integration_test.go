@@ -343,6 +343,81 @@ func TestIntegrationInsertPendingBlobsUpsert(t *testing.T) {
 	}
 }
 
+// A fee-bumped replacement reuses the sender's nonce under a new hash, so the
+// replaced hash never confirms and — before the nonce column — only the TTL
+// sweep removed its pending rows. Verify both cleanup sites against real
+// Postgres: seeing the replacement pending (insertPendingBlobs) and confirming
+// a same-(sender, nonce) tx in a block (insertBlockData), plus NULL-nonce
+// legacy rows staying untouched by either.
+func TestIntegrationMempoolReplacementCleanup(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+
+	pendingTxHashes := func() []string {
+		t.Helper()
+		var hashes []string
+		if err := database.SelectContext(ctx, &hashes,
+			"SELECT DISTINCT tx_hash FROM mempool_blobs WHERE chain_id = $1 ORDER BY tx_hash", integrationChainID); err != nil {
+			t.Fatalf("read pending tx hashes: %v", err)
+		}
+		return hashes
+	}
+	insertPending := func(nonce uint64, txHash string, blobCount int) {
+		t.Helper()
+		blobs := make([]models.Blob, 0, blobCount)
+		for i := 0; i < blobCount; i++ {
+			b := integrationBlob(models.PendingBlockNumber, i, txHash, "0xsender", false)
+			b.Nonce = nonce
+			blobs = append(blobs, b)
+		}
+		if err := idx.insertPendingBlobs(blobs); err != nil {
+			t.Fatalf("insertPendingBlobs(%s) error = %v", txHash, err)
+		}
+	}
+
+	// Sender S has tx 0xorig pending at nonce 7 (two blobs), plus an
+	// unrelated pending tx at nonce 8 that must survive every cleanup below.
+	insertPending(7, "0xorig", 2)
+	insertPending(8, "0xother", 1)
+
+	// A fee bump at the same (sender, nonce) under a new hash: seeing it
+	// pending must drop both of 0xorig's rows and only those.
+	insertPending(7, "0xbump", 1)
+	if got := pendingTxHashes(); len(got) != 2 || got[0] != "0xbump" || got[1] != "0xother" {
+		t.Fatalf("expected pending [0xbump 0xother] after replacement, got %v", got)
+	}
+
+	// A second bump confirms in a block without ever being seen pending.
+	// Storing the block must clear 0xbump via (sender, nonce) even though
+	// 0xbump's hash appears nowhere in the block.
+	final := integrationBlob(400, 0, "0xfinal", "0xsender", true)
+	final.Nonce = 7
+	indexedBlock := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 400, BlockHash: "0xhash400", ParentHash: "0xparent400"}
+	if err := idx.insertBlockData([]models.Blob{final}, indexedBlock, nil, 0); err != nil {
+		t.Fatalf("insertBlockData() confirm error = %v", err)
+	}
+	if got := pendingTxHashes(); len(got) != 1 || got[0] != "0xother" {
+		t.Fatalf("expected pending [0xother] after confirmation, got %v", got)
+	}
+
+	// A row written by a pre-nonce binary holds NULL: no (sender, nonce)
+	// cleanup may ever match it — NULL never equals — so it survives until
+	// the TTL sweep.
+	if _, err := database.ExecContext(ctx, `
+		INSERT INTO mempool_blobs (
+			chain_id, tx_hash, blob_index, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp
+		) VALUES ($1, '0xlegacy', 0, '0xsender', '', 131072, 10, 2, 1000, $2)
+	`, integrationChainID, time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("seed legacy NULL-nonce row: %v", err)
+	}
+	insertPending(9, "0xnine", 1)
+	if got := pendingTxHashes(); len(got) != 3 || got[0] != "0xlegacy" || got[1] != "0xnine" || got[2] != "0xother" {
+		t.Fatalf("expected pending [0xlegacy 0xnine 0xother], got %v", got)
+	}
+}
+
 func TestIntegrationSetNetworkMetadataBatch(t *testing.T) {
 	_, database := newIntegrationIndexer(t)
 	ctx := context.Background()
