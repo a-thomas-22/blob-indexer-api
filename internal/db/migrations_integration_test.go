@@ -1314,12 +1314,16 @@ func TestBlobVersionedHashesMigration(t *testing.T) {
 	}
 }
 
-// TestMempoolBlobNonceMigration verifies migration 8: mempool_blobs gains the
-// nullable nonce column driving the indexer's replacement cleanup. Rows
-// written before the migration stay NULL — they can never match a
+// TestMempoolTxReplacementsMigration verifies migration 8: mempool_blobs
+// gains the nullable nonce column keying the indexer's replacement eviction
+// (rows written before the migration stay NULL — they can never match a
 // (from_address, nonce) cleanup delete and only age out via the TTL sweep —
-// while new rows persist the sender's nonce and are matched by it.
-func TestMempoolBlobNonceMigration(t *testing.T) {
+// while new rows persist the sender's nonce and are matched by it), and the
+// blob_replacements event log exists as a regular LOGGED table (replacement
+// observations are not reconstructible, unlike mempool_blobs), keyed one row
+// per replaced hash with upsert-on-reobservation semantics and the
+// replaced_at index serving the list endpoint and retention pruning.
+func TestMempoolTxReplacementsMigration(t *testing.T) {
 	db, err := sqlx.Connect("postgres", integrationDBURL(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -1376,25 +1380,6 @@ func TestMempoolBlobNonceMigration(t *testing.T) {
 	if len(matched) != 1 || matched[0] != "0xpost" {
 		t.Fatalf("expected (from, nonce) predicate to match only 0xpost, got %v", matched)
 	}
-}
-
-// TestBlobReplacementsMigration verifies migration 9: the blob_replacements
-// event log exists as a regular LOGGED table (replacement observations are
-// not reconstructible, unlike mempool_blobs), keyed one row per replaced
-// hash with upsert-on-reobservation semantics, and carries the replaced_at
-// index serving the list endpoint and retention pruning.
-func TestBlobReplacementsMigration(t *testing.T) {
-	db, err := sqlx.Connect("postgres", integrationDBURL(t))
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	defer db.Close()
-	resetSchema(t, db)
-
-	m := migrator(t, db)
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		t.Fatalf("migrate to latest: %v", err)
-	}
 
 	var persistence string
 	if err := db.Get(&persistence, `SELECT relpersistence FROM pg_class WHERE relname = 'blob_replacements'`); err != nil {
@@ -1404,7 +1389,6 @@ func TestBlobReplacementsMigration(t *testing.T) {
 		t.Fatalf("expected blob_replacements to be LOGGED (relpersistence 'p'), got %q", persistence)
 	}
 
-	t0 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	upsert := `
 		INSERT INTO blob_replacements (chain_id, replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at)
 		VALUES (1, '0xold', $1, '0xfrom', 7, $2)
