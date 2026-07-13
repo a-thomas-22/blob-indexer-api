@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.1](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.12.0...blob-indexer-api-v0.12.1) (2026-07-13)
+
+
+### Bug Fixes
+
+* **api:** add Swagger annotations to networks endpoints ([#300](https://github.com/a-thomas-22/blob-indexer-api/issues/300)) ([a9eac8f](https://github.com/a-thomas-22/blob-indexer-api/commit/a9eac8f80c4e54e8ccd0d5ad2ad7b7b557b20534))
+* **attribution:** update blob-list source URL and treat 404 as no-op ([#297](https://github.com/a-thomas-22/blob-indexer-api/issues/297)) ([c10618a](https://github.com/a-thomas-22/blob-indexer-api/commit/c10618a2ce71f8bdae89237eaad21ec36ba1b1c7))
+
 ## [0.12.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.11.0...blob-indexer-api-v0.12.0) (2026-07-13)
 
 
