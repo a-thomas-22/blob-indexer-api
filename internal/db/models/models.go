@@ -44,6 +44,25 @@ type Blob struct {
 	// compute it from the sibling rows' versioned_hash values, so it is empty
 	// for rows indexed before the versioned-hash migration.
 	VersionedHashes pq.StringArray `db:"versioned_hashes"`
+	// Nonce is the sender's account nonce. Persisted only on mempool_blobs
+	// rows (blobs has no nonce column), where it lets the indexer delete
+	// superseded pending rows when a fee-bumped replacement reuses the
+	// sender's nonce under a new hash. Excluded from scanning: no query
+	// selects it, and legacy pending rows hold NULL.
+	Nonce uint64 `db:"-"`
+}
+
+// BlobReplacement records a pending blob transaction the indexer evicted
+// because the sender reused its nonce: a fee-bumped replacement observed
+// either in the mempool or as a confirmed transaction. One row per replaced
+// hash; a re-observed replacement upserts so the latest replacement wins.
+type BlobReplacement struct {
+	ChainID           int       `db:"chain_id"`
+	ReplacedTxHash    string    `db:"replaced_tx_hash"`
+	ReplacementTxHash string    `db:"replacement_tx_hash"`
+	FromAddress       string    `db:"from_address"`
+	Nonce             int64     `db:"nonce"`
+	ReplacedAt        time.Time `db:"replaced_at"`
 }
 
 // BlobUser represents a known blob transaction sender

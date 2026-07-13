@@ -210,6 +210,7 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 			Timestamp:         time.Now().Add(-time.Duration(i) * time.Minute),
 			Confirmed:         false,
 			VersionedHash:     versionedHashPtr(fmt.Sprintf("0x01%062x", 0x1000000+i)),
+			Nonce:             uint64(1000 + i),
 		}
 
 		// Insert the pending blob
@@ -217,9 +218,9 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 			INSERT INTO mempool_blobs (
 				chain_id, tx_hash, blob_index, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-				timestamp, versioned_hash
+				timestamp, versioned_hash, nonce, last_seen
 			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
 			)
 			ON CONFLICT (chain_id, tx_hash, blob_index) DO UPDATE SET
 				from_address = $4,
@@ -229,12 +230,14 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 				tip_per_blob_gas = $8,
 				total_cost_wei = $9,
 				timestamp = $10,
-				versioned_hash = $11
+				versioned_hash = $11,
+				nonce = $12,
+				last_seen = $13
 		`
 		_, err := database.ExecContext(ctx, query,
 			blob.ChainID, blob.TxHash, blob.BlobIndex, blob.FromAddress, blob.UserAttribution,
 			blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-			blob.Timestamp, blob.VersionedHash,
+			blob.Timestamp, blob.VersionedHash, int64(blob.Nonce), blob.Timestamp,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert pending blob %d: %w", i, err)

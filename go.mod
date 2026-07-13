@@ -2,6 +2,10 @@ module github.com/a-thomas-22/blob-indexer-api
 
 go 1.26.1
 
+// Pinned past go1.26.4 for GO-2026-5856 (crypto/tls Encrypted Client Hello
+// privacy leak); govulncheck in CI fails the build on the affected stdlib.
+toolchain go1.26.5
+
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/ethereum/go-ethereum v1.17.4

@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 	"go.uber.org/zap"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
@@ -87,6 +88,23 @@ const (
 	// pendingTxResubscribeMaxBackoff caps the exponential backoff between
 	// resubscribe attempts.
 	pendingTxResubscribeMaxBackoff = 8 * time.Second
+
+	// blobReplacementRetention bounds how long blob_replacements rows are
+	// kept; pruned on the mempool cleanup ticker. A week keeps the log
+	// useful for resolving a stale hash pasted days later while bounding
+	// the table to a trickle of rows (fee bumps are occasional events).
+	blobReplacementRetention = 7 * 24 * time.Hour
+
+	// defaultMempoolReconcileInterval paces the slow reconciliation poll
+	// that runs alongside the websocket pending-tx subscription. The
+	// subscription announces a tx only once, on entry to the pool, so a
+	// WS-mode row's timestamp is its first-seen time and the TTL sweep
+	// would purge a still-pending tx after mempool_ttl. Re-upserting the
+	// pool's blob txs refreshes their timestamps, making the sweep mean
+	// "gone from the pool for mempool_ttl" in both modes. Slower than the
+	// fallback poll: the subscription already delivers additions instantly,
+	// so this only needs to outpace the TTL by a wide margin.
+	defaultMempoolReconcileInterval = 2 * time.Minute
 )
 
 // errReorgDetected is returned when a chain reorganization is detected and handled
@@ -171,11 +189,15 @@ type Indexer struct {
 	mempoolPollingInterval time.Duration
 	mempoolTTL             time.Duration
 	mempoolCleanupInterval time.Duration
-	workerCount            int
-	maxBlockRetries        int
-	gapScanInterval        time.Duration
-	maxReorgDepth          int
-	startupGapScanBlocks   int
+	// mempoolReconcileInterval paces the WS-mode reconciliation poll; a
+	// field so tests can shrink it. Defaults to
+	// defaultMempoolReconcileInterval.
+	mempoolReconcileInterval time.Duration
+	workerCount              int
+	maxBlockRetries          int
+	gapScanInterval          time.Duration
+	maxReorgDepth            int
+	startupGapScanBlocks     int
 	// pendingTxResubBaseBackoff is the initial resubscribe backoff; a field so
 	// tests can shrink it. Defaults to pendingTxResubscribeBaseBackoff.
 	pendingTxResubBaseBackoff time.Duration
@@ -258,6 +280,7 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		mempoolPollingInterval:    cfg.Indexer.MempoolPollingInterval,
 		mempoolTTL:                cfg.Indexer.MempoolTTL,
 		mempoolCleanupInterval:    cfg.Indexer.MempoolCleanupInterval,
+		mempoolReconcileInterval:  defaultMempoolReconcileInterval,
 		workerCount:               workerCount,
 		maxBlockRetries:           cfg.Indexer.MaxBlockRetries,
 		gapScanInterval:           cfg.Indexer.GapScanInterval,
@@ -465,6 +488,23 @@ func (i *Indexer) Start() error {
 			}()
 			logger.Info("Subscribed to pending transactions via websocket",
 				zap.String("network", i.network.Name))
+
+			// Slow reconciliation poll: the subscription announces a tx
+			// only once, so without this a still-pending blob's row keeps
+			// its first-seen timestamp and the TTL sweep purges it from
+			// the pending view after mempool_ttl while it is still in the
+			// node's pool. Re-upserting refreshes timestamps so the sweep
+			// only reaps txs that actually left the pool. If the
+			// subscription later dies and the fast polling fallback
+			// starts, both tickers run the same idempotent poll — wasteful
+			// only, never wrong.
+			if i.mempoolReconcileInterval > 0 {
+				i.wg.Add(1)
+				go func() {
+					defer i.wg.Done()
+					i.runMempoolReconciler()
+				}()
+			}
 		}
 	} else {
 		i.startMempoolIndexer()
@@ -1425,6 +1465,7 @@ func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID in
 			MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
 			BlobGasUsed:       metrics.blobGasUsed,
 			VersionedHash:     &versionedHash,
+			Nonce:             tx.Nonce(),
 		})
 	}
 	return rows
@@ -1522,6 +1563,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 				MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
 				BlobGasUsed:       metrics.blobGasUsed,
 				VersionedHash:     &versionedHash,
+				Nonce:             tx.Nonce(),
 			})
 			blobIndex++
 		}
@@ -2027,7 +2069,7 @@ const blobInsertColumns = 14
 
 // mempoolBlobInsertColumns is the number of columns written per row when
 // upserting into mempool_blobs.
-const mempoolBlobInsertColumns = 13
+const mempoolBlobInsertColumns = 15
 
 // valuesPlaceholders builds a multi-row VALUES clause "($1,$2,...),($n,...),..."
 // for rows rows of width columns. casts, when non-nil, must have width entries
@@ -2092,18 +2134,24 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 
 	// Insert blobs using a prepared statement within the transaction
 	if len(blobs) > 0 {
-		// Collect unique tx hashes to delete their pending counterparts
+		// Collect unique tx hashes to delete their pending counterparts, and
+		// each tx's (sender, nonce) to delete any pending tx it replaced.
 		txHashSet := make(map[string]struct{}, len(blobs))
+		txHashes := make([]string, 0, len(blobs))
+		senders := make([]string, 0, len(blobs))
+		nonces := make([]int64, 0, len(blobs))
 		for _, blob := range blobs {
+			if _, seen := txHashSet[blob.TxHash]; seen {
+				continue
+			}
 			txHashSet[blob.TxHash] = struct{}{}
+			txHashes = append(txHashes, blob.TxHash)
+			senders = append(senders, blob.FromAddress)
+			nonces = append(nonces, int64(blob.Nonce))
 		}
 
 		// Delete pending blob rows that are now being confirmed
-		if len(txHashSet) > 0 {
-			txHashes := make([]string, 0, len(txHashSet))
-			for h := range txHashSet {
-				txHashes = append(txHashes, h)
-			}
+		if len(txHashes) > 0 {
 			deleteQuery, deleteArgs, err := sqlx.In(
 				"DELETE FROM mempool_blobs WHERE chain_id = ? AND tx_hash IN (?)",
 				i.network.ChainID, txHashes,
@@ -2120,6 +2168,39 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				logger.Debug("Promoted pending blobs to confirmed",
 					zap.String("network", i.network.Name),
 					zap.Int64("promoted_count", promoted))
+			}
+
+			// A confirmed tx also invalidates any pending tx it replaced:
+			// same sender and nonce under a different hash. The replaced
+			// hash never confirms, so the hash-based delete above cannot
+			// see it and only the TTL sweep would remove it. Legacy rows
+			// with NULL nonce never match and still age out via the sweep.
+			// Each evicted hash is recorded in blob_replacements in the
+			// same statement — the hash-based delete ran first, so only
+			// genuinely replaced hashes reach the log.
+			supersededRes, err := tx.ExecContext(i.ctx,
+				`WITH superseded AS (
+					DELETE FROM mempool_blobs m
+					USING unnest($2::text[], $3::bigint[], $4::text[]) AS t(from_address, nonce, replacement_tx_hash)
+					WHERE m.chain_id = $1 AND m.from_address = t.from_address AND m.nonce = t.nonce
+					RETURNING m.tx_hash, m.from_address, m.nonce, t.replacement_tx_hash
+				)
+				INSERT INTO blob_replacements (chain_id, replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at)
+				SELECT DISTINCT $1, tx_hash, replacement_tx_hash, from_address, nonce, $5::timestamp FROM superseded
+				ON CONFLICT (chain_id, replaced_tx_hash) DO UPDATE SET
+					replacement_tx_hash = EXCLUDED.replacement_tx_hash,
+					from_address = EXCLUDED.from_address,
+					nonce = EXCLUDED.nonce,
+					replaced_at = EXCLUDED.replaced_at`,
+				i.network.ChainID, pq.Array(senders), pq.Array(nonces), pq.Array(txHashes), blobs[0].Timestamp,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to delete superseded pending blobs: %w", err)
+			}
+			if superseded, _ := supersededRes.RowsAffected(); superseded > 0 {
+				logger.Debug("Recorded pending blobs superseded by confirmed transactions",
+					zap.String("network", i.network.Name),
+					zap.Int64("superseded_tx_count", superseded))
 			}
 		}
 
@@ -2256,7 +2337,103 @@ func (i *Indexer) runMempoolIndexer() {
 					zap.String("network", i.network.Name),
 					zap.Error(err))
 			}
+			// The template poll above only re-observes competitively priced
+			// txs; tracked txs that fell out of the template still need
+			// their liveness confirmed or they age out while pending.
+			i.refreshPendingBlobLiveness()
 		}
+	}
+}
+
+// runMempoolReconciler re-polls the node's pending pool on a slow ticker
+// while the websocket pending-tx subscription is active. It runs the same
+// poll body as the fallback indexer: still-pending blob txs are re-upserted
+// (refreshing their timestamps so the TTL sweep only reaps txs that actually
+// left the pool), newly appeared ones are picked up, and confirmed or
+// replaced ones are suppressed by insertPendingBlobs' guards.
+func (i *Indexer) runMempoolReconciler() {
+	logger.Info("Mempool reconciler starting",
+		zap.String("network", i.network.Name),
+		zap.Duration("interval", i.mempoolReconcileInterval))
+
+	ticker := time.NewTicker(i.mempoolReconcileInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-i.ctx.Done():
+			logger.Info("Mempool reconciler stopped", zap.String("network", i.network.Name))
+			return
+		case <-ticker.C:
+			if err := i.processPendingTransactions(); err != nil {
+				logger.Error("Mempool reconciliation poll failed",
+					zap.String("network", i.network.Name),
+					zap.Error(err))
+			}
+			i.refreshPendingBlobLiveness()
+		}
+	}
+}
+
+// refreshPendingBlobLiveness bumps last_seen for every tracked pending blob
+// tx the node still reports as pending. The pending-block template the
+// mempool poll reads (eth_getBlockByNumber("pending")) is fee-filtered and
+// blob-capped, so an underpriced blob tx waiting out a fee spike never
+// appears there — exactly the tx the pending view must not lose. Asking the
+// node for each tracked hash directly keeps the TTL sweep honest in both
+// directions: a still-pooled tx survives indefinitely, and a tx the node
+// dropped stops being bumped and is reaped mempool_ttl after its last
+// sighting. Cost is bounded by our own row count (the live blob mempool),
+// not the node's pool, so this stays cheap at every cadence it runs at.
+func (i *Indexer) refreshPendingBlobLiveness() {
+	var hashes []string
+	if err := i.db.SelectContext(i.ctx, &hashes,
+		"SELECT DISTINCT tx_hash FROM mempool_blobs WHERE chain_id = $1", i.network.ChainID); err != nil {
+		logger.Error("Failed to list pending blobs for liveness refresh",
+			zap.String("network", i.network.Name),
+			zap.Error(err))
+		return
+	}
+	if len(hashes) == 0 {
+		return
+	}
+
+	live := make([]string, 0, len(hashes))
+	for _, hash := range hashes {
+		select {
+		case <-i.ctx.Done():
+			return
+		default:
+		}
+		_, isPending, err := i.ethClient.GetTransactionByHash(i.ctx, common.HexToHash(hash))
+		if err != nil {
+			// NotFound means the node no longer knows the tx; anything else
+			// is a transient RPC failure. Either way last_seen stays put —
+			// the TTL sweep reaps the row only if the condition persists.
+			if !errors.Is(err, geth.NotFound) {
+				logger.Debug("Pending blob liveness check failed",
+					zap.String("network", i.network.Name),
+					zap.String("tx_hash", hash),
+					zap.Error(err))
+			}
+			continue
+		}
+		if isPending {
+			live = append(live, hash)
+		}
+	}
+	if len(live) == 0 {
+		return
+	}
+
+	unlockWrites := i.lockDBWrites()
+	defer unlockWrites()
+	if _, err := i.db.ExecContext(i.ctx,
+		"UPDATE mempool_blobs SET last_seen = $2 WHERE chain_id = $1 AND tx_hash = ANY($3)",
+		i.network.ChainID, time.Now(), pq.Array(live)); err != nil {
+		logger.Error("Failed to refresh pending blob liveness",
+			zap.String("network", i.network.Name),
+			zap.Error(err))
 	}
 }
 
@@ -2315,6 +2492,22 @@ func (i *Indexer) runMempoolCleanup() {
 				logger.Info("Cleaned up stale pending blobs",
 					zap.String("network", i.network.Name),
 					zap.Int64("deleted_count", deleted))
+			}
+
+			replacementCutoff := time.Now().Add(-blobReplacementRetention)
+			unlockWrites = i.lockDBWrites()
+			pruned, err := i.db.DeleteStaleBlobReplacements(i.ctx, i.network.ChainID, replacementCutoff)
+			unlockWrites()
+			if err != nil {
+				logger.Error("Failed to prune stale blob replacements",
+					zap.String("network", i.network.Name),
+					zap.Error(err))
+				continue
+			}
+			if pruned > 0 {
+				logger.Info("Pruned stale blob replacements",
+					zap.String("network", i.network.Name),
+					zap.Int64("pruned_count", pruned))
 			}
 		}
 	}
@@ -2377,11 +2570,14 @@ func (i *Indexer) processPendingTransactions() error {
 }
 
 // insertPendingBlobs upserts the per-blob pending rows for a single transaction
-// into mempool_blobs. All blobs in the slice must share the same ChainID and
-// TxHash. mempool_blobs.blob_index is the per-transaction blob ordinal
-// (0..N-1), so a re-poll of an already-tracked tx updates the same rows in
-// place via ON CONFLICT; if the tx's blob count shrank, surplus rows are
-// trimmed first. If the tx is already confirmed, the call is a no-op.
+// into mempool_blobs. All blobs in the slice must share the same ChainID,
+// TxHash, FromAddress, and Nonce. mempool_blobs.blob_index is the
+// per-transaction blob ordinal (0..N-1), so a re-poll of an already-tracked tx
+// updates the same rows in place via ON CONFLICT; rows of a pending tx this
+// one replaces (same sender and nonce, different hash) are deleted, and if the
+// tx's blob count shrank, surplus rows are trimmed first. If the tx is already
+// confirmed, or already recorded as replaced in blob_replacements, the call is
+// a no-op.
 func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	if len(blobs) == 0 {
 		return nil
@@ -2398,19 +2594,58 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// If the tx is already confirmed, do not (re)create pending rows. The
-	// block_number >= 0 filter keeps legacy pending sentinel rows — which an
-	// old binary can still write into blobs during the deploy window — from
-	// suppressing mempool_blobs writes.
-	var hasConfirmed bool
+	// If the tx is already confirmed, or already observed replaced, do not
+	// (re)create pending rows. The block_number >= 0 filter keeps legacy
+	// pending sentinel rows — which an old binary can still write into blobs
+	// during the deploy window — from suppressing mempool_blobs writes. The
+	// blob_replacements check treats the eviction record as a tombstone: a
+	// pending fetch races the block path, so the block confirming this tx's
+	// replacement (same sender and nonce, different hash) can commit between
+	// this tx being fetched and stored here, and without the tombstone the
+	// dead tx would be resurrected into the pending view until the TTL
+	// sweep. Suppressing on a tombstone is safe: a node only re-admits a
+	// replaced tx via an explicit re-broadcast after its replacement
+	// vanished from the pool, which is rare and self-corrects on inclusion.
+	var suppressed bool
 	if err := tx.QueryRowContext(i.ctx,
-		`SELECT EXISTS (SELECT 1 FROM blobs WHERE chain_id = $1 AND tx_hash = $2 AND block_number >= 0)`,
+		`SELECT EXISTS (SELECT 1 FROM blobs WHERE chain_id = $1 AND tx_hash = $2 AND block_number >= 0)
+			OR EXISTS (SELECT 1 FROM blob_replacements WHERE chain_id = $1 AND replaced_tx_hash = $2)`,
 		networkID, txHash,
-	).Scan(&hasConfirmed); err != nil {
+	).Scan(&suppressed); err != nil {
 		return fmt.Errorf("failed to check confirmed blobs for pending tx: %w", err)
 	}
-	if hasConfirmed {
+	if suppressed {
 		return tx.Commit()
+	}
+
+	// A fee-bumped replacement reuses the sender's nonce under a new hash.
+	// The superseded hash never confirms, so without this delete its rows
+	// would sit in the pending view until the TTL sweep. Legacy rows with
+	// NULL nonce never match and still age out via the sweep. Each evicted
+	// hash is recorded in blob_replacements in the same statement — once the
+	// rows are gone the observation is otherwise lost.
+	supersededRes, err := tx.ExecContext(i.ctx,
+		`WITH superseded AS (
+			DELETE FROM mempool_blobs WHERE chain_id = $1 AND from_address = $2 AND nonce = $3 AND tx_hash <> $4
+			RETURNING tx_hash
+		)
+		INSERT INTO blob_replacements (chain_id, replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at)
+		SELECT DISTINCT $1, tx_hash, $4, $2, $3, $5::timestamp FROM superseded
+		ON CONFLICT (chain_id, replaced_tx_hash) DO UPDATE SET
+			replacement_tx_hash = EXCLUDED.replacement_tx_hash,
+			from_address = EXCLUDED.from_address,
+			nonce = EXCLUDED.nonce,
+			replaced_at = EXCLUDED.replaced_at`,
+		networkID, blobs[0].FromAddress, int64(blobs[0].Nonce), txHash, blobs[0].Timestamp,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to delete superseded pending blobs (tx: %s): %w", txHash, err)
+	}
+	if superseded, _ := supersededRes.RowsAffected(); superseded > 0 {
+		logger.Debug("Recorded pending blobs superseded by replacement transaction",
+			zap.String("network", i.network.Name),
+			zap.String("tx_hash", txHash),
+			zap.Int64("superseded_tx_count", superseded))
 	}
 
 	// Trim surplus rows if the tx's blob count shrank under us.
@@ -2423,12 +2658,15 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 
 	// One multi-row upsert per poll keeps this a single round-trip; rows are
 	// keyed by the per-tx blob ordinal, so a re-poll updates the same rows in
-	// place.
+	// place. timestamp is deliberately absent from the update list: it is the
+	// first-seen instant serving API ordering and pending-age metrics, while
+	// last_seen is the liveness watermark the TTL sweep reaps on — a
+	// re-observation bumps only the latter.
 	upsertQuery := `
 		INSERT INTO mempool_blobs (
 			chain_id, tx_hash, blob_index, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash, nonce, last_seen
 		) VALUES ` + valuesPlaceholders(len(blobs), mempoolBlobInsertColumns, nil) + `
 		ON CONFLICT (chain_id, tx_hash, blob_index) DO UPDATE SET
 			from_address = EXCLUDED.from_address,
@@ -2437,17 +2675,18 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 			base_fee_per_blob_gas = EXCLUDED.base_fee_per_blob_gas,
 			tip_per_blob_gas = EXCLUDED.tip_per_blob_gas,
 			total_cost_wei = EXCLUDED.total_cost_wei,
-			timestamp = EXCLUDED.timestamp,
 			max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
 			blob_gas_used = EXCLUDED.blob_gas_used,
-			versioned_hash = EXCLUDED.versioned_hash
+			versioned_hash = EXCLUDED.versioned_hash,
+			nonce = EXCLUDED.nonce,
+			last_seen = EXCLUDED.last_seen
 	`
 	upsertArgs := make([]interface{}, 0, len(blobs)*mempoolBlobInsertColumns)
 	for offset, b := range blobs {
 		upsertArgs = append(upsertArgs,
 			b.ChainID, b.TxHash, offset, b.FromAddress, b.UserAttribution,
 			b.BlobSizeBytes, b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostWei,
-			b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed, b.VersionedHash)
+			b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed, b.VersionedHash, int64(b.Nonce), b.Timestamp)
 	}
 	if _, err := tx.ExecContext(i.ctx, upsertQuery, upsertArgs...); err != nil {
 		return fmt.Errorf("failed to insert pending blobs (tx: %s): %w", txHash, err)

@@ -951,6 +951,25 @@ const (
 		LIMIT $3 OFFSET $4
 	`
 
+	// queryBlobReplacements lists observed replacement events, newest first.
+	queryBlobReplacements = `
+		SELECT replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at
+		FROM blob_replacements
+		WHERE chain_id = $1
+		ORDER BY replaced_at DESC
+		LIMIT $2 OFFSET $3
+	`
+
+	// queryBlobReplacementsByTxHash resolves the replacement events touching
+	// one transaction hash, on either side of the replacement.
+	queryBlobReplacementsByTxHash = `
+		SELECT replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at
+		FROM blob_replacements
+		WHERE chain_id = $1 AND (replaced_tx_hash = $2 OR replacement_tx_hash = $2)
+		ORDER BY replaced_at DESC
+		LIMIT $3 OFFSET $4
+	`
+
 	// queryUserByAddress retrieves aggregated stats for a single sender address.
 	queryUserByAddress = `
 		WITH selected_user AS (

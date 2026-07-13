@@ -258,19 +258,28 @@ func TestIntegrationInsertPendingBlobsUpsert(t *testing.T) {
 	}
 
 	// Second poll with changed fee data hits the ON CONFLICT DO UPDATE arm:
-	// same rows, stable ordinals, new values.
+	// same rows, stable ordinals, new values. The re-observation carries a
+	// later Timestamp: it must land in last_seen (the liveness watermark)
+	// while the stored timestamp keeps the first-seen instant that serves
+	// API ordering and pending-age metrics.
+	firstSeen := pending[0].Timestamp
+	reobserved := firstSeen.Add(time.Hour)
 	pending[0].TipPerBlobGas = "7"
 	pending[1].TipPerBlobGas = "7"
+	pending[0].Timestamp = reobserved
+	pending[1].Timestamp = reobserved
 	if err := idx.insertPendingBlobs(pending); err != nil {
 		t.Fatalf("insertPendingBlobs() second poll error = %v", err)
 	}
 
 	var rows []struct {
-		BlobIndex int    `db:"blob_index"`
-		Tip       string `db:"tip_per_blob_gas"`
+		BlobIndex int       `db:"blob_index"`
+		Tip       string    `db:"tip_per_blob_gas"`
+		Timestamp time.Time `db:"timestamp"`
+		LastSeen  time.Time `db:"last_seen"`
 	}
 	if err := database.SelectContext(ctx, &rows,
-		"SELECT blob_index, tip_per_blob_gas FROM mempool_blobs WHERE chain_id = $1 ORDER BY blob_index", integrationChainID); err != nil {
+		"SELECT blob_index, tip_per_blob_gas, timestamp, last_seen FROM mempool_blobs WHERE chain_id = $1 ORDER BY blob_index", integrationChainID); err != nil {
 		t.Fatalf("read pending rows: %v", err)
 	}
 	if len(rows) != 2 {
@@ -280,9 +289,25 @@ func TestIntegrationInsertPendingBlobsUpsert(t *testing.T) {
 		if tip, err := strconv.ParseFloat(r.Tip, 64); err != nil || tip != 7 {
 			t.Fatalf("expected tip_per_blob_gas=7 on blob_index %d, got %q (parse err %v)", r.BlobIndex, r.Tip, err)
 		}
+		if !r.Timestamp.Equal(firstSeen) {
+			t.Fatalf("expected re-poll to keep first-seen timestamp %v on blob_index %d, got %v", firstSeen, r.BlobIndex, r.Timestamp)
+		}
+		if !r.LastSeen.Equal(reobserved) {
+			t.Fatalf("expected re-poll to bump last_seen to %v on blob_index %d, got %v", reobserved, r.BlobIndex, r.LastSeen)
+		}
 	}
 	if rows[0].BlobIndex != 0 || rows[1].BlobIndex != 1 {
 		t.Fatalf("expected stable blob_index [0 1], got [%d %d]", rows[0].BlobIndex, rows[1].BlobIndex)
+	}
+
+	// The TTL sweep reaps on the liveness watermark, not on age: a cutoff
+	// past the first-seen timestamp but before last_seen must keep the rows.
+	swept, err := database.DeleteStalePendingBlobs(ctx, integrationChainID, firstSeen.Add(30*time.Minute))
+	if err != nil {
+		t.Fatalf("DeleteStalePendingBlobs() error = %v", err)
+	}
+	if swept != 0 {
+		t.Fatalf("expected liveness watermark to shield still-seen rows from the sweep, deleted %d", swept)
 	}
 
 	// A poll that sees fewer blobs for the tx trims the surplus ordinals.
@@ -340,6 +365,136 @@ func TestIntegrationInsertPendingBlobsUpsert(t *testing.T) {
 	}
 	if pendingLeft != 0 {
 		t.Fatalf("expected confirmed tx to suppress pending rows, got %d rows", pendingLeft)
+	}
+}
+
+// A fee-bumped replacement reuses the sender's nonce under a new hash, so the
+// replaced hash never confirms and — before the nonce column — only the TTL
+// sweep removed its pending rows. Verify both cleanup sites against real
+// Postgres: seeing the replacement pending (insertPendingBlobs) and confirming
+// a same-(sender, nonce) tx in a block (insertBlockData), plus NULL-nonce
+// legacy rows staying untouched by either.
+func TestIntegrationMempoolReplacementCleanup(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+
+	pendingTxHashes := func() []string {
+		t.Helper()
+		var hashes []string
+		if err := database.SelectContext(ctx, &hashes,
+			"SELECT DISTINCT tx_hash FROM mempool_blobs WHERE chain_id = $1 ORDER BY tx_hash", integrationChainID); err != nil {
+			t.Fatalf("read pending tx hashes: %v", err)
+		}
+		return hashes
+	}
+	insertPending := func(nonce uint64, txHash string, blobCount int) {
+		t.Helper()
+		blobs := make([]models.Blob, 0, blobCount)
+		for i := 0; i < blobCount; i++ {
+			b := integrationBlob(models.PendingBlockNumber, i, txHash, "0xsender", false)
+			b.Nonce = nonce
+			blobs = append(blobs, b)
+		}
+		if err := idx.insertPendingBlobs(blobs); err != nil {
+			t.Fatalf("insertPendingBlobs(%s) error = %v", txHash, err)
+		}
+	}
+
+	type replacementRow struct {
+		ReplacedTxHash    string `db:"replaced_tx_hash"`
+		ReplacementTxHash string `db:"replacement_tx_hash"`
+		FromAddress       string `db:"from_address"`
+		Nonce             int64  `db:"nonce"`
+	}
+	replacements := func() []replacementRow {
+		t.Helper()
+		var rows []replacementRow
+		if err := database.SelectContext(ctx, &rows,
+			"SELECT replaced_tx_hash, replacement_tx_hash, from_address, nonce FROM blob_replacements WHERE chain_id = $1 ORDER BY replaced_tx_hash", integrationChainID); err != nil {
+			t.Fatalf("read blob replacements: %v", err)
+		}
+		return rows
+	}
+
+	// Sender S has tx 0xorig pending at nonce 7 (two blobs), plus an
+	// unrelated pending tx at nonce 8 that must survive every cleanup below.
+	insertPending(7, "0xorig", 2)
+	insertPending(8, "0xother", 1)
+
+	// A fee bump at the same (sender, nonce) under a new hash: seeing it
+	// pending must drop both of 0xorig's rows and only those, and record
+	// the eviction — one event despite two deleted rows.
+	insertPending(7, "0xbump", 1)
+	if got := pendingTxHashes(); len(got) != 2 || got[0] != "0xbump" || got[1] != "0xother" {
+		t.Fatalf("expected pending [0xbump 0xother] after replacement, got %v", got)
+	}
+	if got := replacements(); len(got) != 1 ||
+		got[0] != (replacementRow{ReplacedTxHash: "0xorig", ReplacementTxHash: "0xbump", FromAddress: "0xsender", Nonce: 7}) {
+		t.Fatalf("expected replacement record [0xorig->0xbump], got %+v", got)
+	}
+
+	// A second bump confirms in a block without ever being seen pending.
+	// Storing the block must clear 0xbump via (sender, nonce) even though
+	// 0xbump's hash appears nowhere in the block, and record that eviction
+	// too — the log now holds the full chain 0xorig->0xbump->0xfinal.
+	final := integrationBlob(400, 0, "0xfinal", "0xsender", true)
+	final.Nonce = 7
+	indexedBlock := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 400, BlockHash: "0xhash400", ParentHash: "0xparent400"}
+	if err := idx.insertBlockData([]models.Blob{final}, indexedBlock, nil, 0); err != nil {
+		t.Fatalf("insertBlockData() confirm error = %v", err)
+	}
+	if got := pendingTxHashes(); len(got) != 1 || got[0] != "0xother" {
+		t.Fatalf("expected pending [0xother] after confirmation, got %v", got)
+	}
+	if got := replacements(); len(got) != 2 ||
+		got[0] != (replacementRow{ReplacedTxHash: "0xbump", ReplacementTxHash: "0xfinal", FromAddress: "0xsender", Nonce: 7}) ||
+		got[1] != (replacementRow{ReplacedTxHash: "0xorig", ReplacementTxHash: "0xbump", FromAddress: "0xsender", Nonce: 7}) {
+		t.Fatalf("expected replacement chain [0xbump->0xfinal, 0xorig->0xbump], got %+v", got)
+	}
+
+	// A stale pending observation of 0xbump — fetched before 0xfinal's block
+	// landed, stored after — must not resurrect it: the replacement record
+	// acts as a tombstone and suppresses the re-insert entirely, recording
+	// nothing new.
+	insertPending(7, "0xbump", 1)
+	if got := pendingTxHashes(); len(got) != 1 || got[0] != "0xother" {
+		t.Fatalf("expected tombstone to suppress stale 0xbump re-insert, got pending %v", got)
+	}
+	if got := replacements(); len(got) != 2 {
+		t.Fatalf("expected suppressed re-insert to record nothing, got %+v", got)
+	}
+
+	// A row written by a pre-nonce binary holds NULL: no (sender, nonce)
+	// cleanup may ever match it — NULL never equals — so it survives until
+	// the TTL sweep.
+	if _, err := database.ExecContext(ctx, `
+		INSERT INTO mempool_blobs (
+			chain_id, tx_hash, blob_index, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp
+		) VALUES ($1, '0xlegacy', 0, '0xsender', '', 131072, 10, 2, 1000, $2)
+	`, integrationChainID, time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("seed legacy NULL-nonce row: %v", err)
+	}
+	insertPending(9, "0xnine", 1)
+	if got := pendingTxHashes(); len(got) != 3 || got[0] != "0xlegacy" || got[1] != "0xnine" || got[2] != "0xother" {
+		t.Fatalf("expected pending [0xlegacy 0xnine 0xother], got %v", got)
+	}
+	if got := replacements(); len(got) != 2 {
+		t.Fatalf("expected no new replacement records from non-replacing inserts, got %+v", got)
+	}
+
+	// Retention pruning removes aged records; both events carry the seeded
+	// 2026-07-01 timestamp, so a now-cutoff clears the log.
+	pruned, err := database.DeleteStaleBlobReplacements(ctx, integrationChainID, time.Now())
+	if err != nil {
+		t.Fatalf("DeleteStaleBlobReplacements() error = %v", err)
+	}
+	if pruned != 2 {
+		t.Fatalf("expected 2 pruned replacement records, got %d", pruned)
+	}
+	if got := replacements(); len(got) != 0 {
+		t.Fatalf("expected empty replacement log after pruning, got %+v", got)
 	}
 }
 

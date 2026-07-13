@@ -68,6 +68,21 @@ type BlobResponse struct {
 	VersionedHashes []string `json:"versioned_hashes,omitempty" example:"0x01a1f8730e4064f7dd90279b721b25e28c07fc3e16d5fd4a26e6d3d5e9e0dbeb"`
 }
 
+// BlobReplacementResponse is one observed replacement event: a pending blob
+// transaction evicted from the mempool view because its sender reused the
+// nonce in a fee-bumped replacement. replacement_tx_hash is the transaction
+// that superseded it — resolve it via /blob/{txHash} to see whether it is
+// pending or confirmed.
+type BlobReplacementResponse struct {
+	ChainID           int       `json:"chain_id"`
+	NetworkName       string    `json:"network_name,omitempty"`
+	ReplacedTxHash    string    `json:"replaced_tx_hash"`
+	ReplacementTxHash string    `json:"replacement_tx_hash"`
+	FromAddress       string    `json:"from_address"`
+	Nonce             int64     `json:"nonce"`
+	ReplacedAt        time.Time `json:"replaced_at"`
+}
+
 // BlockPricingResponse represents block-level blob pricing data
 type BlockPricingResponse struct {
 	BlockNumber        int64   `json:"block_number"`
@@ -539,6 +554,68 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 		zap.String("network", network.Name),
 		zap.Int("count", len(response)))
 	setCacheControl(w, mempoolBlobsCacheTTL, mempoolBlobsEdgeTTL)
+	a.respondSuccess(w, response)
+}
+
+// GetBlobReplacements godoc
+// @Summary List replaced blob transactions
+// @Description Recent pending blob transactions evicted from the mempool view because the sender reused their nonce in a fee-bumped replacement, newest first. Events are recorded at eviction time — when the replacement was seen pending or when it confirmed — and retained for roughly a week. Pass tx_hash to resolve the events touching one transaction, matched on either side of the replacement.
+// @Tags blobs
+// @Accept json
+// @Produce json
+// @Param network query string false "Network name or chain ID (default: first enabled network)"
+// @Param tx_hash query string false "Filter to events where this hash was replaced or was the replacement"
+// @Param limit query int false "Number of events to return (default: 25, max: 100)"
+// @Param offset query int false "Number of events to skip for pagination (default: 0, max: 10000)"
+// @Success 200 {object} Response{data=[]BlobReplacementResponse} "Success"
+// @Failure 400 {object} Response "Bad request"
+// @Failure 500 {object} Response "Internal server error"
+// @Router /blob/replacements [get]
+func (a *API) GetBlobReplacements(w http.ResponseWriter, r *http.Request) {
+	network, err := a.getNetworkFromRequest(r)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	limit, offset, err := a.parsePagination(r, 25)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	query := queryBlobReplacements
+	args := []interface{}{network.ChainID, limit, offset}
+	if txHash := r.URL.Query().Get("tx_hash"); txHash != "" {
+		if !strings.HasPrefix(txHash, "0x") || !common.IsHexHash(txHash) {
+			a.respondError(w, http.StatusBadRequest, "Invalid transaction hash format")
+			return
+		}
+		query = queryBlobReplacementsByTxHash
+		args = []interface{}{network.ChainID, txHash, limit, offset}
+	}
+
+	var events []models.BlobReplacement
+	if err := a.db.SelectContext(r.Context(), &events, query, args...); err != nil {
+		logger.Error("Failed to get blob replacements",
+			zap.String("network", network.Name),
+			zap.Error(err))
+		a.respondError(w, http.StatusInternalServerError, "Failed to get blob replacements")
+		return
+	}
+
+	response := make([]BlobReplacementResponse, 0, len(events))
+	for _, e := range events {
+		response = append(response, BlobReplacementResponse{
+			ChainID:           network.ChainID,
+			NetworkName:       network.Name,
+			ReplacedTxHash:    e.ReplacedTxHash,
+			ReplacementTxHash: e.ReplacementTxHash,
+			FromAddress:       e.FromAddress,
+			Nonce:             e.Nonce,
+			ReplacedAt:        e.ReplacedAt,
+		})
+	}
 	a.respondSuccess(w, response)
 }
 

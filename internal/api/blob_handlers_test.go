@@ -166,6 +166,114 @@ func TestGetMempoolBlobs_DBError(t *testing.T) {
 	}
 }
 
+func TestGetBlobReplacements_Success(t *testing.T) {
+	replacedAt := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if !strings.Contains(query, "FROM blob_replacements") || strings.Contains(query, "replaced_tx_hash = $2") {
+				t.Fatalf("expected unfiltered replacements query, got %q", query)
+			}
+			if len(args) != 3 || args[0] != 42 || args[1] != 25 || args[2] != 0 {
+				t.Fatalf("unexpected args: %v", args)
+			}
+			events := dest.(*[]models.BlobReplacement)
+			*events = []models.BlobReplacement{{
+				ReplacedTxHash:    "0xold",
+				ReplacementTxHash: "0xnew",
+				FromAddress:       "0xsender",
+				Nonce:             7,
+				ReplacedAt:        replacedAt,
+			}}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobReplacements(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var envelope struct {
+		Success bool                      `json:"success"`
+		Data    []BlobReplacementResponse `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !envelope.Success || len(envelope.Data) != 1 {
+		t.Fatalf("unexpected envelope: %+v", envelope)
+	}
+	got := envelope.Data[0]
+	if got.ChainID != 42 || got.NetworkName != "testnet" ||
+		got.ReplacedTxHash != "0xold" || got.ReplacementTxHash != "0xnew" ||
+		got.FromAddress != "0xsender" || got.Nonce != 7 || !got.ReplacedAt.Equal(replacedAt) {
+		t.Fatalf("unexpected replacement response: %+v", got)
+	}
+}
+
+func TestGetBlobReplacements_TxHashFilter(t *testing.T) {
+	txHash := "0x" + strings.Repeat("ab", 32)
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if !strings.Contains(query, "replaced_tx_hash = $2 OR replacement_tx_hash = $2") {
+				t.Fatalf("expected filtered replacements query, got %q", query)
+			}
+			if len(args) != 4 || args[0] != 42 || args[1] != txHash || args[2] != 25 || args[3] != 0 {
+				t.Fatalf("unexpected args: %v", args)
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?tx_hash="+txHash, http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobReplacements(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestGetBlobReplacements_InvalidTxHash(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?tx_hash=nothex", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobReplacements(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetBlobReplacements_InvalidLimit(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?limit=0", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobReplacements(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetBlobReplacements_DBError(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return fmt.Errorf("db error")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetBlobReplacements(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
 func TestGetMempoolPressure_Success(t *testing.T) {
 	oldest := time.Now().Add(-5 * time.Minute).UTC()
 	newest := time.Now().Add(-30 * time.Second).UTC()

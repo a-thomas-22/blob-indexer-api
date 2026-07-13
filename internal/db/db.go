@@ -335,9 +335,25 @@ func (db *DB) DeleteBlockMetricsFromBlock(ctx context.Context, networkID int, fr
 	return err
 }
 
-// DeleteStalePendingBlobs removes pending blobs older than the given cutoff time.
+// DeleteStalePendingBlobs removes pending blobs whose liveness watermark is
+// older than the given cutoff time. last_seen is bumped whenever the node
+// still reports the tx as pending, so this reaps txs the node stopped
+// reporting, not txs that are merely old; NULL last_seen (rows written by a
+// pre-last_seen binary) falls back to the first-seen timestamp, which is the
+// pre-watermark behavior.
 func (db *DB) DeleteStalePendingBlobs(ctx context.Context, networkID int, cutoff time.Time) (int64, error) {
-	query := "DELETE FROM mempool_blobs WHERE chain_id = $1 AND timestamp < $2"
+	query := "DELETE FROM mempool_blobs WHERE chain_id = $1 AND COALESCE(last_seen, timestamp) < $2"
+	res, err := db.ExecContext(ctx, query, networkID, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// DeleteStaleBlobReplacements removes replacement records older than the given
+// cutoff time.
+func (db *DB) DeleteStaleBlobReplacements(ctx context.Context, networkID int, cutoff time.Time) (int64, error) {
+	query := "DELETE FROM blob_replacements WHERE chain_id = $1 AND replaced_at < $2"
 	res, err := db.ExecContext(ctx, query, networkID, cutoff)
 	if err != nil {
 		return 0, err

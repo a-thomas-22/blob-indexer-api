@@ -1313,3 +1313,127 @@ func TestBlobVersionedHashesMigration(t *testing.T) {
 		t.Fatal("expected idx_blobs_chain_versioned_hash to exist")
 	}
 }
+
+// TestMempoolTxReplacementsMigration verifies migration 8: mempool_blobs
+// gains the nullable nonce column keying the indexer's replacement eviction
+// (rows written before the migration stay NULL — they can never match a
+// (from_address, nonce) cleanup delete and only age out via the TTL sweep —
+// while new rows persist the sender's nonce and are matched by it), and the
+// blob_replacements event log exists as a regular LOGGED table (replacement
+// observations are not reconstructible, unlike mempool_blobs), keyed one row
+// per replaced hash with upsert-on-reobservation semantics and the
+// replaced_at index serving the list endpoint and retention pruning.
+func TestMempoolTxReplacementsMigration(t *testing.T) {
+	db, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	resetSchema(t, db)
+
+	m := migrator(t, db)
+	if err := m.Migrate(7); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to version 7: %v", err)
+	}
+
+	// Seed a pending row under the pre-migration schema.
+	t0 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`
+		INSERT INTO mempool_blobs (
+			chain_id, tx_hash, blob_index, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES (1, '0xpre', 0, '0xfrom', '', 131072, 50, 10, 500, $1, 60, 131072)
+	`, t0); err != nil {
+		t.Fatalf("seed pre-migration mempool blob: %v", err)
+	}
+
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to latest: %v", err)
+	}
+
+	var preNonce *int64
+	if err := db.Get(&preNonce, `SELECT nonce FROM mempool_blobs WHERE tx_hash = '0xpre'`); err != nil {
+		t.Fatalf("read pre-migration nonce: %v", err)
+	}
+	if preNonce != nil {
+		t.Fatalf("expected NULL nonce on pre-migration row, got %v", *preNonce)
+	}
+	// last_seen is likewise NULL on pre-migration rows; the TTL sweep falls
+	// back to the first-seen timestamp for them (COALESCE), preserving the
+	// old reaping behavior through the deploy window.
+	var preLastSeen *time.Time
+	if err := db.Get(&preLastSeen, `SELECT last_seen FROM mempool_blobs WHERE tx_hash = '0xpre'`); err != nil {
+		t.Fatalf("read pre-migration last_seen: %v", err)
+	}
+	if preLastSeen != nil {
+		t.Fatalf("expected NULL last_seen on pre-migration row, got %v", *preLastSeen)
+	}
+
+	// New rows persist the nonce, and the cleanup predicate matches exactly
+	// the non-NULL row for that (from_address, nonce).
+	if _, err := db.Exec(`
+		INSERT INTO mempool_blobs (
+			chain_id, tx_hash, blob_index, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used, nonce
+		) VALUES (1, '0xpost', 0, '0xfrom', '', 131072, 50, 10, 500, $1, 60, 131072, 7)
+	`, t0); err != nil {
+		t.Fatalf("insert post-migration mempool blob: %v", err)
+	}
+	var matched []string
+	if err := db.Select(&matched, `
+		SELECT tx_hash FROM mempool_blobs WHERE chain_id = 1 AND from_address = '0xfrom' AND nonce = 7
+	`); err != nil {
+		t.Fatalf("cleanup-predicate lookup: %v", err)
+	}
+	if len(matched) != 1 || matched[0] != "0xpost" {
+		t.Fatalf("expected (from, nonce) predicate to match only 0xpost, got %v", matched)
+	}
+
+	var persistence string
+	if err := db.Get(&persistence, `SELECT relpersistence FROM pg_class WHERE relname = 'blob_replacements'`); err != nil {
+		t.Fatalf("check blob_replacements persistence: %v", err)
+	}
+	if persistence != "p" {
+		t.Fatalf("expected blob_replacements to be LOGGED (relpersistence 'p'), got %q", persistence)
+	}
+
+	upsert := `
+		INSERT INTO blob_replacements (chain_id, replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at)
+		VALUES (1, '0xold', $1, '0xfrom', 7, $2)
+		ON CONFLICT (chain_id, replaced_tx_hash) DO UPDATE SET
+			replacement_tx_hash = EXCLUDED.replacement_tx_hash,
+			replaced_at = EXCLUDED.replaced_at
+	`
+	if _, err := db.Exec(upsert, "0xbump1", t0); err != nil {
+		t.Fatalf("insert replacement record: %v", err)
+	}
+	if _, err := db.Exec(upsert, "0xbump2", t0.Add(time.Minute)); err != nil {
+		t.Fatalf("upsert replacement record: %v", err)
+	}
+	var replacement string
+	if err := db.Get(&replacement, `SELECT replacement_tx_hash FROM blob_replacements WHERE chain_id = 1 AND replaced_tx_hash = '0xold'`); err != nil {
+		t.Fatalf("read replacement record: %v", err)
+	}
+	if replacement != "0xbump2" {
+		t.Fatalf("expected re-observation to upsert replacement to 0xbump2, got %q", replacement)
+	}
+	var count int
+	if err := db.Get(&count, `SELECT COUNT(*) FROM blob_replacements WHERE chain_id = 1`); err != nil {
+		t.Fatalf("count replacement records: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one row per replaced hash, got %d", count)
+	}
+
+	var indexExists bool
+	if err := db.Get(&indexExists, `
+		SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_blob_replacements_chain_replaced_at')
+	`); err != nil {
+		t.Fatalf("check replaced_at index: %v", err)
+	}
+	if !indexExists {
+		t.Fatal("expected idx_blob_replacements_chain_replaced_at to exist")
+	}
+}

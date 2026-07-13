@@ -483,7 +483,7 @@ func TestDeleteStalePendingBlobs(t *testing.T) {
 	db, mock := newMockDB(t)
 	cutoff := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND timestamp < $2")).
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND COALESCE(last_seen, timestamp) < $2")).
 		WithArgs(1, cutoff).
 		WillReturnResult(sqlmock.NewResult(0, 5))
 
@@ -493,6 +493,26 @@ func TestDeleteStalePendingBlobs(t *testing.T) {
 	}
 	if deleted != 5 {
 		t.Errorf("expected 5 deleted, got %d", deleted)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestDeleteStaleBlobReplacements(t *testing.T) {
+	db, mock := newMockDB(t)
+	cutoff := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_replacements WHERE chain_id = $1 AND replaced_at < $2")).
+		WithArgs(1, cutoff).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+
+	pruned, err := db.DeleteStaleBlobReplacements(context.Background(), 1, cutoff)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pruned != 3 {
+		t.Errorf("expected 3 pruned, got %d", pruned)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
