@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.10](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.9...blob-indexer-chart-v0.6.10) (2026-07-13)
+
+
+### Bug Fixes
+
+* **attribution:** update blob-list source URL and treat 404 as no-op ([#297](https://github.com/a-thomas-22/blob-indexer-api/issues/297)) ([c10618a](https://github.com/a-thomas-22/blob-indexer-api/commit/c10618a2ce71f8bdae89237eaad21ec36ba1b1c7))
+* **helm:** update chart app version to 0.12.1 ([739accf](https://github.com/a-thomas-22/blob-indexer-api/commit/739accfba333bc5faa90a423e3001627fee3c682))
+
 ## [0.6.9](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.8...blob-indexer-chart-v0.6.9) (2026-07-13)
 
 
