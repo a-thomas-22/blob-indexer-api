@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,7 +20,7 @@ import (
 
 const (
 	blobListSource         = "blob-list"
-	defaultBlobListBaseURL = "https://raw.githubusercontent.com/ahkc4/blob-list/main/artifacts/by-chain"
+	defaultBlobListBaseURL = "https://github.com/tirante-dev/blob-list/releases/latest/download"
 	defaultRequestTimeout  = 10 * time.Second
 	maxBlobListBodyBytes   = 10 << 20
 
@@ -30,7 +31,13 @@ const (
 	claimConfidencePossible  = "possible"
 )
 
-// BlobListConfig controls dynamic loading of ahkc4/blob-list artifacts.
+// errBlobListNotFound signals that the blob-list has no artifact for this
+// chain (HTTP 404). This is expected for networks the blob-list does not cover
+// (e.g. testnets), so it is treated as "no attribution data" rather than a
+// failure that should spam error logs or wipe existing state.
+var errBlobListNotFound = errors.New("blob-list artifact not found")
+
+// BlobListConfig controls dynamic loading of tirante-dev/blob-list artifacts.
 type BlobListConfig struct {
 	Enabled         bool
 	BaseURL         string
@@ -102,6 +109,17 @@ func (s *Service) RefreshBlobList(ctx context.Context) error {
 
 	claims, err := s.fetchBlobListClaims(ctx, cfg)
 	if err != nil {
+		if errors.Is(err, errBlobListNotFound) {
+			// No artifact for this chain. Expected for networks the blob-list
+			// does not cover (e.g. testnets like Hoodi), but a 404 on a chain
+			// that should be covered also points at a misconfigured base URL —
+			// hence Warn (not Error) with the URL so it stays actionable. Skip
+			// without touching the DB so existing attribution state is preserved.
+			logger.Warn("No blob-list attribution artifact for chain; skipping refresh (verify base URL if this chain should be covered)",
+				zap.Int("chain_id", s.networkID),
+				zap.String("url", s.blobListURL(cfg)))
+			return nil
+		}
 		return err
 	}
 
@@ -180,6 +198,9 @@ func (s *Service) fetchBlobListClaims(ctx context.Context, cfg BlobListConfig) (
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errBlobListNotFound
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("blob-list artifact returned status %s", resp.Status)
 	}

@@ -55,7 +55,7 @@ indexer:
 
 attribution:
   blob_list_enabled: true
-  blob_list_base_url: "https://raw.githubusercontent.com/ahkc4/blob-list/main/artifacts/by-chain"
+  blob_list_base_url: "https://github.com/tirante-dev/blob-list/releases/latest/download"
   blob_list_refresh_interval: "1h"
   blob_list_request_timeout: "10s"
 
