@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.11.0...blob-indexer-api-v0.12.0) (2026-07-13)
+
+
+### Features
+
+* **indexer:** evict replaced blob transactions and record them in a queryable event log ([#294](https://github.com/a-thomas-22/blob-indexer-api/issues/294)) ([7b6eee3](https://github.com/a-thomas-22/blob-indexer-api/commit/7b6eee33fadfeb94cf88fec889e65b2b1769a0df))
+
 ## [0.11.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.10.0...blob-indexer-api-v0.11.0) (2026-07-06)
 
 
