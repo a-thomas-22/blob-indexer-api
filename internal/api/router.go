@@ -462,7 +462,15 @@ func (a *API) getNetworkFromRequest(r *http.Request) (config.NetworkConfig, erro
 	return config.NetworkConfig{}, ErrNoNetworksAvailable
 }
 
-// GetNetworks returns the list of available networks
+// GetNetworks godoc
+// @Summary List supported networks
+// @Description Retrieve all networks the indexer supports, with per-network freshness metadata
+// @Tags networks
+// @Accept json
+// @Produce json
+// @Success 200 {object} Response{data=[]NetworkResponse} "Success"
+// @Failure 500 {object} Response "Internal server error"
+// @Router /networks [get]
 func (a *API) GetNetworks(w http.ResponseWriter, r *http.Request) {
 	networks := make([]NetworkResponse, 0, len(a.networks))
 	for _, n := range a.networks {
@@ -479,7 +487,17 @@ func (a *API) GetNetworks(w http.ResponseWriter, r *http.Request) {
 	a.respondSuccess(w, networks)
 }
 
-// GetNetworkStatus returns the status of a specific network
+// GetNetworkStatus godoc
+// @Summary Get network status
+// @Description Retrieve detailed status and freshness metadata for a single network by chain ID
+// @Tags networks
+// @Accept json
+// @Produce json
+// @Param chainId path int true "Network chain ID"
+// @Success 200 {object} Response{data=NetworkStatusResponse} "Success"
+// @Failure 400 {object} Response "Invalid chain ID"
+// @Failure 404 {object} Response "Network not found"
+// @Router /networks/{chainId} [get]
 func (a *API) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 	chainIDStr := chi.URLParam(r, "chainId")
 	chainID, err := strconv.Atoi(chainIDStr)
