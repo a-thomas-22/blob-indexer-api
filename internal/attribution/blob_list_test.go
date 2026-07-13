@@ -206,7 +206,65 @@ func TestRefreshBlobList_PropagatesFetchError(t *testing.T) {
 		RequestTimeout: time.Second,
 	})
 	if err := svc.RefreshBlobList(context.TODO()); err == nil {
-		t.Fatal("expected RefreshBlobList() to return error on non-200 status")
+		t.Fatal("expected RefreshBlobList() to return error on non-200, non-404 status")
+	}
+}
+
+func TestRefreshBlobList_NotFoundIsSkippedWithoutSync(t *testing.T) {
+	// A chain the blob-list does not cover (404) must be a no-op: no DB access,
+	// no error, and existing runtime claims left untouched.
+	svc, mock := newMockService(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
+
+	// Seed an existing in-memory claim so we can prove the 404 path leaves it
+	// intact rather than clobbering it via setClaims(nil).
+	svc.setClaims([]Claim{{
+		ChainID:        1,
+		Source:         blobListSource,
+		Address:        testBlobListAddress,
+		EntityID:       "base",
+		Name:           "Base",
+		Category:       "rollup",
+		Status:         claimStatusActive,
+		Confidence:     claimConfidenceConfirmed,
+		ValidFromBlock: 0,
+	}}, -1)
+
+	svc.ConfigureBlobList(BlobListConfig{
+		Enabled:        true,
+		BaseURL:        server.URL,
+		RequestTimeout: time.Second,
+	})
+
+	if err := svc.RefreshBlobList(context.TODO()); err != nil {
+		t.Fatalf("RefreshBlobList() on 404 error = %v, want nil", err)
+	}
+	// No DB expectations were registered, so any query would fail the mock.
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+	// Existing attribution must survive the skipped refresh.
+	if got := svc.GetUserAttribution(testBlobListAddress); got != "Base" {
+		t.Fatalf("expected existing attribution Base to survive 404, got %q", got)
+	}
+}
+
+func TestFetchBlobListClaims_NotFoundReturnsSentinel(t *testing.T) {
+	svc := NewService(nil)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := svc.fetchBlobListClaims(context.TODO(), BlobListConfig{
+		BaseURL:        server.URL,
+		RequestTimeout: time.Second,
+	})
+	if !errors.Is(err, errBlobListNotFound) {
+		t.Fatalf("expected errBlobListNotFound, got %v", err)
 	}
 }
 

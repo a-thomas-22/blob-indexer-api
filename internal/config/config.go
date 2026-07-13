@@ -210,7 +210,7 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("indexer.startup_gap_scan_blocks", 10000)
 	v.SetDefault("indexer.rpc_rate_limit", 0)
 	v.SetDefault("attribution.blob_list_enabled", true)
-	v.SetDefault("attribution.blob_list_base_url", "https://raw.githubusercontent.com/ahkc4/blob-list/main/artifacts/by-chain")
+	v.SetDefault("attribution.blob_list_base_url", "https://github.com/tirante-dev/blob-list/releases/latest/download")
 	v.SetDefault("attribution.blob_list_refresh_interval", "1h")
 	v.SetDefault("attribution.blob_list_request_timeout", "10s")
 	v.SetDefault("websocket.poll_interval", "3s")
