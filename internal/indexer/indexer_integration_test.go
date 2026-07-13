@@ -258,19 +258,28 @@ func TestIntegrationInsertPendingBlobsUpsert(t *testing.T) {
 	}
 
 	// Second poll with changed fee data hits the ON CONFLICT DO UPDATE arm:
-	// same rows, stable ordinals, new values.
+	// same rows, stable ordinals, new values. The re-observation carries a
+	// later Timestamp: it must land in last_seen (the liveness watermark)
+	// while the stored timestamp keeps the first-seen instant that serves
+	// API ordering and pending-age metrics.
+	firstSeen := pending[0].Timestamp
+	reobserved := firstSeen.Add(time.Hour)
 	pending[0].TipPerBlobGas = "7"
 	pending[1].TipPerBlobGas = "7"
+	pending[0].Timestamp = reobserved
+	pending[1].Timestamp = reobserved
 	if err := idx.insertPendingBlobs(pending); err != nil {
 		t.Fatalf("insertPendingBlobs() second poll error = %v", err)
 	}
 
 	var rows []struct {
-		BlobIndex int    `db:"blob_index"`
-		Tip       string `db:"tip_per_blob_gas"`
+		BlobIndex int       `db:"blob_index"`
+		Tip       string    `db:"tip_per_blob_gas"`
+		Timestamp time.Time `db:"timestamp"`
+		LastSeen  time.Time `db:"last_seen"`
 	}
 	if err := database.SelectContext(ctx, &rows,
-		"SELECT blob_index, tip_per_blob_gas FROM mempool_blobs WHERE chain_id = $1 ORDER BY blob_index", integrationChainID); err != nil {
+		"SELECT blob_index, tip_per_blob_gas, timestamp, last_seen FROM mempool_blobs WHERE chain_id = $1 ORDER BY blob_index", integrationChainID); err != nil {
 		t.Fatalf("read pending rows: %v", err)
 	}
 	if len(rows) != 2 {
@@ -280,9 +289,25 @@ func TestIntegrationInsertPendingBlobsUpsert(t *testing.T) {
 		if tip, err := strconv.ParseFloat(r.Tip, 64); err != nil || tip != 7 {
 			t.Fatalf("expected tip_per_blob_gas=7 on blob_index %d, got %q (parse err %v)", r.BlobIndex, r.Tip, err)
 		}
+		if !r.Timestamp.Equal(firstSeen) {
+			t.Fatalf("expected re-poll to keep first-seen timestamp %v on blob_index %d, got %v", firstSeen, r.BlobIndex, r.Timestamp)
+		}
+		if !r.LastSeen.Equal(reobserved) {
+			t.Fatalf("expected re-poll to bump last_seen to %v on blob_index %d, got %v", reobserved, r.BlobIndex, r.LastSeen)
+		}
 	}
 	if rows[0].BlobIndex != 0 || rows[1].BlobIndex != 1 {
 		t.Fatalf("expected stable blob_index [0 1], got [%d %d]", rows[0].BlobIndex, rows[1].BlobIndex)
+	}
+
+	// The TTL sweep reaps on the liveness watermark, not on age: a cutoff
+	// past the first-seen timestamp but before last_seen must keep the rows.
+	swept, err := database.DeleteStalePendingBlobs(ctx, integrationChainID, firstSeen.Add(30*time.Minute))
+	if err != nil {
+		t.Fatalf("DeleteStalePendingBlobs() error = %v", err)
+	}
+	if swept != 0 {
+		t.Fatalf("expected liveness watermark to shield still-seen rows from the sweep, deleted %d", swept)
 	}
 
 	// A poll that sees fewer blobs for the tx trims the surplus ordinals.

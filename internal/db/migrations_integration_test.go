@@ -1359,6 +1359,16 @@ func TestMempoolTxReplacementsMigration(t *testing.T) {
 	if preNonce != nil {
 		t.Fatalf("expected NULL nonce on pre-migration row, got %v", *preNonce)
 	}
+	// last_seen is likewise NULL on pre-migration rows; the TTL sweep falls
+	// back to the first-seen timestamp for them (COALESCE), preserving the
+	// old reaping behavior through the deploy window.
+	var preLastSeen *time.Time
+	if err := db.Get(&preLastSeen, `SELECT last_seen FROM mempool_blobs WHERE tx_hash = '0xpre'`); err != nil {
+		t.Fatalf("read pre-migration last_seen: %v", err)
+	}
+	if preLastSeen != nil {
+		t.Fatalf("expected NULL last_seen on pre-migration row, got %v", *preLastSeen)
+	}
 
 	// New rows persist the nonce, and the cleanup predicate matches exactly
 	// the non-NULL row for that (from_address, nonce).

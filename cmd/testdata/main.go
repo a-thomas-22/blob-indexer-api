@@ -218,9 +218,9 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 			INSERT INTO mempool_blobs (
 				chain_id, tx_hash, blob_index, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-				timestamp, versioned_hash, nonce
+				timestamp, versioned_hash, nonce, last_seen
 			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
 			)
 			ON CONFLICT (chain_id, tx_hash, blob_index) DO UPDATE SET
 				from_address = $4,
@@ -231,12 +231,13 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 				total_cost_wei = $9,
 				timestamp = $10,
 				versioned_hash = $11,
-				nonce = $12
+				nonce = $12,
+				last_seen = $13
 		`
 		_, err := database.ExecContext(ctx, query,
 			blob.ChainID, blob.TxHash, blob.BlobIndex, blob.FromAddress, blob.UserAttribution,
 			blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-			blob.Timestamp, blob.VersionedHash, int64(blob.Nonce),
+			blob.Timestamp, blob.VersionedHash, int64(blob.Nonce), blob.Timestamp,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert pending blob %d: %w", i, err)

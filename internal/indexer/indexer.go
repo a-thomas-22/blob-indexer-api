@@ -2069,7 +2069,7 @@ const blobInsertColumns = 14
 
 // mempoolBlobInsertColumns is the number of columns written per row when
 // upserting into mempool_blobs.
-const mempoolBlobInsertColumns = 14
+const mempoolBlobInsertColumns = 15
 
 // valuesPlaceholders builds a multi-row VALUES clause "($1,$2,...),($n,...),..."
 // for rows rows of width columns. casts, when non-nil, must have width entries
@@ -2337,6 +2337,10 @@ func (i *Indexer) runMempoolIndexer() {
 					zap.String("network", i.network.Name),
 					zap.Error(err))
 			}
+			// The template poll above only re-observes competitively priced
+			// txs; tracked txs that fell out of the template still need
+			// their liveness confirmed or they age out while pending.
+			i.refreshPendingBlobLiveness()
 		}
 	}
 }
@@ -2366,7 +2370,70 @@ func (i *Indexer) runMempoolReconciler() {
 					zap.String("network", i.network.Name),
 					zap.Error(err))
 			}
+			i.refreshPendingBlobLiveness()
 		}
+	}
+}
+
+// refreshPendingBlobLiveness bumps last_seen for every tracked pending blob
+// tx the node still reports as pending. The pending-block template the
+// mempool poll reads (eth_getBlockByNumber("pending")) is fee-filtered and
+// blob-capped, so an underpriced blob tx waiting out a fee spike never
+// appears there — exactly the tx the pending view must not lose. Asking the
+// node for each tracked hash directly keeps the TTL sweep honest in both
+// directions: a still-pooled tx survives indefinitely, and a tx the node
+// dropped stops being bumped and is reaped mempool_ttl after its last
+// sighting. Cost is bounded by our own row count (the live blob mempool),
+// not the node's pool, so this stays cheap at every cadence it runs at.
+func (i *Indexer) refreshPendingBlobLiveness() {
+	var hashes []string
+	if err := i.db.SelectContext(i.ctx, &hashes,
+		"SELECT DISTINCT tx_hash FROM mempool_blobs WHERE chain_id = $1", i.network.ChainID); err != nil {
+		logger.Error("Failed to list pending blobs for liveness refresh",
+			zap.String("network", i.network.Name),
+			zap.Error(err))
+		return
+	}
+	if len(hashes) == 0 {
+		return
+	}
+
+	live := make([]string, 0, len(hashes))
+	for _, hash := range hashes {
+		select {
+		case <-i.ctx.Done():
+			return
+		default:
+		}
+		_, isPending, err := i.ethClient.GetTransactionByHash(i.ctx, common.HexToHash(hash))
+		if err != nil {
+			// NotFound means the node no longer knows the tx; anything else
+			// is a transient RPC failure. Either way last_seen stays put —
+			// the TTL sweep reaps the row only if the condition persists.
+			if !errors.Is(err, geth.NotFound) {
+				logger.Debug("Pending blob liveness check failed",
+					zap.String("network", i.network.Name),
+					zap.String("tx_hash", hash),
+					zap.Error(err))
+			}
+			continue
+		}
+		if isPending {
+			live = append(live, hash)
+		}
+	}
+	if len(live) == 0 {
+		return
+	}
+
+	unlockWrites := i.lockDBWrites()
+	defer unlockWrites()
+	if _, err := i.db.ExecContext(i.ctx,
+		"UPDATE mempool_blobs SET last_seen = $2 WHERE chain_id = $1 AND tx_hash = ANY($3)",
+		i.network.ChainID, time.Now(), pq.Array(live)); err != nil {
+		logger.Error("Failed to refresh pending blob liveness",
+			zap.String("network", i.network.Name),
+			zap.Error(err))
 	}
 }
 
@@ -2591,12 +2658,15 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 
 	// One multi-row upsert per poll keeps this a single round-trip; rows are
 	// keyed by the per-tx blob ordinal, so a re-poll updates the same rows in
-	// place.
+	// place. timestamp is deliberately absent from the update list: it is the
+	// first-seen instant serving API ordering and pending-age metrics, while
+	// last_seen is the liveness watermark the TTL sweep reaps on — a
+	// re-observation bumps only the latter.
 	upsertQuery := `
 		INSERT INTO mempool_blobs (
 			chain_id, tx_hash, blob_index, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash, nonce
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash, nonce, last_seen
 		) VALUES ` + valuesPlaceholders(len(blobs), mempoolBlobInsertColumns, nil) + `
 		ON CONFLICT (chain_id, tx_hash, blob_index) DO UPDATE SET
 			from_address = EXCLUDED.from_address,
@@ -2605,18 +2675,18 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 			base_fee_per_blob_gas = EXCLUDED.base_fee_per_blob_gas,
 			tip_per_blob_gas = EXCLUDED.tip_per_blob_gas,
 			total_cost_wei = EXCLUDED.total_cost_wei,
-			timestamp = EXCLUDED.timestamp,
 			max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
 			blob_gas_used = EXCLUDED.blob_gas_used,
 			versioned_hash = EXCLUDED.versioned_hash,
-			nonce = EXCLUDED.nonce
+			nonce = EXCLUDED.nonce,
+			last_seen = EXCLUDED.last_seen
 	`
 	upsertArgs := make([]interface{}, 0, len(blobs)*mempoolBlobInsertColumns)
 	for offset, b := range blobs {
 		upsertArgs = append(upsertArgs,
 			b.ChainID, b.TxHash, offset, b.FromAddress, b.UserAttribution,
 			b.BlobSizeBytes, b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostWei,
-			b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed, b.VersionedHash, int64(b.Nonce))
+			b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed, b.VersionedHash, int64(b.Nonce), b.Timestamp)
 	}
 	if _, err := tx.ExecContext(i.ctx, upsertQuery, upsertArgs...); err != nil {
 		return fmt.Errorf("failed to insert pending blobs (tx: %s): %w", txHash, err)

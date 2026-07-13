@@ -13,6 +13,15 @@
 -- high write churn, so cleanup deletes scan it via the chain_id prefix of
 -- its existing indexes.
 --
+-- mempool_blobs.last_seen separates liveness from age: timestamp stays the
+-- first-seen instant (API ordering and pending-age metrics), while
+-- last_seen is the liveness watermark the TTL sweep reaps on — the indexer
+-- bumps it for every tracked tx the node still reports as pending, so the
+-- sweep means "the node stopped reporting this tx for mempool_ttl" rather
+-- than "first seen more than mempool_ttl ago". Nullable for the same
+-- deploy-window reason as nonce; the sweep falls back to timestamp
+-- (COALESCE) for NULL rows, which is exactly the old behavior.
+--
 -- blob_replacements records each eviction: one row per replaced hash,
 -- written in the same transaction as the eviction (in insertPendingBlobs
 -- when the replacement is seen pending, in insertBlockData when it confirms
@@ -26,6 +35,7 @@
 -- DDL only, idempotent, no explicit transaction control — see README.md.
 
 ALTER TABLE mempool_blobs ADD COLUMN IF NOT EXISTS nonce BIGINT;
+ALTER TABLE mempool_blobs ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP;
 
 CREATE TABLE IF NOT EXISTS blob_replacements (
     chain_id INTEGER NOT NULL,

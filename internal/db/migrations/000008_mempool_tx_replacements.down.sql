@@ -6,3 +6,4 @@
 
 DROP TABLE IF EXISTS blob_replacements;
 ALTER TABLE mempool_blobs DROP COLUMN IF EXISTS nonce;
+ALTER TABLE mempool_blobs DROP COLUMN IF EXISTS last_seen;

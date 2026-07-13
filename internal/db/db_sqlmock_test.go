@@ -483,7 +483,7 @@ func TestDeleteStalePendingBlobs(t *testing.T) {
 	db, mock := newMockDB(t)
 	cutoff := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND timestamp < $2")).
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND COALESCE(last_seen, timestamp) < $2")).
 		WithArgs(1, cutoff).
 		WillReturnResult(sqlmock.NewResult(0, 5))
 

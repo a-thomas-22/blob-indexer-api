@@ -1449,7 +1449,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 		mock.ExpectExec("INSERT INTO mempool_blobs").
 			WithArgs(blob.ChainID, blob.TxHash, 0, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, int64(blob.Nonce)).
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, int64(blob.Nonce), blob.Timestamp).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
@@ -1485,7 +1485,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 			upsertArgs = append(upsertArgs,
 				blob.ChainID, blob.TxHash, offset, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, int64(blob.Nonce))
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, int64(blob.Nonce), blob.Timestamp)
 		}
 		mock.ExpectExec("INSERT INTO mempool_blobs").
 			WithArgs(upsertArgs...).
@@ -3106,6 +3106,8 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 
 	t.Run("runMempoolIndexer stops on cancel", func(t *testing.T) {
 		idx := newTestIndexer()
+		idxDB, _ := newMockIndexerDB(t)
+		idx.db = idxDB
 		idx.ethClient, _ = newMockEthClient(t, 10)
 		idx.mempoolPollingInterval = 5 * time.Millisecond
 
@@ -3127,6 +3129,8 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 
 	t.Run("runMempoolReconciler stops on cancel", func(t *testing.T) {
 		idx := newTestIndexer()
+		idxDB, _ := newMockIndexerDB(t)
+		idx.db = idxDB
 		idx.ethClient, _ = newMockEthClient(t, 10)
 		idx.mempoolReconcileInterval = 5 * time.Millisecond
 
@@ -3148,6 +3152,8 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 
 	t.Run("runMempoolReconciler logs poll errors and keeps ticking", func(t *testing.T) {
 		idx := newTestIndexer()
+		idxDB, _ := newMockIndexerDB(t)
+		idx.db = idxDB
 		ethClient, rpcSvc := newMockEthClient(t, 10)
 		rpcSvc.failBlock = true
 		idx.ethClient = ethClient
@@ -3168,6 +3174,62 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 		case <-time.After(200 * time.Millisecond):
 			t.Fatal("runMempoolReconciler did not stop after poll errors")
 		}
+	})
+
+	t.Run("refreshPendingBlobLiveness bumps last_seen for still-pending txs", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+		ethClient, ethSvc := newMockEthClient(t, 10)
+		idx.ethClient = ethClient
+		ethSvc.txByHash = newSignedBlobTx(t, int64(idx.network.ChainID), 3)
+		ethSvc.txPending = true
+
+		mock.ExpectQuery("SELECT DISTINCT tx_hash FROM mempool_blobs").
+			WithArgs(idx.network.ChainID).
+			WillReturnRows(sqlmock.NewRows([]string{"tx_hash"}).AddRow("0xtracked"))
+		mock.ExpectExec("UPDATE mempool_blobs SET last_seen").
+			WithArgs(idx.network.ChainID, sqlmock.AnyArg(), sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		idx.refreshPendingBlobLiveness()
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("liveness refresh expectations not met: %v", err)
+		}
+	})
+
+	t.Run("refreshPendingBlobLiveness leaves mined txs to the TTL sweep", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+		ethClient, ethSvc := newMockEthClient(t, 10)
+		idx.ethClient = ethClient
+		ethSvc.txByHash = newSignedBlobTx(t, int64(idx.network.ChainID), 4)
+		ethSvc.txPending = false
+
+		// No UPDATE expectation: a tx the node reports as mined (or does not
+		// know at all) must not have its liveness watermark bumped.
+		mock.ExpectQuery("SELECT DISTINCT tx_hash FROM mempool_blobs").
+			WithArgs(idx.network.ChainID).
+			WillReturnRows(sqlmock.NewRows([]string{"tx_hash"}).AddRow("0xtracked"))
+
+		idx.refreshPendingBlobLiveness()
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("liveness refresh expectations not met: %v", err)
+		}
+	})
+
+	t.Run("refreshPendingBlobLiveness tolerates listing errors", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, _ := newMockIndexerDB(t)
+		idx.db = idxDB
+		idx.ethClient, _ = newMockEthClient(t, 10)
+
+		// No expectations installed: the listing query fails and the refresh
+		// must log-and-return without touching the eth client.
+		idx.refreshPendingBlobLiveness()
 	})
 
 	t.Run("processPendingTransaction lookup error", func(t *testing.T) {
@@ -3272,7 +3334,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			WithArgs(idx.network.ChainID, txHash, 0, sqlmock.AnyArg(), "",
 				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-				ethSvc.txByHash.BlobHashes()[0].Hex(), int64(1)).
+				ethSvc.txByHash.BlobHashes()[0].Hex(), int64(1), sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
@@ -3329,7 +3391,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			WithArgs(idx.network.ChainID, txHash, 0, sqlmock.AnyArg(), "",
 				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-				blobTx.BlobHashes()[0].Hex(), int64(2)).
+				blobTx.BlobHashes()[0].Hex(), int64(2), sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
