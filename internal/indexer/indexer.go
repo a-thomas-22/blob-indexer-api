@@ -94,6 +94,17 @@ const (
 	// useful for resolving a stale hash pasted days later while bounding
 	// the table to a trickle of rows (fee bumps are occasional events).
 	blobReplacementRetention = 7 * 24 * time.Hour
+
+	// defaultMempoolReconcileInterval paces the slow reconciliation poll
+	// that runs alongside the websocket pending-tx subscription. The
+	// subscription announces a tx only once, on entry to the pool, so a
+	// WS-mode row's timestamp is its first-seen time and the TTL sweep
+	// would purge a still-pending tx after mempool_ttl. Re-upserting the
+	// pool's blob txs refreshes their timestamps, making the sweep mean
+	// "gone from the pool for mempool_ttl" in both modes. Slower than the
+	// fallback poll: the subscription already delivers additions instantly,
+	// so this only needs to outpace the TTL by a wide margin.
+	defaultMempoolReconcileInterval = 2 * time.Minute
 )
 
 // errReorgDetected is returned when a chain reorganization is detected and handled
@@ -178,11 +189,15 @@ type Indexer struct {
 	mempoolPollingInterval time.Duration
 	mempoolTTL             time.Duration
 	mempoolCleanupInterval time.Duration
-	workerCount            int
-	maxBlockRetries        int
-	gapScanInterval        time.Duration
-	maxReorgDepth          int
-	startupGapScanBlocks   int
+	// mempoolReconcileInterval paces the WS-mode reconciliation poll; a
+	// field so tests can shrink it. Defaults to
+	// defaultMempoolReconcileInterval.
+	mempoolReconcileInterval time.Duration
+	workerCount              int
+	maxBlockRetries          int
+	gapScanInterval          time.Duration
+	maxReorgDepth            int
+	startupGapScanBlocks     int
 	// pendingTxResubBaseBackoff is the initial resubscribe backoff; a field so
 	// tests can shrink it. Defaults to pendingTxResubscribeBaseBackoff.
 	pendingTxResubBaseBackoff time.Duration
@@ -265,6 +280,7 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		mempoolPollingInterval:    cfg.Indexer.MempoolPollingInterval,
 		mempoolTTL:                cfg.Indexer.MempoolTTL,
 		mempoolCleanupInterval:    cfg.Indexer.MempoolCleanupInterval,
+		mempoolReconcileInterval:  defaultMempoolReconcileInterval,
 		workerCount:               workerCount,
 		maxBlockRetries:           cfg.Indexer.MaxBlockRetries,
 		gapScanInterval:           cfg.Indexer.GapScanInterval,
@@ -472,6 +488,23 @@ func (i *Indexer) Start() error {
 			}()
 			logger.Info("Subscribed to pending transactions via websocket",
 				zap.String("network", i.network.Name))
+
+			// Slow reconciliation poll: the subscription announces a tx
+			// only once, so without this a still-pending blob's row keeps
+			// its first-seen timestamp and the TTL sweep purges it from
+			// the pending view after mempool_ttl while it is still in the
+			// node's pool. Re-upserting refreshes timestamps so the sweep
+			// only reaps txs that actually left the pool. If the
+			// subscription later dies and the fast polling fallback
+			// starts, both tickers run the same idempotent poll — wasteful
+			// only, never wrong.
+			if i.mempoolReconcileInterval > 0 {
+				i.wg.Add(1)
+				go func() {
+					defer i.wg.Done()
+					i.runMempoolReconciler()
+				}()
+			}
 		}
 	} else {
 		i.startMempoolIndexer()
@@ -2301,6 +2334,35 @@ func (i *Indexer) runMempoolIndexer() {
 			// Process pending transactions
 			if err := i.processPendingTransactions(); err != nil {
 				logger.Error("Failed to process pending transactions",
+					zap.String("network", i.network.Name),
+					zap.Error(err))
+			}
+		}
+	}
+}
+
+// runMempoolReconciler re-polls the node's pending pool on a slow ticker
+// while the websocket pending-tx subscription is active. It runs the same
+// poll body as the fallback indexer: still-pending blob txs are re-upserted
+// (refreshing their timestamps so the TTL sweep only reaps txs that actually
+// left the pool), newly appeared ones are picked up, and confirmed or
+// replaced ones are suppressed by insertPendingBlobs' guards.
+func (i *Indexer) runMempoolReconciler() {
+	logger.Info("Mempool reconciler starting",
+		zap.String("network", i.network.Name),
+		zap.Duration("interval", i.mempoolReconcileInterval))
+
+	ticker := time.NewTicker(i.mempoolReconcileInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-i.ctx.Done():
+			logger.Info("Mempool reconciler stopped", zap.String("network", i.network.Name))
+			return
+		case <-ticker.C:
+			if err := i.processPendingTransactions(); err != nil {
+				logger.Error("Mempool reconciliation poll failed",
 					zap.String("network", i.network.Name),
 					zap.Error(err))
 			}

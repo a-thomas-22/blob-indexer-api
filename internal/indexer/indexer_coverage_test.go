@@ -3125,6 +3125,51 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 		}
 	})
 
+	t.Run("runMempoolReconciler stops on cancel", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.ethClient, _ = newMockEthClient(t, 10)
+		idx.mempoolReconcileInterval = 5 * time.Millisecond
+
+		done := make(chan struct{})
+		go func() {
+			idx.runMempoolReconciler()
+			close(done)
+		}()
+
+		time.Sleep(20 * time.Millisecond)
+		idx.cancel()
+
+		select {
+		case <-done:
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("runMempoolReconciler did not stop")
+		}
+	})
+
+	t.Run("runMempoolReconciler logs poll errors and keeps ticking", func(t *testing.T) {
+		idx := newTestIndexer()
+		ethClient, rpcSvc := newMockEthClient(t, 10)
+		rpcSvc.failBlock = true
+		idx.ethClient = ethClient
+		idx.mempoolReconcileInterval = 5 * time.Millisecond
+
+		done := make(chan struct{})
+		go func() {
+			idx.runMempoolReconciler()
+			close(done)
+		}()
+
+		// Let several failing ticks fire: the loop must survive them.
+		time.Sleep(25 * time.Millisecond)
+		idx.cancel()
+
+		select {
+		case <-done:
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("runMempoolReconciler did not stop after poll errors")
+		}
+	})
+
 	t.Run("processPendingTransaction lookup error", func(t *testing.T) {
 		idx := newTestIndexer()
 		idx.ethClient, _ = newMockEthClient(t, 10)
