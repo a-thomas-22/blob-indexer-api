@@ -992,7 +992,7 @@ func (a *API) queryBlobPricing(ctx context.Context, network config.NetworkConfig
 		recentBlocks = append(recentBlocks, toBlockPricingResponse(m))
 	}
 
-	cfg := blobparams.ChainConfigForID(network.ChainID)
+	cfg := a.chainConfigForNetwork(queryCtx, network.ChainID)
 
 	// Use the most recent block for current state
 	resp := PricingResponse{

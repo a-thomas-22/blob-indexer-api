@@ -20,6 +20,13 @@ type mockDB struct {
 }
 
 func (m *mockDB) SelectContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+	// The learned blob-schedule lookup (chainConfigForNetwork) runs on the
+	// pricing path alongside the metrics query. Default it to empty so a test's
+	// metrics-focused selectFn need not know about it; an empty schedule yields
+	// the compiled chain config, matching pre-eth_config behavior.
+	if _, ok := dest.(*[]blobScheduleQueryRow); ok {
+		return nil
+	}
 	if m.selectFn != nil {
 		return m.selectFn(ctx, dest, query, args...)
 	}

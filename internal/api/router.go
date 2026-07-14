@@ -43,6 +43,7 @@ type API struct {
 	latestBlobsCache  map[string]blobListCacheEntry
 	mempoolBlobsCache map[string]blobListCacheEntry
 	pricingCache      map[string]pricingCacheEntry
+	blobScheduleCache map[int]blobScheduleCacheEntry
 	hub               *Hub
 	poller            *Poller
 }
@@ -180,6 +181,7 @@ func newAPI(ctx context.Context, db DBProvider, cfg *config.Config) *API {
 		latestBlobsCache:  make(map[string]blobListCacheEntry),
 		mempoolBlobsCache: make(map[string]blobListCacheEntry),
 		pricingCache:      make(map[string]pricingCacheEntry),
+		blobScheduleCache: make(map[int]blobScheduleCacheEntry),
 		hub:               hub,
 		poller:            poller,
 	}

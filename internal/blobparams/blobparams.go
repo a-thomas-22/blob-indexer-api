@@ -2,10 +2,14 @@ package blobparams
 
 import (
 	"math/big"
+	"sort"
 
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
+	"go.uber.org/zap"
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
 // BytesPerBlob is the size of a single EIP-4844 blob in bytes: a blob holds
@@ -41,8 +45,12 @@ type BlobParams struct {
 	MaxGas         uint64
 }
 
-// ChainConfigForID returns the go-ethereum ChainConfig for known chain IDs.
-// For unknown chains, returns a synthetic config with Cancun enabled and default blob schedule.
+// ChainConfigForID returns the go-ethereum ChainConfig for chains that
+// go-ethereum ships a full fork schedule for (including all BPO forks). For
+// unknown chains it returns a synthetic Cancun-only config; that fallback
+// cannot represent any post-Cancun or BPO fork, so it is a last resort — the
+// learned eth_config schedule (see BuildChainConfig) is what actually keeps
+// arbitrary networks correct.
 func ChainConfigForID(chainID int) *params.ChainConfig {
 	switch chainID {
 	case 1:
@@ -51,6 +59,8 @@ func ChainConfigForID(chainID int) *params.ChainConfig {
 		return params.SepoliaChainConfig
 	case 17000:
 		return params.HoleskyChainConfig
+	case 560048:
+		return params.HoodiChainConfig
 	default:
 		return syntheticChainConfig(chainID)
 	}
@@ -66,6 +76,179 @@ func syntheticChainConfig(chainID int) *params.ChainConfig {
 		CancunTime:         &zero,
 		BlobScheduleConfig: params.DefaultBlobSchedule,
 	}
+}
+
+// ScheduleEntry is one learned blob-parameter boundary: the parameters that
+// become active at ActivationTime and stay active until the next boundary.
+// These are learned from the connected node via eth_config (EIP-7910), so a new
+// BPO fork — or an entirely new network — is picked up without a code change.
+type ScheduleEntry struct {
+	ActivationTime uint64
+	Target         int
+	Max            int
+	UpdateFraction uint64
+}
+
+// maxBlobForkSlots is the number of blob-bearing fork slots go-ethereum's
+// ChainConfig can represent: Cancun, Prague, Osaka, and BPO1..BPO5.
+const maxBlobForkSlots = 8
+
+type blobBoundary struct {
+	time uint64
+	cfg  *params.BlobConfig
+}
+
+// BuildChainConfig returns a ChainConfig whose blob schedule reflects the
+// learned eth_config entries layered on top of the compiled baseline for the
+// chain. The result feeds go-ethereum's fork-aware eip4844 functions unchanged,
+// so every downstream computation (target/max, blob base fee, EIP-7918 excess
+// gas) stays correct without reimplementing consensus math.
+//
+// For chains go-ethereum ships (mainnet, Hoodi, ...) the compiled schedule is
+// the baseline and learned entries override or extend it — e.g. a newly
+// scheduled BPO advertised via eth_config.next is picked up before any
+// go-ethereum bump. For unknown chains the baseline is the synthetic
+// Cancun-at-time-0 default schedule (3/6), which learned entries then overlay;
+// a timestamp before the earliest learned boundary therefore resolves to that
+// default Cancun schedule unless the node supplies an activation_time=0 entry
+// that overrides it.
+//
+// Limitation: eth_config carries no fork identity, so for an unknown chain
+// Osaka (which gates EIP-7918) is inferred positionally as the third distinct
+// boundary. With fewer than three boundaries Osaka is not set and EIP-7918 is
+// off; with three or more pre-Osaka boundaries it activates early. This only
+// affects excess-gas / next-fee *prediction* — it does not change the blob
+// schedule selected for a block or the stored blob base fee — and it never
+// applies to compiled chains, whose real Osaka time is preserved.
+func BuildChainConfig(chainID int, learned []ScheduleEntry) *params.ChainConfig {
+	base := ChainConfigForID(chainID)
+	if len(learned) == 0 {
+		return base
+	}
+
+	// Merge base boundaries with learned entries, keyed by activation time so a
+	// learned entry overrides the compiled config at the same fork time and adds
+	// genuinely new boundaries.
+	merged := make(map[uint64]*params.BlobConfig)
+	for _, b := range baseBoundaries(base) {
+		merged[b.time] = b.cfg
+	}
+	for _, e := range learned {
+		merged[e.ActivationTime] = &params.BlobConfig{
+			Target:         e.Target,
+			Max:            e.Max,
+			UpdateFraction: e.UpdateFraction,
+		}
+	}
+
+	times := make([]uint64, 0, len(merged))
+	for t := range merged {
+		times = append(times, t)
+	}
+	sortUint64(times)
+	// A chain with more distinct blob-param changes than go-ethereum can encode
+	// keeps its most recent boundaries (the ones we actually index against).
+	// Unreachable for any real chain (<=8 boundaries), but log rather than drop
+	// silently so a schedule this large is visible. Blocks before the earliest
+	// retained boundary resolve no config; getBlobBaseFeeFromBlock guards the
+	// resulting CalcBlobFee panic.
+	if len(times) > maxBlobForkSlots {
+		logger.Warn("Blob schedule exceeds representable fork slots; dropping oldest boundaries",
+			zap.Int("chain_id", chainID),
+			zap.Int("total_boundaries", len(times)),
+			zap.Int("kept", maxBlobForkSlots))
+		times = times[len(times)-maxBlobForkSlots:]
+	}
+
+	out := *base // shallow copy; every pointer field we touch is reallocated below
+	if out.LondonBlock == nil {
+		out.LondonBlock = big.NewInt(0)
+	}
+	sched := &params.BlobScheduleConfig{}
+	out.BlobScheduleConfig = sched
+	clearBlobForkTimes(&out)
+
+	// Assign boundaries to fork slots in ascending time order. go-ethereum
+	// resolves the active fork as the highest-priority slot whose time is <= the
+	// block time; slot priority ascends with assignment order, so this yields
+	// "the latest boundary at or before the block". The third slot is Osaka, so
+	// OsakaTime — which also gates EIP-7918 — lands on the third boundary. Real
+	// chains follow Cancun→Prague→Osaka→BPO order, so this matches the true
+	// Osaka activation; an arbitrary chain's third distinct blob-param change is
+	// treated as the EIP-7918 boundary.
+	for i, t := range times {
+		setBlobSlot(&out, sched, i, t, merged[t])
+	}
+	return &out
+}
+
+// baseBoundaries extracts the (activation time, blob config) pairs the compiled
+// config already defines, in no particular order.
+func baseBoundaries(cfg *params.ChainConfig) []blobBoundary {
+	s := cfg.BlobScheduleConfig
+	if s == nil {
+		return nil
+	}
+	pairs := []struct {
+		t  *uint64
+		bc *params.BlobConfig
+	}{
+		{cfg.CancunTime, s.Cancun},
+		{cfg.PragueTime, s.Prague},
+		{cfg.OsakaTime, s.Osaka},
+		{cfg.BPO1Time, s.BPO1},
+		{cfg.BPO2Time, s.BPO2},
+		{cfg.BPO3Time, s.BPO3},
+		{cfg.BPO4Time, s.BPO4},
+		{cfg.BPO5Time, s.BPO5},
+	}
+	out := make([]blobBoundary, 0, len(pairs))
+	for _, p := range pairs {
+		if p.t != nil && p.bc != nil {
+			out = append(out, blobBoundary{time: *p.t, cfg: p.bc})
+		}
+	}
+	return out
+}
+
+// clearBlobForkTimes nils the blob-bearing fork time fields so a shallow copy of
+// a compiled config does not leak stale boundaries into the rebuilt schedule.
+func clearBlobForkTimes(cfg *params.ChainConfig) {
+	cfg.CancunTime = nil
+	cfg.PragueTime = nil
+	cfg.OsakaTime = nil
+	cfg.BPO1Time = nil
+	cfg.BPO2Time = nil
+	cfg.BPO3Time = nil
+	cfg.BPO4Time = nil
+	cfg.BPO5Time = nil
+}
+
+// setBlobSlot writes one boundary into the given fork slot (0=Cancun .. 7=BPO5).
+func setBlobSlot(cfg *params.ChainConfig, sched *params.BlobScheduleConfig, slot int, time uint64, bc *params.BlobConfig) {
+	t := time
+	switch slot {
+	case 0:
+		cfg.CancunTime, sched.Cancun = &t, bc
+	case 1:
+		cfg.PragueTime, sched.Prague = &t, bc
+	case 2:
+		cfg.OsakaTime, sched.Osaka = &t, bc
+	case 3:
+		cfg.BPO1Time, sched.BPO1 = &t, bc
+	case 4:
+		cfg.BPO2Time, sched.BPO2 = &t, bc
+	case 5:
+		cfg.BPO3Time, sched.BPO3 = &t, bc
+	case 6:
+		cfg.BPO4Time, sched.BPO4 = &t, bc
+	case 7:
+		cfg.BPO5Time, sched.BPO5 = &t, bc
+	}
+}
+
+func sortUint64(s []uint64) {
+	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
 }
 
 // GetBlobParams returns the active blob parameters for a chain config at a given block timestamp.

@@ -242,8 +242,11 @@ type Indexer struct {
 	// otherwise re-insert abandoned-fork data, and checkForReorg cannot catch
 	// that (the deleted parent row reads as a benign gap). Incremented under
 	// dbWriteMu; accessed atomically because the sample happens outside it.
-	reorgEpoch  uint64
-	chainConfig *params.ChainConfig // go-ethereum chain config for fork-aware blob math
+	reorgEpoch uint64
+	// chainConfig is the go-ethereum chain config for fork-aware blob math. It
+	// is refreshed from the node's learned eth_config schedule while indexing
+	// goroutines read it, so access is atomic.
+	chainConfig atomic.Pointer[params.ChainConfig]
 }
 
 // New creates a new indexer
@@ -269,7 +272,7 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 	// Check if the client supports websockets
 	useWebsocket := ethClient.IsWebsocket()
 
-	return &Indexer{
+	idx := &Indexer{
 		db:                        database,
 		ethClient:                 ethClient,
 		attribution:               attributionSvc,
@@ -295,16 +298,27 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		useWebsocket:              useWebsocket,
 		failedBlocks:              make(map[uint64]int),
 		failedBlockNextRetry:      make(map[uint64]time.Time),
-		chainConfig:               blobparams.ChainConfigForID(network.ChainID),
 	}
+	// Seed the chain config from the compiled baseline; refreshed with the
+	// node's learned eth_config schedule on startup and on the poll ticker.
+	idx.chainConfig.Store(blobparams.ChainConfigForID(network.ChainID))
+	return idx
 }
 
-func (i *Indexer) getBlobBaseFeeFromBlock(block *types.Block) *big.Int {
+func (i *Indexer) getBlobBaseFeeFromBlock(cfg *params.ChainConfig, block *types.Block) *big.Int {
 	header := block.Header()
-	if header.ExcessBlobGas != nil {
-		return eip4844.CalcBlobFee(i.chainConfig, header)
+	if header.ExcessBlobGas == nil {
+		return big.NewInt(1)
 	}
-	return big.NewInt(1)
+	// Defensive: eip4844.CalcBlobFee panics if no blob config is active for the
+	// block's fork (e.g. a pathological schedule whose earliest boundary is
+	// after this block). GetBlobParams returns Max 0 in that case instead of
+	// panicking, so guard on it and fall back to the minimum fee rather than
+	// crash the indexer.
+	if blobparams.GetBlobParams(cfg, header.Time).Max == 0 {
+		return big.NewInt(1)
+	}
+	return eip4844.CalcBlobFee(cfg, header)
 }
 
 type metadataUpdate struct {
@@ -386,6 +400,16 @@ func (i *Indexer) Start() error {
 	if err := i.attribution.Initialize(i.ctx); err != nil {
 		return fmt.Errorf("failed to initialize attribution service: %w", err)
 	}
+
+	// Learn the network's blob schedule from the node before indexing any block,
+	// so target/max/update-fraction and blob base fees are fork-correct from the
+	// first block — including BPO forks and chains without a compiled config.
+	i.refreshBlobScheduleFromNode(i.ctx)
+	i.wg.Add(1)
+	go func() {
+		defer i.wg.Done()
+		i.runBlobSchedulePoller()
+	}()
 
 	// Get the last indexed block
 	lastBlock, err := i.getLastIndexedBlock()
@@ -1409,7 +1433,7 @@ func (i *Indexer) processPendingTransaction(hash common.Hash) {
 		return
 	}
 
-	blobBaseFee := i.getBlobBaseFeeFromBlock(latestBlock)
+	blobBaseFee := i.getBlobBaseFeeFromBlock(i.chainConfig.Load(), latestBlock)
 
 	// Get the sender address
 	from, err := i.getSender(tx)
@@ -1489,15 +1513,18 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 	}
 
 	// Compute blob base fee from the block header (fixes historical accuracy bug
-	// where eth_blobBaseFee RPC returned the current fee, not the block's actual fee)
+	// where eth_blobBaseFee RPC returned the current fee, not the block's actual fee).
+	// Snapshot the chain config once so the block's fee and its target/max come
+	// from the same schedule even if the eth_config poller swaps configs mid-block.
 	header := block.Header()
-	blobBaseFee := i.getBlobBaseFeeFromBlock(block)
+	chainConfig := i.chainConfig.Load()
+	blobBaseFee := i.getBlobBaseFeeFromBlock(chainConfig, block)
 
 	// Get the block timestamp
 	timestamp := i.ethClient.GetBlockTimestamp(block)
 
 	// Extract block-level blob metrics from the header
-	bp := blobparams.GetBlobParams(i.chainConfig, block.Time())
+	bp := blobparams.GetBlobParams(chainConfig, block.Time())
 
 	var blockBlobGasUsed uint64
 	if header.BlobGasUsed != nil {
@@ -2532,7 +2559,7 @@ func (i *Indexer) processPendingTransactions() error {
 		return fmt.Errorf("failed to get latest block: %w", err)
 	}
 
-	blobBaseFee := i.getBlobBaseFeeFromBlock(latestBlock)
+	blobBaseFee := i.getBlobBaseFeeFromBlock(i.chainConfig.Load(), latestBlock)
 
 	// Process each pending transaction
 	for _, tx := range pendingTxs {

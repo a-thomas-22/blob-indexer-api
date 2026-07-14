@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -299,6 +300,33 @@ func (c *Client) GetBlobBaseFee(ctx context.Context, blockNumber uint64) (*big.I
 	c.mu.Unlock()
 
 	return baseFee, nil
+}
+
+// EthConfigFork is one fork entry from the EIP-7910 eth_config response: the
+// blob schedule that becomes active at ActivationTime.
+type EthConfigFork struct {
+	ActivationTime uint64             `json:"activationTime"`
+	BlobSchedule   *params.BlobConfig `json:"blobSchedule"`
+}
+
+// EthConfig is the subset of the EIP-7910 eth_config response the indexer uses
+// to learn a network's blob schedule directly from the node.
+type EthConfig struct {
+	Current *EthConfigFork `json:"current"`
+	Next    *EthConfigFork `json:"next"`
+	Last    *EthConfigFork `json:"last"`
+}
+
+// FetchEthConfig calls the EIP-7910 eth_config method and returns the node's
+// current/next/last fork configuration. Nodes that predate EIP-7910 return an
+// RPC error, which the caller treats as "no dynamic schedule available" and
+// falls back to the compiled chain config.
+func (c *Client) FetchEthConfig(ctx context.Context) (*EthConfig, error) {
+	var result EthConfig
+	if err := c.rpcClient.CallContext(ctx, &result, "eth_config"); err != nil {
+		return nil, fmt.Errorf("eth_config call failed: %w", err)
+	}
+	return &result, nil
 }
 
 // GetBlockTimestamp gets the timestamp of a block
