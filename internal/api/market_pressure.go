@@ -3,6 +3,7 @@ package api
 import (
 	"math"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -134,8 +135,7 @@ func nextBlockFeeEstimateRange(metrics []models.BlockMetrics, cfg *params.ChainC
 	var high *big.Int
 
 	for _, metric := range metrics {
-		targetGas := effectiveBlobTargetGas(metric, blobparamsForMetric(metric, cfg))
-		fee := predictNextBlockBlobFee(cfg, metric, targetGas)
+		fee := predictNextBlockBlobFee(cfg, metric)
 		if low == nil || fee.Cmp(low) < 0 {
 			low = new(big.Int).Set(fee)
 		}
@@ -150,24 +150,63 @@ func nextBlockFeeEstimateRange(metrics []models.BlockMetrics, cfg *params.ChainC
 	return FeeEstimateRangeResponse{Low: low.String(), High: high.String()}
 }
 
-func predictNextBlockBlobFee(cfg *params.ChainConfig, metric models.BlockMetrics, targetGas uint64) *big.Int {
+// predictNextBlockBlobFee estimates the blob base fee of the block following
+// metric. It reconstructs the next block's excess blob gas with go-ethereum's
+// fork-aware eip4844.CalcExcessBlobGas rather than a hand-rolled subtraction, so
+// post-Osaka chains get the EIP-7918 reserve-price branch: when the blob base
+// fee sits at or below a reserve derived from the execution base fee, excess
+// grows toward the scaled floor instead of decaying by target. That branch
+// reads the parent block's execution base fee (metric.BaseFeeWei); rows indexed
+// before it was recorded carry "0", which zeroes the reserve price so the branch
+// never fires and the estimate matches the legacy pre-Osaka formula.
+//
+// The target, max, and update-fraction all come from cfg at the next block's
+// timestamp — the same fork-aware schedule the indexer used to write the block —
+// so no per-block target argument is threaded through.
+func predictNextBlockBlobFee(cfg *params.ChainConfig, metric models.BlockMetrics) *big.Int {
 	if cfg == nil {
 		cfg = blobparams.ChainConfigForID(metric.ChainID)
 	}
-	if targetGas == 0 && metric.BlobGasTarget > 0 {
-		targetGas = uint64(metric.BlobGasTarget)
+
+	var parentTime uint64
+	if ts := metric.BlockTimestamp.Unix(); ts > 0 {
+		parentTime = uint64(ts)
+	}
+	nextTime := parentTime + ethereumSlotTimeSeconds
+
+	// eip4844.CalcExcessBlobGas and CalcBlobFee both panic when no blob config is
+	// active at nextTime (a pre-Cancun timestamp, or a pathological learned
+	// schedule whose earliest boundary is later). Guard on the same
+	// GetBlobParams().Max == 0 signal the indexer uses and fall back to the
+	// minimum blob fee rather than crash the request.
+	if blobparams.GetBlobParams(cfg, nextTime).Max == 0 {
+		return big.NewInt(params.BlobTxMinBlobGasprice)
 	}
 
-	nextExcess := calcNextExcessBlobGas(
-		nonNegativeUint64(metric.ExcessBlobGas),
-		nonNegativeUint64(metric.BlobGasUsed),
-		targetGas,
-	)
+	excess := nonNegativeUint64(metric.ExcessBlobGas)
+	used := nonNegativeUint64(metric.BlobGasUsed)
+	parent := &types.Header{
+		Time:          parentTime,
+		ExcessBlobGas: &excess,
+		BlobGasUsed:   &used,
+		BaseFee:       parseWeiOrZero(metric.BaseFeeWei),
+	}
+
+	nextExcess := eip4844.CalcExcessBlobGas(cfg, parent, nextTime)
 	nextHeader := &types.Header{
-		Time:          uint64(metric.BlockTimestamp.Unix()) + ethereumSlotTimeSeconds,
+		Time:          nextTime,
 		ExcessBlobGas: &nextExcess,
 	}
 	return eip4844.CalcBlobFee(cfg, nextHeader)
+}
+
+// parseWeiOrZero parses a base-10 wei value (as stored in NUMERIC columns) into
+// a big.Int, returning zero for empty or malformed input.
+func parseWeiOrZero(wei string) *big.Int {
+	if v, ok := new(big.Int).SetString(strings.TrimSpace(wei), 10); ok {
+		return v
+	}
+	return big.NewInt(0)
 }
 
 func nonNegativeUint64(value int64) uint64 {

@@ -145,19 +145,25 @@ type BlobUserCategoryShare struct {
 
 // BlockMetrics represents block-level blob pricing data.
 type BlockMetrics struct {
-	ChainID          int       `db:"chain_id"`
-	BlockNumber      int64     `db:"block_number"`
-	BlockTimestamp   time.Time `db:"block_timestamp"`
-	BlobCount        int       `db:"blob_count"`
-	BlobGasUsed      int64     `db:"blob_gas_used"`
-	BlobGasTarget    int64     `db:"blob_gas_target"`
-	BlobGasLimit     int64     `db:"blob_gas_limit"`
-	ExcessBlobGas    int64     `db:"excess_blob_gas"`
-	BlobBaseFee      string    `db:"blob_base_fee"`
-	UtilizationRatio string    `db:"utilization_ratio"`
-	BlobParamsTarget int       `db:"blob_params_target"`
-	BlobParamsMax    int       `db:"blob_params_max"`
-	UpdateFraction   int64     `db:"update_fraction"`
+	ChainID        int       `db:"chain_id"`
+	BlockNumber    int64     `db:"block_number"`
+	BlockTimestamp time.Time `db:"block_timestamp"`
+	BlobCount      int       `db:"blob_count"`
+	BlobGasUsed    int64     `db:"blob_gas_used"`
+	BlobGasTarget  int64     `db:"blob_gas_target"`
+	BlobGasLimit   int64     `db:"blob_gas_limit"`
+	ExcessBlobGas  int64     `db:"excess_blob_gas"`
+	BlobBaseFee    string    `db:"blob_base_fee"`
+	// BaseFeeWei is the block's execution-layer (EIP-1559) base fee in wei,
+	// stored as text (NUMERIC column) to preserve precision. It feeds the
+	// EIP-7918 reserve-price branch of the next-fee prediction. Rows indexed
+	// before migration 000010 carry "0", which disables that branch and falls
+	// back to the legacy pre-Osaka estimate.
+	BaseFeeWei       string `db:"base_fee_wei"`
+	UtilizationRatio string `db:"utilization_ratio"`
+	BlobParamsTarget int    `db:"blob_params_target"`
+	BlobParamsMax    int    `db:"blob_params_max"`
+	UpdateFraction   int64  `db:"update_fraction"`
 }
 
 // BlobStatsAggregate is the aggregated result shape for blob stats queries.
