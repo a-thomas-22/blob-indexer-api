@@ -42,7 +42,7 @@ func newTestIndexer() *Indexer {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	attrSvc := attribution.NewService(nil, network.ChainID)
-	return &Indexer{
+	idx := &Indexer{
 		attribution:               attrSvc,
 		config:                    cfg,
 		network:                   network,
@@ -59,13 +59,14 @@ func newTestIndexer() *Indexer {
 		ctx:                       ctx,
 		cancel:                    cancel,
 		indexerVersion:            cfg.Indexer.Version,
-		chainConfig:               blobparams.ChainConfigForID(network.ChainID),
 		blockTaskCh:               make(chan BlockTask, 1000),
 		failedBlocks:              make(map[uint64]int),
 		failedBlockNextRetry:      make(map[uint64]time.Time),
 		mu:                        sync.Mutex{},
 		failedBlocksMu:            sync.Mutex{},
 	}
+	idx.chainConfig.Store(blobparams.ChainConfigForID(network.ChainID))
+	return idx
 }
 
 func TestNewTestIndexer(t *testing.T) {

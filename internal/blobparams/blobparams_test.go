@@ -18,6 +18,7 @@ func TestChainConfigForID_KnownChains(t *testing.T) {
 		{"mainnet", 1, params.MainnetChainConfig},
 		{"sepolia", 11155111, params.SepoliaChainConfig},
 		{"holesky", 17000, params.HoleskyChainConfig},
+		{"hoodi", 560048, params.HoodiChainConfig},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -42,6 +43,128 @@ func TestChainConfigForID_UnknownChain(t *testing.T) {
 	}
 	if cfg.CancunTime == nil || *cfg.CancunTime != 0 {
 		t.Error("synthetic config should have CancunTime=0")
+	}
+}
+
+func TestGetBlobParams_HoodiBPO(t *testing.T) {
+	// Regression: Hoodi (560048) must use its real fork schedule, not a
+	// Cancun-only synthetic fallback. Hoodi's BPO2 activates at 1762955544
+	// with target 14 / max 21 / update fraction 11684671.
+	cfg := ChainConfigForID(560048)
+	if cfg.ChainID.Int64() != 560048 {
+		t.Fatalf("Hoodi chain ID = %d, want 560048", cfg.ChainID.Int64())
+	}
+	bp := GetBlobParams(cfg, 1762955544+100)
+	if bp.Target != 14 {
+		t.Errorf("Hoodi BPO2 target = %d, want 14", bp.Target)
+	}
+	if bp.Max != 21 {
+		t.Errorf("Hoodi BPO2 max = %d, want 21", bp.Max)
+	}
+	if bp.UpdateFraction != 11684671 {
+		t.Errorf("Hoodi BPO2 update fraction = %d, want 11684671", bp.UpdateFraction)
+	}
+	if got := ForkName(cfg, 1762955544+100); got != "BPO2" {
+		t.Errorf("Hoodi fork name = %q, want BPO2", got)
+	}
+}
+
+func TestBuildChainConfig_EmptyLearnedReturnsBaseline(t *testing.T) {
+	// With no learned entries, a known chain must be identical to its compiled config.
+	cfg := BuildChainConfig(560048, nil)
+	bp := GetBlobParams(cfg, 1762955544+100)
+	if bp.Target != 14 || bp.Max != 21 {
+		t.Errorf("Hoodi BPO2 = %d/%d, want 14/21", bp.Target, bp.Max)
+	}
+}
+
+func TestBuildChainConfig_LearnedNewBPOExtendsKnownChain(t *testing.T) {
+	// Simulate a not-yet-compiled BPO3 learned from the node for Hoodi.
+	// Hoodi's compiled schedule ends at BPO2 (1762955544, 14/21). A learned
+	// BPO3 at a later time with 21/32 must take effect after its activation
+	// while earlier forks are preserved.
+	bpo3Time := uint64(1763545368)
+	learned := []ScheduleEntry{
+		{ActivationTime: bpo3Time, Target: 21, Max: 32, UpdateFraction: 20609697},
+	}
+	cfg := BuildChainConfig(560048, learned)
+
+	// Before BPO3: still BPO2.
+	if bp := GetBlobParams(cfg, bpo3Time-100); bp.Target != 14 || bp.Max != 21 {
+		t.Errorf("pre-BPO3 = %d/%d, want 14/21", bp.Target, bp.Max)
+	}
+	// After BPO3: learned params active.
+	bp := GetBlobParams(cfg, bpo3Time+100)
+	if bp.Target != 21 || bp.Max != 32 || bp.UpdateFraction != 20609697 {
+		t.Errorf("BPO3 = %d/%d/%d, want 21/32/20609697", bp.Target, bp.Max, bp.UpdateFraction)
+	}
+	// EIP-7918/Osaka semantics preserved from the compiled config.
+	if cfg.OsakaTime == nil || *cfg.OsakaTime != 1761677592 {
+		t.Errorf("Osaka time = %v, want 1761677592", cfg.OsakaTime)
+	}
+}
+
+func TestBuildChainConfig_DoesNotMutateGlobal(t *testing.T) {
+	// BuildChainConfig must never mutate go-ethereum's shared global config.
+	before := GetBlobParams(params.HoodiChainConfig, 1762955544+100)
+	_ = BuildChainConfig(560048, []ScheduleEntry{
+		{ActivationTime: 1763545368, Target: 21, Max: 32, UpdateFraction: 20609697},
+	})
+	after := GetBlobParams(params.HoodiChainConfig, 1762955544+100)
+	if before != after {
+		t.Errorf("global Hoodi config mutated: before=%+v after=%+v", before, after)
+	}
+	if params.HoodiChainConfig.BPO3Time != nil {
+		t.Error("global Hoodi config gained a BPO3 time")
+	}
+}
+
+func TestBuildChainConfig_UnknownChainFromLearned(t *testing.T) {
+	// An arbitrary chain go-ethereum does not ship: schedule built from learned
+	// entries alone, with EIP-7918 active (Osaka assumed from genesis).
+	learned := []ScheduleEntry{
+		{ActivationTime: 1000, Target: 6, Max: 9, UpdateFraction: 5007716},
+		{ActivationTime: 2000, Target: 14, Max: 21, UpdateFraction: 11684671},
+	}
+	cfg := BuildChainConfig(7777777, learned)
+
+	if bp := GetBlobParams(cfg, 1500); bp.Target != 6 || bp.Max != 9 {
+		t.Errorf("first boundary = %d/%d, want 6/9", bp.Target, bp.Max)
+	}
+	if bp := GetBlobParams(cfg, 2500); bp.Target != 14 || bp.Max != 21 {
+		t.Errorf("second boundary = %d/%d, want 14/21", bp.Target, bp.Max)
+	}
+	if !cfg.IsOsaka(cfg.LondonBlock, 2500) {
+		t.Error("unknown chain should be treated as Osaka-active (EIP-7918)")
+	}
+}
+
+func TestBuildChainConfig_FillsAllSlotsAndTruncates(t *testing.T) {
+	// Nine ascending boundaries exceed the eight representable fork slots; the
+	// builder keeps the eight most recent and drops the oldest. Also exercises
+	// the BPO3..BPO5 slots.
+	learned := make([]ScheduleEntry, 0, 9)
+	for i := 0; i < 9; i++ {
+		learned = append(learned, ScheduleEntry{
+			ActivationTime: uint64(1000 * (i + 1)),
+			Target:         3 + i,
+			Max:            6 + i,
+			UpdateFraction: uint64(3338477 + i),
+		})
+	}
+	cfg := BuildChainConfig(9001, learned)
+
+	// Oldest boundary (t=1000) was dropped; the earliest retained boundary is
+	// t=2000, so a query at t=2500 resolves the second-oldest learned entry.
+	if bp := GetBlobParams(cfg, 2500); bp.Target != 4 || bp.Max != 7 {
+		t.Errorf("earliest retained boundary = %d/%d, want 4/7", bp.Target, bp.Max)
+	}
+	// Latest boundary (t=9000, target 11 / max 14) sits in the BPO5 slot.
+	if bp := GetBlobParams(cfg, 9500); bp.Target != 11 || bp.Max != 14 {
+		t.Errorf("latest boundary = %d/%d, want 11/14", bp.Target, bp.Max)
+	}
+	if ForkName(cfg, 9500) != "BPO5" {
+		t.Errorf("latest fork = %q, want BPO5", ForkName(cfg, 9500))
 	}
 }
 
