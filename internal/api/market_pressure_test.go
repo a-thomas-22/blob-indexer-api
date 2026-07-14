@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/blobparams"
@@ -179,6 +181,115 @@ func TestMarketPressureHelpers(t *testing.T) {
 	}
 	if got := nextBlockFeeEstimateRange(nil, blobparams.ChainConfigForID(42)); got.Low != "0" || got.High != "0" {
 		t.Fatalf("nextBlockFeeEstimateRange = %+v, want zero range", got)
+	}
+}
+
+// osakaTestChainConfig builds a post-Osaka chain config with an explicit blob
+// schedule so the EIP-7918 reserve-price branch of the next-fee prediction can
+// be exercised deterministically. Cancun/Prague/Osaka share one schedule; only
+// the post-Osaka path (used at the predicted next-block timestamp) matters here.
+func osakaTestChainConfig(target, maxBlobs int, updateFraction uint64) *params.ChainConfig {
+	zero := uint64(0)
+	osaka := uint64(1_000)
+	bc := &params.BlobConfig{Target: target, Max: maxBlobs, UpdateFraction: updateFraction}
+	return &params.ChainConfig{
+		ChainID:     big.NewInt(9999),
+		LondonBlock: big.NewInt(0),
+		CancunTime:  &zero,
+		PragueTime:  &zero,
+		OsakaTime:   &osaka,
+		BlobScheduleConfig: &params.BlobScheduleConfig{
+			Cancun: bc,
+			Prague: bc,
+			Osaka:  bc,
+		},
+	}
+}
+
+// TestPredictNextBlockBlobFee_EIP7918 pins the reserve-price behavior with the
+// worked example from the pricing accuracy fix: target/max 6/9,
+// update_fraction 5,007,716, parent excess 3,210,000, six blobs used. Below the
+// reserve price (post-Osaka) excess grows to 3,472,144 (fee 2); above it, the
+// legacy EIP-4844 formula gives excess 3,210,000 (fee 1).
+func TestPredictNextBlockBlobFee_EIP7918(t *testing.T) {
+	cfg := osakaTestChainConfig(6, 9, 5_007_716)
+	parentTime := time.Unix(2_000, 0).UTC()
+	nextTime := uint64(parentTime.Unix()) + ethereumSlotTimeSeconds
+
+	// Reference fees for the two mandated excess values, computed with
+	// go-ethereum directly so each assertion pins which branch was taken.
+	feeForExcess := func(excess uint64) *big.Int {
+		return eip4844.CalcBlobFee(cfg, &types.Header{Time: nextTime, ExcessBlobGas: &excess})
+	}
+	const (
+		reserveExcess = uint64(3_472_144) // parentExcess + usedGas*(max-target)/max
+		legacyExcess  = uint64(3_210_000) // parentExcess + usedGas - targetGas
+	)
+	reserveFee := feeForExcess(reserveExcess)
+	legacyFee := feeForExcess(legacyExcess)
+	if reserveFee.Cmp(legacyFee) == 0 {
+		t.Fatalf("test setup invalid: reserve and legacy fees coincide (%s); cannot distinguish branches", reserveFee)
+	}
+
+	base := models.BlockMetrics{
+		ChainID:        9999,
+		BlockTimestamp: parentTime,
+		BlobCount:      6,
+		BlobGasUsed:    6 * params.BlobTxBlobGasPerBlob,
+		ExcessBlobGas:  3_210_000,
+	}
+
+	cases := []struct {
+		name       string
+		baseFeeWei string
+		want       *big.Int
+	}{
+		{"below reserve price applies EIP-7918 branch", "1000000000", reserveFee}, // 1 Gwei
+		{"above reserve price uses legacy formula", "1", legacyFee},               // 1 wei
+		{"zero execution base fee falls back to legacy", "0", legacyFee},          // pre-migration rows
+		{"malformed execution base fee falls back to legacy", "not-a-number", legacyFee},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			metric := base
+			metric.BaseFeeWei = tc.baseFeeWei
+			got := predictNextBlockBlobFee(cfg, metric)
+			if got.Cmp(tc.want) != 0 {
+				t.Fatalf("predictNextBlockBlobFee = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPredictNextBlockBlobFee_Fallbacks covers the nil-config and inactive-fork
+// guards.
+func TestPredictNextBlockBlobFee_Fallbacks(t *testing.T) {
+	// nil config resolves to the compiled config for the metric's chain.
+	metric := models.BlockMetrics{
+		ChainID:        42,
+		BlockTimestamp: time.Unix(2_000, 0).UTC(),
+		BlobGasUsed:    params.BlobTxBlobGasPerBlob,
+		ExcessBlobGas:  100_000,
+		BaseFeeWei:     "1000000000",
+	}
+	if got := predictNextBlockBlobFee(nil, metric); got.Sign() <= 0 {
+		t.Fatalf("predictNextBlockBlobFee with nil cfg = %s, want positive fee", got)
+	}
+
+	// A schedule whose only fork activates after the predicted block leaves no
+	// active blob config; the prediction must fall back to the minimum fee
+	// instead of panicking inside go-ethereum.
+	future := uint64(1 << 40)
+	inactive := &params.ChainConfig{
+		ChainID:     big.NewInt(9999),
+		LondonBlock: big.NewInt(0),
+		CancunTime:  &future,
+		BlobScheduleConfig: &params.BlobScheduleConfig{
+			Cancun: &params.BlobConfig{Target: 3, Max: 6, UpdateFraction: 3_338_477},
+		},
+	}
+	if got := predictNextBlockBlobFee(inactive, metric); got.Cmp(big.NewInt(params.BlobTxMinBlobGasprice)) != 0 {
+		t.Fatalf("predictNextBlockBlobFee with inactive fork = %s, want min fee %d", got, params.BlobTxMinBlobGasprice)
 	}
 }
 

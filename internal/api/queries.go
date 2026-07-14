@@ -79,6 +79,7 @@ const blockMetricsSelectColumns = `
 	blob_gas_limit,
 	excess_blob_gas,
 	blob_base_fee,
+	base_fee_wei,
 	utilization_ratio,
 	blob_params_target,
 	blob_params_max,

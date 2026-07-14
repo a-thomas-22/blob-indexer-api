@@ -1540,6 +1540,15 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		utilizationRatio = float64(blockBlobGasUsed) / float64(bp.TargetGas)
 	}
 
+	// Persist the execution-layer (EIP-1559) base fee so the API's next-fee
+	// prediction can apply EIP-7918's reserve-price branch. Pre-London blocks
+	// carry no base fee (never true for blob blocks, which are post-Cancun);
+	// store "0" defensively so the column is always populated.
+	baseFeeWei := "0"
+	if header.BaseFee != nil {
+		baseFeeWei = header.BaseFee.String()
+	}
+
 	// Collect all blob records for this block. Each EIP-4844 blob — not each
 	// blob transaction — is one row. blobIndex is the block-wide blob ordinal,
 	// shared by no other row in the same (chain_id, block_number).
@@ -1612,6 +1621,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		BlobGasLimit:     int64(bp.MaxGas),
 		ExcessBlobGas:    int64(excessBlobGas),
 		BlobBaseFee:      blobBaseFee.String(),
+		BaseFeeWei:       baseFeeWei,
 		UtilizationRatio: fmt.Sprintf("%.6f", utilizationRatio),
 		BlobParamsTarget: bp.Target,
 		BlobParamsMax:    bp.Max,
@@ -2271,9 +2281,9 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			INSERT INTO block_metrics (
 				chain_id, block_number, block_timestamp, blob_count,
 				blob_gas_used, blob_gas_target, blob_gas_limit,
-				excess_blob_gas, blob_base_fee, utilization_ratio,
+				excess_blob_gas, blob_base_fee, base_fee_wei, utilization_ratio,
 				blob_params_target, blob_params_max, update_fraction
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 			ON CONFLICT (chain_id, block_number) DO UPDATE SET
 				block_timestamp = EXCLUDED.block_timestamp,
 				blob_count = EXCLUDED.blob_count,
@@ -2282,13 +2292,14 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				blob_gas_limit = EXCLUDED.blob_gas_limit,
 				excess_blob_gas = EXCLUDED.excess_blob_gas,
 				blob_base_fee = EXCLUDED.blob_base_fee,
+				base_fee_wei = EXCLUDED.base_fee_wei,
 				utilization_ratio = EXCLUDED.utilization_ratio,
 				blob_params_target = EXCLUDED.blob_params_target,
 				blob_params_max = EXCLUDED.blob_params_max,
 				update_fraction = EXCLUDED.update_fraction
 		`, blockMetrics.ChainID, blockMetrics.BlockNumber, blockMetrics.BlockTimestamp, blockMetrics.BlobCount,
 			blockMetrics.BlobGasUsed, blockMetrics.BlobGasTarget, blockMetrics.BlobGasLimit,
-			blockMetrics.ExcessBlobGas, blockMetrics.BlobBaseFee, blockMetrics.UtilizationRatio,
+			blockMetrics.ExcessBlobGas, blockMetrics.BlobBaseFee, blockMetrics.BaseFeeWei, blockMetrics.UtilizationRatio,
 			blockMetrics.BlobParamsTarget, blockMetrics.BlobParamsMax, blockMetrics.UpdateFraction)
 		if err != nil {
 			return fmt.Errorf("failed to insert block metrics: %w", err)

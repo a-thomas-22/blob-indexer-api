@@ -1005,7 +1005,6 @@ func (a *API) queryBlobPricing(ctx context.Context, network config.NetworkConfig
 	if len(metrics) > 0 {
 		latest := metrics[0]
 		latestTime := uint64(latest.BlockTimestamp.Unix())
-		bp := blobparams.GetBlobParams(cfg, latestTime)
 
 		resp.CurrentBaseFee = latest.BlobBaseFee
 		resp.CurrentBaseFeeGwei = formatWeiAsGwei(latest.BlobBaseFee)
@@ -1024,18 +1023,9 @@ func (a *API) queryBlobPricing(ctx context.Context, network config.NetworkConfig
 		}
 
 		// Predict next base fee
-		resp.PredictedNextFee = predictNextBlockBlobFee(cfg, latest, effectiveBlobTargetGas(latest, bp)).String()
+		resp.PredictedNextFee = predictNextBlockBlobFee(cfg, latest).String()
 		resp.PredictedNextFeeGwei = formatWeiAsGwei(resp.PredictedNextFee)
 	}
 
 	return resp, nil
-}
-
-// calcNextExcessBlobGas estimates the next block's excess blob gas using the EIP-4844 formula.
-func calcNextExcessBlobGas(excessBlobGas, blobGasUsed, targetGas uint64) uint64 {
-	total := excessBlobGas + blobGasUsed
-	if total < targetGas {
-		return 0
-	}
-	return total - targetGas
 }
