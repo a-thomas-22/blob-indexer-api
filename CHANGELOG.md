@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.13.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.12.1...blob-indexer-api-v0.13.0) (2026-07-14)
+
+
+### Features
+
+* learn blob schedule from node (eth_config) to fix Hoodi BPOs ([#303](https://github.com/a-thomas-22/blob-indexer-api/issues/303)) ([5fea2e0](https://github.com/a-thomas-22/blob-indexer-api/commit/5fea2e01c6587e89acc328ea96fd593316f0f909))
+
+
+### Bug Fixes
+
+* **api:** apply EIP-7918 reserve-price branch in blob fee prediction ([#305](https://github.com/a-thomas-22/blob-indexer-api/issues/305)) ([6f808a9](https://github.com/a-thomas-22/blob-indexer-api/commit/6f808a97042a3a03c730f21b137a5226cea62e5c))
+
+
+### Dependencies
+
+* bump github.com/go-chi/chi/v5 from 5.3.0 to 5.3.1 ([#301](https://github.com/a-thomas-22/blob-indexer-api/issues/301)) ([fa995e7](https://github.com/a-thomas-22/blob-indexer-api/commit/fa995e7818a19cb27c4848ee47b62755ed1272a5))
+* bump golang.org/x/sync from 0.21.0 to 0.22.0 ([#302](https://github.com/a-thomas-22/blob-indexer-api/issues/302)) ([ed73eb4](https://github.com/a-thomas-22/blob-indexer-api/commit/ed73eb4bcaa4014850e63586d68899c83a6caecd))
+
 ## [0.12.1](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.12.0...blob-indexer-api-v0.12.1) (2026-07-13)
 
 
