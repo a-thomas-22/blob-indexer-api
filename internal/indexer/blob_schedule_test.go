@@ -66,11 +66,24 @@ func TestScheduleEntriesFromEthConfig(t *testing.T) {
 
 func TestGetBlobBaseFeeFromBlock_NoActiveConfigDoesNotPanic(t *testing.T) {
 	idx := newTestIndexer()
-	// A schedule whose only boundary starts at time 5000; a block at time 1000
-	// has no active blob config, which would panic eip4844.CalcBlobFee.
-	cfg := blobparams.BuildChainConfig(9999999, []blobparams.ScheduleEntry{
-		{ActivationTime: 5000, Target: 6, Max: 9, UpdateFraction: 5007716},
-	})
+	// A config whose only blob fork (Cancun) activates at time 5000: a block at
+	// time 1000 is genuinely pre-4844, so no blob config is active and
+	// eip4844.CalcBlobFee would panic. BuildChainConfig can't produce this — it
+	// always seeds Cancun at time 0 — so build the config directly.
+	cancunTime := uint64(5000)
+	cfg := &params.ChainConfig{
+		ChainID:     big.NewInt(9999999),
+		LondonBlock: big.NewInt(0),
+		CancunTime:  &cancunTime,
+		BlobScheduleConfig: &params.BlobScheduleConfig{
+			Cancun: &params.BlobConfig{Target: 6, Max: 9, UpdateFraction: 5007716},
+		},
+	}
+	// Sanity: the guard's precondition — no active blob config at time 1000.
+	if blobparams.GetBlobParams(cfg, 1000).Max != 0 {
+		t.Fatal("test setup: expected no active blob config at time 1000")
+	}
+
 	excess := uint64(100000)
 	block := types.NewBlockWithHeader(&types.Header{
 		Number:        big.NewInt(1),

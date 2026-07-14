@@ -107,8 +107,11 @@ type blobBoundary struct {
 // For chains go-ethereum ships (mainnet, Hoodi, ...) the compiled schedule is
 // the baseline and learned entries override or extend it — e.g. a newly
 // scheduled BPO advertised via eth_config.next is picked up before any
-// go-ethereum bump. For unknown chains the baseline is Cancun-only, so the
-// schedule is built from the learned entries alone.
+// go-ethereum bump. For unknown chains the baseline is the synthetic
+// Cancun-at-time-0 default schedule (3/6), which learned entries then overlay;
+// a timestamp before the earliest learned boundary therefore resolves to that
+// default Cancun schedule unless the node supplies an activation_time=0 entry
+// that overrides it.
 //
 // Limitation: eth_config carries no fork identity, so for an unknown chain
 // Osaka (which gates EIP-7918) is inferred positionally as the third distinct
