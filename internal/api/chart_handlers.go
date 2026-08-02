@@ -1368,6 +1368,11 @@ const queryBlobMarketBlockChart = `
 	ORDER BY sb.block_number ASC
 `
 
+// The cost-comparison queries treat base_fee_wei = 0 as "no execution fee
+// recorded" and fall back to the blob-fee proxy: migration 000010 defined the
+// column as NOT NULL DEFAULT 0 with that meaning, and a genuine zero cannot
+// occur in indexed data (post-London EIP-1559 integer fee math never decays
+// the base fee to zero, and blob-carrying blocks are post-Cancun).
 const queryCostComparisonTimeChart = `
 	WITH bounds AS (
 		SELECT

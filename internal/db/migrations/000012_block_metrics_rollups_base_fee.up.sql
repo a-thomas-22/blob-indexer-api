@@ -12,7 +12,12 @@
 -- 000010 hold base_fee_wei = 0, so there is no historical fee data to roll up
 -- and no backfill runs here (heavy backfills stay out of schema migrations;
 -- see README.md). base_fee_block_count counts only blocks with a non-zero
--- fee, so zero-fee legacy rows never dilute a bucket's average. Rollup rows
+-- fee, so zero-fee legacy rows never dilute a bucket's average. Zero doubles
+-- as the "not recorded" sentinel on purpose: 000010 defined the column as
+-- NOT NULL DEFAULT 0 with exactly that meaning, and a genuine zero cannot
+-- occur in indexed data because post-London EIP-1559 integer fee math never
+-- decays the base fee to zero and every blob-carrying block is post-Cancun,
+-- hence post-London. Rollup rows
 -- written before this migration keep the default 0 / 0, which the API treats
 -- as "no fee recorded" and prices with the blob-fee proxy, exactly the
 -- behaviour before this migration. Fine (60s) buckets inside the 48h
