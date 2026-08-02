@@ -21,9 +21,12 @@
 -- written before this migration keep the default 0 / 0, which the API treats
 -- as "no fee recorded" and prices with the blob-fee proxy, exactly the
 -- behaviour before this migration. Fine (60s) buckets inside the 48h
--- retention window are recomputed by the indexer's startup backfill; coarse
--- buckets pick up the new aggregates whenever any row in the bucket changes
--- (reorg, reindex, or live writes).
+-- retention window are recomputed by the indexer's startup backfill. Coarse
+-- buckets written between the 000010 and 000012 deploys hold real fee data
+-- in block_metrics but 0 / 0 aggregates here; the indexer heals those once
+-- on startup (db.HealCoarseRollupBaseFees refreshes rollup rows whose
+-- base_fee_block_count is 0 but whose bucket contains fee-bearing blocks),
+-- keeping the backfill out of this schema migration.
 --
 -- Constant DEFAULTs keep the column adds metadata-only (no table rewrite) on
 -- PostgreSQL 11+. DDL only, idempotent, no explicit transaction control; see

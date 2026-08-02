@@ -1373,6 +1373,12 @@ const queryBlobMarketBlockChart = `
 // column as NOT NULL DEFAULT 0 with that meaning, and a genuine zero cannot
 // occur in indexed data (post-London EIP-1559 integer fee math never decays
 // the base fee to zero, and blob-carrying blocks are post-Cancun).
+//
+// The bucket average is rounded to integer wei first and the calldata cost is
+// computed from the rounded value, so every execution-priced point satisfies
+// calldata_equivalent_cost_wei = blob_bytes * 16 * average_execution_base_fee_wei
+// exactly; the sub-wei pricing error this trades away is at most half a wei
+// per gas.
 const queryCostComparisonTimeChart = `
 	WITH bounds AS (
 		SELECT
@@ -1449,7 +1455,7 @@ const queryCostComparisonTimeChart = `
 			COALESCE(bc.blob_cost_wei, 0) AS blob_cost_wei,
 			CASE
 				WHEN COALESCE(bf.base_fee_block_count, 0) > 0
-					THEN ROUND(COALESCE(bc.blob_bytes, 0)::numeric * $7::numeric * bf.sum_base_fee_wei / bf.base_fee_block_count)
+					THEN COALESCE(bc.blob_bytes, 0)::numeric * $7::numeric * ROUND(bf.sum_base_fee_wei / bf.base_fee_block_count)
 				ELSE COALESCE(bc.proxy_calldata_cost_wei, 0)
 			END AS calldata_equivalent_cost_wei,
 			CASE
@@ -2056,7 +2062,7 @@ const queryCostComparisonTimeChartRollup = `
 			COALESCE(bc.blob_cost_wei, 0) AS blob_cost_wei,
 			CASE
 				WHEN COALESCE(bf.base_fee_block_count, 0) > 0
-					THEN ROUND(COALESCE(bc.blob_bytes, 0)::numeric * $6::numeric * bf.sum_base_fee_wei / bf.base_fee_block_count)
+					THEN COALESCE(bc.blob_bytes, 0)::numeric * $6::numeric * ROUND(bf.sum_base_fee_wei / bf.base_fee_block_count)
 				ELSE COALESCE(bc.proxy_calldata_cost_wei, 0)
 			END AS calldata_equivalent_cost_wei,
 			CASE

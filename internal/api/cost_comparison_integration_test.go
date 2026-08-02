@@ -62,21 +62,22 @@ func TestCostComparisonQueriesAgainstRealPostgres(t *testing.T) {
 	end := start.Add(2 * time.Hour)
 
 	// Bucket A (hour 1): two blocks with recorded execution base fees of
-	// 2000000 and 4000000 wei, so the bucket average is 3000000. Bucket B
-	// (hour 2): one legacy block with base_fee_wei = 0 (nothing recorded).
+	// 2000000 and 4000001 wei. The fractional bucket average 3000000.5
+	// rounds to 3000001, and pricing must use the ROUNDED average so the
+	// reported average_execution_base_fee_wei exactly reproduces
+	// calldata_equivalent_cost_wei. Bucket B (hour 2): one legacy block with
+	// base_fee_wei = 0 (nothing recorded).
 	if _, err := sqlxDB.Exec(`
 		INSERT INTO block_metrics (chain_id, block_number, block_timestamp, base_fee_wei) VALUES
 			(1, 100, $1, 2000000),
-			(1, 101, $2, 4000000),
+			(1, 101, $2, 4000001),
 			(1, 200, $3, 0)
 	`, start, start.Add(12*time.Second), start.Add(time.Hour)); err != nil {
 		t.Fatalf("seed block metrics: %v", err)
 	}
 
-	// Bucket A carries two 131072-byte blobs (262144 bytes total), each with
-	// total_cost_wei chosen so the bucket's blob cost is exactly half of the
-	// execution-priced calldata equivalent:
-	//   262144 bytes * 16 gas/byte * 3000000 wei = 12582912000000 wei
+	// Bucket A carries two 131072-byte blobs (262144 bytes total):
+	//   262144 bytes * 16 gas/byte * 3000001 wei = 12582916194304 wei
 	// Bucket B's blob prices with the proxy (blob base fee 25):
 	//   131072 * 16 * 25 = 52428800 wei, and 3276800 / 52428800 = 6.25%,
 	// reproducing the constant 93.75% savings of the proxy model.
@@ -111,14 +112,17 @@ func TestCostComparisonQueriesAgainstRealPostgres(t *testing.T) {
 	if execBucket.BlobCount != 2 || execBucket.BlobBytes != 262144 {
 		t.Fatalf("unexpected execution bucket shape: %+v", execBucket)
 	}
-	if execBucket.CalldataEquivalentCostWei != "12582912000000" {
-		t.Fatalf("execution bucket calldata cost = %s, want 12582912000000", execBucket.CalldataEquivalentCostWei)
+	// 262144 * 16 * 3000001: the point must satisfy
+	// calldata = blob_bytes * 16 * average_execution_base_fee_wei exactly,
+	// with the fractional average (3000000.5) rounded before pricing.
+	if execBucket.CalldataEquivalentCostWei != "12582916194304" {
+		t.Fatalf("execution bucket calldata cost = %s, want 12582916194304", execBucket.CalldataEquivalentCostWei)
 	}
-	if !execBucket.AverageExecutionBaseFeeWei.Valid || execBucket.AverageExecutionBaseFeeWei.String != "3000000" {
-		t.Fatalf("execution bucket average base fee = %+v, want 3000000", execBucket.AverageExecutionBaseFeeWei)
+	if !execBucket.AverageExecutionBaseFeeWei.Valid || execBucket.AverageExecutionBaseFeeWei.String != "3000001" {
+		t.Fatalf("execution bucket average base fee = %+v, want 3000001", execBucket.AverageExecutionBaseFeeWei)
 	}
-	if execBucket.SavingsWei != "6291456000000" || execBucket.SavingsPercent != 50 {
-		t.Fatalf("execution bucket savings = %s / %v, want 6291456000000 / 50", execBucket.SavingsWei, execBucket.SavingsPercent)
+	if execBucket.SavingsWei != "6291460194304" || math.Abs(execBucket.SavingsPercent-50.000017) > 1e-5 {
+		t.Fatalf("execution bucket savings = %s / %v, want 6291460194304 / ~50.000017", execBucket.SavingsWei, execBucket.SavingsPercent)
 	}
 
 	proxyBucket := raw[1]
@@ -134,12 +138,12 @@ func TestCostComparisonQueriesAgainstRealPostgres(t *testing.T) {
 
 	// Summary spans both pricing modes and must sum the per-bucket values.
 	if execBucket.SummaryBlobCostWei != "6291459276800" ||
-		execBucket.SummaryCalldataEquivalentCostWei != "12582964428800" ||
-		execBucket.SummarySavingsWei != "6291505152000" {
+		execBucket.SummaryCalldataEquivalentCostWei != "12582968623104" ||
+		execBucket.SummarySavingsWei != "6291509346304" {
 		t.Fatalf("unexpected summary: %+v", execBucket)
 	}
-	if math.Abs(execBucket.SummarySavingsPercent-50.000182) > 1e-5 {
-		t.Fatalf("summary savings percent = %v, want ~50.000182", execBucket.SummarySavingsPercent)
+	if math.Abs(execBucket.SummarySavingsPercent-50.000199) > 1e-5 {
+		t.Fatalf("summary savings percent = %v, want ~50.000199", execBucket.SummarySavingsPercent)
 	}
 
 	// The rollup-served paths must reproduce the raw rows exactly, both from
@@ -187,13 +191,13 @@ func TestCostComparisonQueriesAgainstRealPostgres(t *testing.T) {
 		percent  float64
 	}{
 		{calldata: "4194304000000", avgFee: "2000000", percent: 25},
-		{calldata: "8388608000000", avgFee: "4000000", percent: 62.5},
+		{calldata: "8388610097152", avgFee: "4000001", percent: 62.500009},
 		{calldata: "52428800", avgFee: "", percent: 93.75},
 	}
 	for i, want := range wantBlocks {
 		got := blocks[i]
-		if got.CalldataEquivalentCostWei != want.calldata || got.SavingsPercent != want.percent {
-			t.Fatalf("block row %d = %s / %v, want %s / %v", i, got.CalldataEquivalentCostWei, got.SavingsPercent, want.calldata, want.percent)
+		if got.CalldataEquivalentCostWei != want.calldata || math.Abs(got.SavingsPercent-want.percent) > 1e-5 {
+			t.Fatalf("block row %d = %s / %v, want %s / ~%v", i, got.CalldataEquivalentCostWei, got.SavingsPercent, want.calldata, want.percent)
 		}
 		if want.avgFee == "" {
 			if got.AverageExecutionBaseFeeWei.Valid {
@@ -203,9 +207,15 @@ func TestCostComparisonQueriesAgainstRealPostgres(t *testing.T) {
 			t.Fatalf("block row %d average base fee = %+v, want %s", i, got.AverageExecutionBaseFeeWei, want.avgFee)
 		}
 	}
-	if blocks[0].SummaryCalldataEquivalentCostWei != execBucket.SummaryCalldataEquivalentCostWei ||
-		blocks[0].SummaryBlobCostWei != execBucket.SummaryBlobCostWei {
-		t.Fatalf("block summary diverges from time summary: %+v vs %+v", blocks[0], execBucket)
+	// Block granularity prices each blob at its own block's fee (the bucket
+	// IS the block), while time buckets price all bytes at the bucket's
+	// rounded average, so the summaries legitimately differ when blob bytes
+	// are unevenly priced within a bucket. Here the fractional hourly average
+	// (3000000.5 rounded to 3000001) makes the time summary exceed the block
+	// summary by exactly 262144 * 16 * 0.5 = 2097152 wei.
+	if blocks[0].SummaryBlobCostWei != "6291459276800" ||
+		blocks[0].SummaryCalldataEquivalentCostWei != "12582966525952" {
+		t.Fatalf("unexpected block summary: %+v", blocks[0])
 	}
 
 	// The hourly rollup rows themselves must carry the migration 000012
@@ -228,10 +238,48 @@ func TestCostComparisonQueriesAgainstRealPostgres(t *testing.T) {
 	if len(feeAgg) != 2 {
 		t.Fatalf("expected 2 hourly rollup rows, got %d: %+v", len(feeAgg), feeAgg)
 	}
-	if feeAgg[0].SumBaseFeeWei != "6000000" || feeAgg[0].BaseFeeBlockCount != 2 {
-		t.Fatalf("execution bucket rollup aggregates = %+v, want sum 6000000 count 2", feeAgg[0])
+	if feeAgg[0].SumBaseFeeWei != "6000001" || feeAgg[0].BaseFeeBlockCount != 2 {
+		t.Fatalf("execution bucket rollup aggregates = %+v, want sum 6000001 count 2", feeAgg[0])
 	}
 	if feeAgg[1].SumBaseFeeWei != "0" || feeAgg[1].BaseFeeBlockCount != 0 {
 		t.Fatalf("legacy bucket rollup aggregates = %+v, want sum 0 count 0", feeAgg[1])
+	}
+
+	// Coarse rollup rows written before migration 000012 hold 0 / 0 fee
+	// aggregates even where block_metrics has real fees, and nothing rewrites
+	// completed coarse buckets in normal operation. Simulate that stale state
+	// and verify the indexer's startup heal repairs it: rollup-served charts
+	// must stop proxy-pricing the affected buckets after one heal pass.
+	if _, err := sqlxDB.Exec(`
+		UPDATE block_metrics_rollups
+		SET sum_base_fee_wei = 0, base_fee_block_count = 0
+		WHERE chain_id = 1 AND bucket_seconds <> 60
+	`); err != nil {
+		t.Fatalf("simulate pre-000012 coarse rollups: %v", err)
+	}
+	stale := fetch(queryCostComparisonTimeChartRollup, 1, "24h", start, end, int64(3600), calldataGasPerByte, int64(3600))
+	if stale[0].AverageExecutionBaseFeeWei.Valid || stale[0].CalldataEquivalentCostWei != "62914560" {
+		t.Fatalf("expected stale coarse rollups to proxy-price the execution bucket, got %+v", stale[0])
+	}
+	healed, err := database.HealCoarseRollupBaseFees(ctx, 1)
+	if err != nil {
+		t.Fatalf("HealCoarseRollupBaseFees: %v", err)
+	}
+	// Exactly the hourly, six-hour, and daily buckets holding the two
+	// fee-bearing blocks qualify; bucket B's fee-less block heals nothing.
+	if healed != 3 {
+		t.Fatalf("healed %d coarse buckets, want 3", healed)
+	}
+	healedRows := fetch(queryCostComparisonTimeChartRollup, 1, "24h", start, end, int64(3600), calldataGasPerByte, int64(3600))
+	if !reflect.DeepEqual(healedRows, raw) {
+		t.Fatalf("healed rollup rows diverge from raw:\nraw:    %+v\nrollup: %+v", raw, healedRows)
+	}
+	// A second pass finds nothing left to heal.
+	healed, err = database.HealCoarseRollupBaseFees(ctx, 1)
+	if err != nil {
+		t.Fatalf("second HealCoarseRollupBaseFees: %v", err)
+	}
+	if healed != 0 {
+		t.Fatalf("second heal repaired %d buckets, want 0", healed)
 	}
 }
