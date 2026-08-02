@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.14.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.13.0...blob-indexer-api-v0.14.0) (2026-08-02)
+
+
+### Features
+
+* **api:** expose beacon slot on blob responses ([#311](https://github.com/a-thomas-22/blob-indexer-api/issues/311)) ([63df591](https://github.com/a-thomas-22/blob-indexer-api/commit/63df59158f529b743e2b28e3c05d9ad1e8ab2144))
+
+
+### Bug Fixes
+
+* **api:** price cost-comparison calldata equivalent with execution base fee ([#313](https://github.com/a-thomas-22/blob-indexer-api/issues/313)) ([d75bc93](https://github.com/a-thomas-22/blob-indexer-api/commit/d75bc93b3b2aa0e3684997fb91d16c258e38b915))
+* pin remaining DB timestamp writes to UTC ([#312](https://github.com/a-thomas-22/blob-indexer-api/issues/312)) ([3627f2e](https://github.com/a-thomas-22/blob-indexer-api/commit/3627f2e926101d1fcf3c139a67407073046a39f7))
+
+
+### Dependencies
+
+* bump actions/setup-go from 6 to 7 ([#307](https://github.com/a-thomas-22/blob-indexer-api/issues/307)) ([c480ff6](https://github.com/a-thomas-22/blob-indexer-api/commit/c480ff662039975ea58fb7df0500a678f5d7ad25))
+* bump actions/setup-python from 6 to 7 ([#308](https://github.com/a-thomas-22/blob-indexer-api/issues/308)) ([bc1212b](https://github.com/a-thomas-22/blob-indexer-api/commit/bc1212b0d2ce6e379ea6daa7d388dbaa252659f0))
+* bump github.com/prometheus/client_golang from 1.23.2 to 1.24.1 ([#310](https://github.com/a-thomas-22/blob-indexer-api/issues/310)) ([475fc2f](https://github.com/a-thomas-22/blob-indexer-api/commit/475fc2f1147efb756f68321d85db70d6b90d605e))
+
 ## [0.13.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.12.1...blob-indexer-api-v0.13.0) (2026-07-14)
 
 
