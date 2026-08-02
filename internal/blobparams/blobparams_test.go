@@ -168,6 +168,53 @@ func TestBuildChainConfig_FillsAllSlotsAndTruncates(t *testing.T) {
 	}
 }
 
+func TestBuildChainConfig_NoOpOsakaBoundaryDoesNotConsumeSlot(t *testing.T) {
+	// A chain that has accumulated every eth_config boundary through BPO5:
+	// Cancun at genesis, Prague, Osaka (same params as Prague — Osaka changes
+	// no blob parameters), then BPO1..BPO5 = 8 distinct activation times. The
+	// no-op Osaka boundary must be collapsed rather than consume one of the
+	// seven fork slots — otherwise truncation drops Cancun and its historical
+	// blocks resolve no blob config. Osaka must still be inferred at its real
+	// activation so fork naming and EIP-7918 gating stay correct.
+	learned := []ScheduleEntry{
+		{ActivationTime: 0, Target: 3, Max: 6, UpdateFraction: 3338477},       // Cancun
+		{ActivationTime: 2000, Target: 6, Max: 9, UpdateFraction: 5007716},    // Prague
+		{ActivationTime: 3000, Target: 6, Max: 9, UpdateFraction: 5007716},    // Osaka (no-op)
+		{ActivationTime: 4000, Target: 10, Max: 15, UpdateFraction: 8346193},  // BPO1
+		{ActivationTime: 5000, Target: 14, Max: 21, UpdateFraction: 11684671}, // BPO2
+		{ActivationTime: 6000, Target: 18, Max: 27, UpdateFraction: 15021149}, // BPO3
+		{ActivationTime: 7000, Target: 21, Max: 32, UpdateFraction: 20609697}, // BPO4
+		{ActivationTime: 8000, Target: 24, Max: 36, UpdateFraction: 23336106}, // BPO5
+	}
+	cfg := BuildChainConfig(4242, learned)
+
+	// Cancun retained: historical blocks still resolve.
+	if bp := GetBlobParams(cfg, 1500); bp.Target != 3 || bp.Max != 6 {
+		t.Errorf("Cancun era = %d/%d, want 3/6", bp.Target, bp.Max)
+	}
+	// Osaka inferred at its real activation (third distinct boundary).
+	if cfg.OsakaTime == nil || *cfg.OsakaTime != 3000 {
+		t.Errorf("Osaka time = %v, want 3000", cfg.OsakaTime)
+	}
+	// Osaka era: Prague's params, correct fork name.
+	if bp := GetBlobParams(cfg, 3500); bp.Target != 6 || bp.Max != 9 {
+		t.Errorf("Osaka era = %d/%d, want 6/9", bp.Target, bp.Max)
+	}
+	if got := ForkName(cfg, 3500); got != "Osaka" {
+		t.Errorf("Osaka era fork name = %q, want Osaka", got)
+	}
+	// BPO eras land in their own slots with correct names.
+	if got := ForkName(cfg, 4500); got != "BPO1" {
+		t.Errorf("BPO1 era fork name = %q, want BPO1", got)
+	}
+	if bp := GetBlobParams(cfg, 8500); bp.Target != 24 || bp.Max != 36 {
+		t.Errorf("BPO5 era = %d/%d, want 24/36", bp.Target, bp.Max)
+	}
+	if got := ForkName(cfg, 8500); got != "BPO5" {
+		t.Errorf("BPO5 era fork name = %q, want BPO5", got)
+	}
+}
+
 func TestGetBlobParams_Cancun(t *testing.T) {
 	cfg := params.MainnetChainConfig
 	// Use a timestamp well within Cancun but before Prague

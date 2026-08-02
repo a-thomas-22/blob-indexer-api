@@ -117,7 +117,8 @@ type blobBoundary struct {
 //
 // Limitation: eth_config carries no fork identity, so for an unknown chain
 // Osaka (which gates EIP-7918 but changes no blob parameters) is inferred
-// positionally: OsakaTime is set to the third distinct boundary. With fewer
+// positionally: OsakaTime is set to the third distinct boundary, counted
+// before no-op boundaries are collapsed into their predecessor. With fewer
 // than three boundaries Osaka is not set and EIP-7918 is off; with three or
 // more pre-Osaka boundaries it activates early. This only affects excess-gas /
 // next-fee *prediction* — it does not change the blob schedule selected for a
@@ -149,9 +150,41 @@ func BuildChainConfig(chainID int, learned []ScheduleEntry) *params.ChainConfig 
 		times = append(times, t)
 	}
 	sortUint64(times)
+
+	// Infer Osaka for chains whose compiled config carries no Osaka time,
+	// BEFORE the no-op collapse below erases the Osaka boundary: eth_config
+	// reports Osaka as its own boundary (same params as Prague, distinct
+	// time), so the third distinct time approximates the true activation. See
+	// the limitation note in the function comment.
+	var inferredOsakaTime *uint64
+	if base.OsakaTime == nil && len(times) >= 3 {
+		t := times[2]
+		inferredOsakaTime = &t
+	}
+
+	// Collapse boundaries that do not change the blob parameters — notably
+	// Osaka, whose eth_config entry duplicates Prague's params — so a no-op
+	// boundary does not consume one of the seven fork slots. Without this, a
+	// chain that has accumulated every boundary through BPO5 would overflow
+	// the slots and truncation would drop Cancun, leaving its historical
+	// blocks with no resolvable config. Resolution is unaffected: the params
+	// are identical on both sides of a collapsed boundary, and keeping the
+	// earliest time of each run preserves where those params first activated.
+	kept := times[:0]
+	var prevCfg *params.BlobConfig
+	for _, t := range times {
+		if prevCfg != nil && *merged[t] == *prevCfg {
+			continue
+		}
+		kept = append(kept, t)
+		prevCfg = merged[t]
+	}
+	times = kept
+
 	// A chain with more distinct blob-param changes than go-ethereum can encode
 	// keeps its most recent boundaries (the ones we actually index against).
-	// Unreachable for any real chain (<=7 boundaries), but log rather than drop
+	// Unreachable for any real chain (<=7 param-changing boundaries through
+	// BPO5, after the no-op collapse above), but log rather than drop
 	// silently so a schedule this large is visible. Blocks before the earliest
 	// retained boundary resolve no config; getBlobBaseFeeFromBlock guards the
 	// resulting CalcBlobFee panic.
@@ -180,15 +213,10 @@ func BuildChainConfig(chainID int, learned []ScheduleEntry) *params.ChainConfig 
 	}
 
 	// Osaka carries no blob-config slot, but OsakaTime gates EIP-7918. Compiled
-	// chains keep their real Osaka time (clearBlobForkTimes preserves it). For
-	// unknown chains, infer it positionally as the third distinct boundary: real
-	// chains follow Cancun→Prague→Osaka→BPO order and their eth_config reports
-	// Osaka as its own boundary (same params as Prague, distinct time), so the
-	// third boundary matches the true Osaka activation. See the limitation note
-	// above for how this heuristic can misfire on arbitrary chains.
-	if out.OsakaTime == nil && len(times) >= 3 {
-		t := times[2]
-		out.OsakaTime = &t
+	// chains keep their real Osaka time (clearBlobForkTimes preserves it);
+	// unknown chains get the positional inference computed above.
+	if out.OsakaTime == nil {
+		out.OsakaTime = inferredOsakaTime
 	}
 	return &out
 }
