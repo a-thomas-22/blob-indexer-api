@@ -39,6 +39,14 @@ type NetworkConfig struct {
 	RpcURL     string `mapstructure:"rpc_url" yaml:"rpc_url"`         // RPC URL is only stored in configuration, not in the database
 	StartBlock string `mapstructure:"start_block" yaml:"start_block"` // "LATEST", "LATEST-1000", or specific number
 	Enabled    bool   `mapstructure:"enabled" yaml:"enabled"`
+	// BeaconGenesisTime is the beacon chain's genesis time in unix seconds,
+	// used to derive each blob's beacon slot from its block timestamp. Only
+	// needed for networks internal/beacon does not know by chain ID; when set
+	// it overrides the compiled constant. Zero means "not configured".
+	BeaconGenesisTime uint64 `mapstructure:"beacon_genesis_time" yaml:"beacon_genesis_time"`
+	// SecondsPerSlot is the beacon chain's SECONDS_PER_SLOT. Zero means the
+	// default of 12, which every supported network uses.
+	SecondsPerSlot uint64 `mapstructure:"seconds_per_slot" yaml:"seconds_per_slot"`
 }
 
 // DatabaseConfig holds the database configuration

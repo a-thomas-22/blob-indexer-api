@@ -143,7 +143,7 @@ func (a *API) buildBlockSnapshot(ctx context.Context, network config.NetworkConf
 	}
 	blobsByBlock := make(map[int64][]BlobResponse, len(metrics))
 	for _, blob := range blobs {
-		blobsByBlock[blob.BlockNumber] = append(blobsByBlock[blob.BlockNumber], toBlobResponse(blob, network.Name))
+		blobsByBlock[blob.BlockNumber] = append(blobsByBlock[blob.BlockNumber], toBlobResponse(blob, network))
 	}
 
 	for _, metric := range metrics {

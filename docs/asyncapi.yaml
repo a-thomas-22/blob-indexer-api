@@ -393,6 +393,11 @@ components:
             type: string
           description: The carrying transaction's full ordered list of EIP-4844 versioned blob hashes (0x01-prefixed). Omitted for rows indexed before versioned hashes were stored.
           example: ['0x01a1f8730e4064f7dd90279b721b25e28c07fc3e16d5fd4a26e6d3d5e9e0dbeb']
+        slot:
+          type: integer
+          format: int64
+          description: The beacon slot of the including block — the key beacon-side blob reads (e.g. BlobArchive's /eth/v1/beacon/blobs/{slot}) are indexed by. Omitted for pending (mempool) blobs, which have no slot until inclusion, and for networks whose beacon genesis time is not configured.
+          example: 11813607
     StatsResponse:
       type: object
       description: Network identity comes from the connection query. `network_id` and `network_name` may be omitted in WebSocket stats updates.

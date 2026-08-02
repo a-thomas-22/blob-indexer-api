@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
+	"github.com/a-thomas-22/blob-indexer-api/internal/beacon"
 	"github.com/a-thomas-22/blob-indexer-api/internal/blobparams"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
@@ -1549,6 +1550,17 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		baseFeeWei = header.BaseFee.String()
 	}
 
+	// The block's beacon slot, shared by every blob row in it. Derivation is
+	// exact for post-merge blocks (consensus pins the timestamp to the slot
+	// grid); nil only when the network's beacon genesis time is unknown.
+	var slot *int64
+	if clock, ok := beacon.ClockForNetwork(i.network); ok {
+		if s, ok := clock.SlotAt(block.Time()); ok {
+			v := int64(s)
+			slot = &v
+		}
+	}
+
 	// Collect all blob records for this block. Each EIP-4844 blob — not each
 	// blob transaction — is one row. blobIndex is the block-wide blob ordinal,
 	// shared by no other row in the same (chain_id, block_number).
@@ -1599,6 +1611,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 				MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
 				BlobGasUsed:       metrics.blobGasUsed,
 				VersionedHash:     &versionedHash,
+				Slot:              slot,
 				Nonce:             tx.Nonce(),
 			})
 			blobIndex++
@@ -2102,7 +2115,7 @@ func (i *Indexer) completeReorgRecoveryIfCovered(fetchEpoch uint64) {
 
 // blobInsertColumns is the number of columns written per row when inserting
 // into blobs.
-const blobInsertColumns = 14
+const blobInsertColumns = 15
 
 // mempoolBlobInsertColumns is the number of columns written per row when
 // upserting into mempool_blobs.
@@ -2248,7 +2261,7 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			INSERT INTO blobs (
 				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
+				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash, slot
 			) VALUES ` + valuesPlaceholders(len(blobs), blobInsertColumns, nil) + `
 			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
 				tx_hash = EXCLUDED.tx_hash,
@@ -2261,14 +2274,15 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				timestamp = EXCLUDED.timestamp,
 				max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
 				blob_gas_used = EXCLUDED.blob_gas_used,
-				versioned_hash = EXCLUDED.versioned_hash
+				versioned_hash = EXCLUDED.versioned_hash,
+				slot = EXCLUDED.slot
 		`
 		insertArgs := make([]interface{}, 0, len(blobs)*blobInsertColumns)
 		for _, blob := range blobs {
 			insertArgs = append(insertArgs,
 				blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash)
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, blob.Slot)
 		}
 		if _, err := tx.ExecContext(i.ctx, insertQuery, insertArgs...); err != nil {
 			return fmt.Errorf("failed to insert blobs (block: %d): %w", indexedBlock.BlockNumber, err)

@@ -54,8 +54,8 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		INSERT INTO blobs (
 			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
-		) VALUES (1, 100, 0, '0xconfirmed', '0xfrom', 'Rollup', 131072, 10, 2, 100, $1, 12, 131072, '0xvhconfirmed')
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash, slot
+		) VALUES (1, 100, 0, '0xconfirmed', '0xfrom', 'Rollup', 131072, 10, 2, 100, $1, 12, 131072, '0xvhconfirmed', 12345678)
 	`, now); err != nil {
 		t.Fatalf("seed confirmed blob: %v", err)
 	}
@@ -168,11 +168,17 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		if !blob.Confirmed || blob.BlockNumber != 100 {
 			t.Fatalf("expected confirmed blob, got %+v", blob)
 		}
+		if blob.Slot == nil || *blob.Slot != 12345678 {
+			t.Fatalf("expected stored slot 12345678 on confirmed blob, got %+v", blob.Slot)
+		}
 		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByTxHash, "0xpendingtx", 1); err != nil {
 			t.Fatalf("queryBlobByTxHash pending: %v", err)
 		}
 		if blob.Confirmed || blob.BlockNumber != models.PendingBlockNumber {
 			t.Fatalf("expected pending blob, got %+v", blob)
+		}
+		if blob.Slot != nil {
+			t.Fatalf("expected NULL slot on the mempool projection, got %d", *blob.Slot)
 		}
 		if err := sqlxDB.GetContext(ctx, &blob, queryBlobByTxHash, "0xmissing", 1); !errors.Is(err, sql.ErrNoRows) {
 			t.Fatalf("expected sql.ErrNoRows for missing tx, got %v", err)
