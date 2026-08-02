@@ -2,6 +2,7 @@ package attribution
 
 import (
 	"context"
+	"database/sql/driver"
 	"testing"
 	"time"
 
@@ -10,6 +11,17 @@ import (
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
 )
+
+// utcTimeArg matches a time.Time argument only if it is pinned to UTC.
+// first_seen/last_seen are timezone-less TIMESTAMP columns, which discard the
+// offset lib/pq encodes — a local-zone time would be stored shifted on
+// non-UTC hosts.
+type utcTimeArg struct{}
+
+func (utcTimeArg) Match(v driver.Value) bool {
+	t, ok := v.(time.Time)
+	return ok && t.Location() == time.UTC
+}
 
 func newMockService(t *testing.T) (*Service, sqlmock.Sqlmock) {
 	t.Helper()
@@ -46,7 +58,7 @@ func TestAddKnownUser_InsertsNewUser(t *testing.T) {
 	svc, mock := newMockService(t)
 
 	mock.ExpectExec("INSERT INTO blob_users").
-		WithArgs(1, "0xabc", "Alice", "desc", "infra", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs(1, "0xabc", "Alice", "desc", "infra", utcTimeArg{}, utcTimeArg{}).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	if err := svc.AddKnownUser(context.TODO(), "0xAbC", "Alice", "desc", "infra"); err != nil {
@@ -67,7 +79,7 @@ func TestAddKnownUser_UpdatesExistingUser(t *testing.T) {
 	svc.knownUsers["0xabc"] = "OldName"
 
 	mock.ExpectExec("UPDATE blob_users").
-		WithArgs("Alice", "desc", "infra", sqlmock.AnyArg(), "0xabc", 1).
+		WithArgs("Alice", "desc", "infra", utcTimeArg{}, "0xabc", 1).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := svc.AddKnownUser(context.TODO(), "0xABC", "Alice", "desc", "infra"); err != nil {
@@ -174,7 +186,7 @@ func TestUpdateUserLastSeen_KnownUser(t *testing.T) {
 		svc.knownUsers["0xabc"] = "Alice"
 
 		mock.ExpectExec("UPDATE blob_users SET last_seen = \\$1 WHERE address = \\$2 AND chain_id = \\$3").
-			WithArgs(sqlmock.AnyArg(), "0xabc", 1).
+			WithArgs(utcTimeArg{}, "0xabc", 1).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
 		if err := svc.UpdateUserLastSeen(context.TODO(), "0xABC"); err != nil {
@@ -235,7 +247,7 @@ func TestBatchUpdateUserLastSeen(t *testing.T) {
 		svc.knownUsers["0xdef"] = "Bob"
 
 		mock.ExpectExec("UPDATE blob_users SET last_seen = \\$1 WHERE address = ANY\\(\\$2\\) AND chain_id = \\$3").
-			WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), 1).
+			WithArgs(utcTimeArg{}, sqlmock.AnyArg(), 1).
 			WillReturnResult(sqlmock.NewResult(0, 2))
 
 		err := svc.BatchUpdateUserLastSeen(context.TODO(), []string{"0xABC", "0xdef", "0xunknown"})

@@ -39,6 +39,12 @@ type Blob struct {
 	MaxFeePerBlobGas  *string   `db:"max_fee_per_blob_gas"` // Nullable for pre-migration rows
 	BlobGasUsed       *int64    `db:"blob_gas_used"`        // Nullable for pre-migration rows
 	VersionedHash     *string   `db:"versioned_hash"`       // Nullable for pre-migration rows
+	// Slot is the beacon slot of the including block, derived at index time
+	// from the block timestamp and the network's beacon genesis time. NULL for
+	// pending rows (no slot until inclusion, and mempool_blobs has no column —
+	// queries project NULL), for confirmed rows indexed before the slot
+	// migration, and for networks whose beacon genesis time is unknown.
+	Slot *int64 `db:"slot"`
 	// VersionedHashes is the transaction's full ordered list of EIP-4844
 	// versioned blob hashes. Not a stored column: the API's blob projections
 	// compute it from the sibling rows' versioned_hash values, so it is empty

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 )
 
@@ -127,7 +128,7 @@ func TestToBlobResponseDisplayHelpers(t *testing.T) {
 		MaxFeePerBlobGas:  &maxFee,
 	}
 
-	got := toBlobResponse(blob, "mainnet")
+	got := toBlobResponse(blob, config.NetworkConfig{Name: "mainnet", ChainID: 1})
 
 	if got.TransactionURL != "https://etherscan.io/tx/"+validDisplayTxHash {
 		t.Fatalf("TransactionURL = %q", got.TransactionURL)

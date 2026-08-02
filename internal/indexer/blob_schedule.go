@@ -80,7 +80,7 @@ func (i *Indexer) refreshBlobScheduleFromNode(ctx context.Context) {
 			// still activates at its old timestamp. Past/current boundaries are
 			// preserved (they already happened); only not-yet-active learned
 			// boundaries absent from this poll are dropped.
-			now := time.Now()
+			now := time.Now().UTC()
 			if err := i.db.ReconcileFutureBlobSchedule(ctx, i.network.ChainID, entries, "eth_config", now); err != nil {
 				logger.Error("Failed to persist learned blob schedule",
 					zap.String("network", i.network.Name),

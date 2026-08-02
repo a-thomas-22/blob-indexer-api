@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/beacon"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
 
@@ -39,6 +40,23 @@ type NetworkConfig struct {
 	RpcURL     string `mapstructure:"rpc_url" yaml:"rpc_url"`         // RPC URL is only stored in configuration, not in the database
 	StartBlock string `mapstructure:"start_block" yaml:"start_block"` // "LATEST", "LATEST-1000", or specific number
 	Enabled    bool   `mapstructure:"enabled" yaml:"enabled"`
+	// BeaconGenesisTime is the beacon chain's genesis time in unix seconds,
+	// used to derive each blob's beacon slot from its block timestamp. Only
+	// needed for networks internal/beacon does not know by chain ID; when set
+	// it overrides the compiled constant. Zero means "not configured".
+	BeaconGenesisTime uint64 `mapstructure:"beacon_genesis_time" yaml:"beacon_genesis_time"`
+	// SecondsPerSlot is the beacon chain's SECONDS_PER_SLOT. Zero means the
+	// default of 12, which every supported network uses.
+	SecondsPerSlot uint64 `mapstructure:"seconds_per_slot" yaml:"seconds_per_slot"`
+}
+
+// BeaconClock resolves the network's beacon slot timing from its explicit
+// configuration or the compiled constants for known chain IDs. The second
+// return is false when neither is available. Indexer-mode config validation
+// requires it to resolve — blob rows must carry the beacon slot blob-flow
+// depends on — while the API tolerates absence and omits the field.
+func (n NetworkConfig) BeaconClock() (beacon.Clock, bool) {
+	return beacon.ResolveClock(n.ChainID, n.BeaconGenesisTime, n.SecondsPerSlot)
 }
 
 // DatabaseConfig holds the database configuration
@@ -605,6 +623,17 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 				return fmt.Errorf("network '%s' is missing a start block", network.Name)
 			}
 			logger.Debug("Network start block configured", zap.String("network", network.Name), zap.String("start_block", network.StartBlock))
+
+			// Indexed blob rows must carry the beacon slot (blob-flow keys its
+			// BlobArchive reads on it), so a network whose slot derivation is
+			// impossible fails fast here instead of silently indexing rows
+			// with the field omitted.
+			if _, ok := network.BeaconClock(); !ok {
+				logger.Error("Network has no beacon genesis time",
+					zap.String("network", network.Name),
+					zap.Int("chain_id", network.ChainID))
+				return fmt.Errorf("network '%s' (chain ID %d) has no beacon genesis time to derive blob slots from - set beacon_genesis_time (unix seconds, plus seconds_per_slot if not 12) in the network config", network.Name, network.ChainID)
+			}
 		}
 
 		logger.Debug("Network enabled status", zap.String("network", network.Name), zap.Bool("enabled", network.Enabled))

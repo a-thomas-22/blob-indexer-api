@@ -69,6 +69,12 @@ func TestGetBlockTimestamp(t *testing.T) {
 	if ts.Unix() != int64(now) {
 		t.Errorf("expected timestamp %d, got %d", now, ts.Unix())
 	}
+	// Must be UTC: lib/pq encodes the time in its location and the
+	// timezone-less TIMESTAMP columns discard the offset, so a local-zone
+	// value would be stored shifted on non-UTC hosts.
+	if ts.Location() != time.UTC {
+		t.Errorf("expected UTC location, got %v", ts.Location())
+	}
 }
 
 func TestGetBlockTimestamp_ZeroTime(t *testing.T) {

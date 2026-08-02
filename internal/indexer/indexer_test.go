@@ -200,6 +200,12 @@ func TestBuildPendingBlobs_PopulatesVersionedHash(t *testing.T) {
 		if row.VersionedHash == nil || *row.VersionedHash != hashes[i].Hex() {
 			t.Fatalf("row %d versioned hash = %v, want %s", i, row.VersionedHash, hashes[i].Hex())
 		}
+		// Must be UTC: the value lands in timezone-less TIMESTAMP columns,
+		// which discard the offset lib/pq encodes — a local-zone time would
+		// round-trip shifted on non-UTC hosts.
+		if row.Timestamp.Location() != time.UTC {
+			t.Fatalf("row %d timestamp location = %v, want UTC", i, row.Timestamp.Location())
+		}
 	}
 }
 

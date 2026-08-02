@@ -1390,7 +1390,7 @@ func TestToBlobResponse_PendingBlockNumberSerializesNull(t *testing.T) {
 		TotalCostWei:      "0",
 		Timestamp:         time.Now(),
 		Confirmed:         false,
-	}, "testnet")
+	}, config.NetworkConfig{Name: "testnet", ChainID: 42})
 
 	if resp.BlockNumber != nil {
 		t.Fatalf("expected nil BlockNumber for pending blob, got %d", *resp.BlockNumber)
@@ -1417,7 +1417,7 @@ func TestToBlobResponse_ConfirmedBlockNumberSerializesNumber(t *testing.T) {
 		TotalCostWei:      "0",
 		Timestamp:         time.Now(),
 		Confirmed:         true,
-	}, "testnet")
+	}, config.NetworkConfig{Name: "testnet", ChainID: 42})
 
 	if resp.BlockNumber == nil {
 		t.Fatal("expected non-nil BlockNumber for confirmed blob")
@@ -1433,6 +1433,112 @@ func TestToBlobResponse_ConfirmedBlockNumberSerializesNumber(t *testing.T) {
 	raw := firstBlobRawBlockNumber(t, []byte(`{"data":[`+string(encoded)+`]}`))
 	if string(raw) != "100" {
 		t.Fatalf("expected block_number 100 on the wire, got %s", raw)
+	}
+}
+
+func TestToBlobResponse_SlotStoredValueWins(t *testing.T) {
+	stored := int64(4700013)
+	resp := toBlobResponse(models.Blob{
+		ChainID:   1,
+		Slot:      &stored,
+		Timestamp: time.Unix(1606824023, 0), // would derive slot 0 — must not be used
+		Confirmed: true,
+	}, config.NetworkConfig{Name: "mainnet", ChainID: 1})
+
+	if resp.Slot == nil || *resp.Slot != 4700013 {
+		t.Fatalf("expected stored slot 4700013, got %v", resp.Slot)
+	}
+}
+
+func TestToBlobResponse_SlotDerivedForLegacyConfirmedRows(t *testing.T) {
+	// A confirmed row indexed before the slot column existed (Slot nil) on a
+	// network with a known beacon genesis derives the slot from its timestamp:
+	// the merge block's timestamp maps to slot 4700013.
+	resp := toBlobResponse(models.Blob{
+		ChainID:   1,
+		Timestamp: time.Unix(1663224179, 0),
+		Confirmed: true,
+	}, config.NetworkConfig{Name: "mainnet", ChainID: 1})
+
+	if resp.Slot == nil || *resp.Slot != 4700013 {
+		t.Fatalf("expected derived slot 4700013, got %v", resp.Slot)
+	}
+}
+
+func TestToBlobResponse_SlotOmitted(t *testing.T) {
+	mainnet := config.NetworkConfig{Name: "mainnet", ChainID: 1}
+
+	// Pending blobs have no slot until inclusion, even with a derivable clock.
+	resp := toBlobResponse(models.Blob{
+		ChainID:     1,
+		BlockNumber: models.PendingBlockNumber,
+		Timestamp:   time.Unix(1663224179, 0),
+		Confirmed:   false,
+	}, mainnet)
+	if resp.Slot != nil {
+		t.Fatalf("expected no slot for a pending blob, got %d", *resp.Slot)
+	}
+
+	// Unknown networks without a configured beacon genesis cannot derive.
+	resp = toBlobResponse(models.Blob{
+		ChainID:   999999,
+		Timestamp: time.Unix(1663224179, 0),
+		Confirmed: true,
+	}, config.NetworkConfig{Name: "devnet", ChainID: 999999})
+	if resp.Slot != nil {
+		t.Fatalf("expected no slot for an unknown network, got %d", *resp.Slot)
+	}
+
+	// A zero-value timestamp (epoch or earlier) must not wrap into a bogus slot.
+	resp = toBlobResponse(models.Blob{
+		ChainID:   1,
+		Timestamp: time.Time{},
+		Confirmed: true,
+	}, mainnet)
+	if resp.Slot != nil {
+		t.Fatalf("expected no slot for a zero timestamp, got %d", *resp.Slot)
+	}
+
+	// A pre-genesis (but positive) timestamp is likewise underivable.
+	resp = toBlobResponse(models.Blob{
+		ChainID:   1,
+		Timestamp: time.Unix(1606824000, 0),
+		Confirmed: true,
+	}, mainnet)
+	if resp.Slot != nil {
+		t.Fatalf("expected no slot before beacon genesis, got %d", *resp.Slot)
+	}
+
+	// A negative stored value (impossible from the indexer) is treated as
+	// absent rather than wrapping through the uint64 conversion — and with no
+	// usable timestamp it stays omitted.
+	negative := int64(-1)
+	resp = toBlobResponse(models.Blob{
+		ChainID:   1,
+		Slot:      &negative,
+		Confirmed: true,
+	}, mainnet)
+	if resp.Slot != nil {
+		t.Fatalf("expected no slot for a negative stored value, got %d", *resp.Slot)
+	}
+}
+
+func TestToBlobResponse_SlotUsesConfiguredGenesis(t *testing.T) {
+	// A custom network becomes derivable through beacon_genesis_time +
+	// seconds_per_slot configuration.
+	resp := toBlobResponse(models.Blob{
+		ChainID:   999999,
+		Timestamp: time.Unix(1700000060, 0),
+		Confirmed: true,
+	}, config.NetworkConfig{
+		Name:              "devnet",
+		ChainID:           999999,
+		BeaconGenesisTime: 1700000000,
+		SecondsPerSlot:    6,
+	})
+
+	if resp.Slot == nil || *resp.Slot != 10 {
+		t.Fatalf("expected slot 10 from configured clock, got %v", resp.Slot)
 	}
 }
 

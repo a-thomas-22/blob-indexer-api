@@ -14,6 +14,7 @@ import (
 
 	"github.com/lib/pq"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
@@ -248,7 +249,7 @@ func TestToBlobResponse_DerivesBlobCostFields(t *testing.T) {
 		TotalCostWei:      "legacy-value",
 		MaxFeePerBlobGas:  &maxFeePerBlobGas,
 		BlobGasUsed:       &blobGasUsed,
-	}, "mainnet")
+	}, config.NetworkConfig{Name: "mainnet", ChainID: 1})
 
 	if response.TotalCostWei != "legacy-value" {
 		t.Fatalf("expected legacy total_cost_wei to be preserved, got %q", response.TotalCostWei)
@@ -275,7 +276,7 @@ func TestToBlobResponse_OmitsUnavailableBlobCostFields(t *testing.T) {
 	response := toBlobResponse(models.Blob{
 		BaseFeePerBlobGas: "2",
 		MaxFeePerBlobGas:  &maxFeePerBlobGas,
-	}, "mainnet")
+	}, config.NetworkConfig{Name: "mainnet", ChainID: 1})
 
 	if response.RealizedCostWei != nil {
 		t.Fatalf("expected realized_cost_wei to be omitted without blob_gas_used, got %q", *response.RealizedCostWei)
@@ -294,7 +295,7 @@ func TestToBlobResponse_OmitsUnavailableBlobCostFields(t *testing.T) {
 	response = toBlobResponse(models.Blob{
 		BaseFeePerBlobGas: "2",
 		BlobGasUsed:       &blobGasUsed,
-	}, "mainnet")
+	}, config.NetworkConfig{Name: "mainnet", ChainID: 1})
 	if response.RealizedCostWei == nil || *response.RealizedCostWei != "20" {
 		t.Fatalf("expected realized_cost_wei=20 when base fee and blob gas are available, got %v", response.RealizedCostWei)
 	}

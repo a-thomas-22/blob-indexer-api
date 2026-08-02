@@ -1437,3 +1437,79 @@ func TestMempoolTxReplacementsMigration(t *testing.T) {
 		t.Fatal("expected idx_blob_replacements_chain_replaced_at to exist")
 	}
 }
+
+// TestBlobSlotMigration verifies migration 11: blobs gains the nullable
+// beacon slot column. Pre-migration rows stay NULL — they are served via the
+// API's read-time derivation rather than an in-place backfill — while newly
+// indexed rows persist the slot. mempool_blobs deliberately gets no column:
+// pending blobs have no slot until inclusion.
+func TestBlobSlotMigration(t *testing.T) {
+	db, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	resetSchema(t, db)
+
+	m := migrator(t, db)
+	if err := m.Migrate(10); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to version 10: %v", err)
+	}
+
+	// Seed a row under the pre-migration schema.
+	t0 := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES (1, 100, 0, '0xpreslot', '0xfrom', '', 131072, 10, 2, 100, $1, 12, 131072)
+	`, t0); err != nil {
+		t.Fatalf("seed pre-migration blob: %v", err)
+	}
+
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to latest: %v", err)
+	}
+
+	// Pre-migration rows stay NULL rather than picking up a fabricated value.
+	var preMigrationSlot *int64
+	if err := db.Get(&preMigrationSlot, `SELECT slot FROM blobs WHERE tx_hash = '0xpreslot'`); err != nil {
+		t.Fatalf("read pre-migration slot: %v", err)
+	}
+	if preMigrationSlot != nil {
+		t.Fatalf("expected NULL slot on pre-migration row, got %v", *preMigrationSlot)
+	}
+
+	// New rows persist the slot the indexer derived.
+	if _, err := db.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used, slot
+		) VALUES (1, 101, 0, '0xpostslot', '0xfrom', '', 131072, 10, 2, 100, $1, 12, 131072, 12345678)
+	`, t0); err != nil {
+		t.Fatalf("insert post-migration blob: %v", err)
+	}
+	var slot int64
+	if err := db.Get(&slot, `SELECT slot FROM blobs WHERE tx_hash = '0xpostslot'`); err != nil {
+		t.Fatalf("read post-migration slot: %v", err)
+	}
+	if slot != 12345678 {
+		t.Fatalf("expected slot 12345678, got %d", slot)
+	}
+
+	// mempool_blobs must NOT have gained the column.
+	var mempoolHasSlot bool
+	if err := db.Get(&mempoolHasSlot, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_name = 'mempool_blobs' AND column_name = 'slot'
+		)
+	`); err != nil {
+		t.Fatalf("check mempool_blobs columns: %v", err)
+	}
+	if mempoolHasSlot {
+		t.Fatal("mempool_blobs should not have a slot column")
+	}
+}

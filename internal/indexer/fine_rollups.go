@@ -21,10 +21,11 @@ const (
 )
 
 // runFineRollupMaintenance backfills the fine (60s) chart rollup buckets for
-// the retention window on startup, then prunes expired fine buckets on a
-// timer. The statement triggers maintain fine buckets for new writes; this
-// loop covers rows indexed before the fine bucket existed (or while this
-// indexer was down) and enforces retention.
+// the retention window on startup, heals coarse buckets that predate the
+// base fee aggregate columns, then prunes expired fine buckets on a timer.
+// The statement triggers maintain fine buckets for new writes; this loop
+// covers rows indexed before the fine bucket existed (or while this indexer
+// was down) and enforces retention.
 func (i *Indexer) runFineRollupMaintenance() {
 	logger.Info("Fine chart rollup maintenance starting",
 		zap.String("network", i.network.Name),
@@ -32,6 +33,7 @@ func (i *Indexer) runFineRollupMaintenance() {
 		zap.Duration("prune_interval", i.fineRollupPruneInterval))
 
 	i.backfillFineRollups()
+	i.healCoarseRollupBaseFees()
 
 	ticker := time.NewTicker(i.fineRollupPruneInterval)
 	defer ticker.Stop()
@@ -113,4 +115,27 @@ func (i *Indexer) backfillFineRollups() {
 	logger.Info("Fine chart rollup backfill complete",
 		zap.String("network", i.network.Name),
 		zap.Duration("took", time.Since(began)))
+}
+
+// healCoarseRollupBaseFees runs the one-time refresh of coarse rollup
+// buckets written before migration 000012's base fee aggregates. A failure
+// only delays the heal until the next restart (the affected buckets keep
+// serving the blob-fee proxy pricing they served before the migration), so
+// it is logged and the rest of the maintenance loop proceeds.
+func (i *Indexer) healCoarseRollupBaseFees() {
+	healed, err := i.db.HealCoarseRollupBaseFees(i.ctx, i.network.ChainID)
+	if err != nil {
+		if i.ctx.Err() == nil {
+			logger.Error("Failed to heal coarse chart rollup base fees",
+				zap.String("network", i.network.Name),
+				zap.Int64("healed_buckets", healed),
+				zap.Error(err))
+		}
+		return
+	}
+	if healed > 0 {
+		logger.Info("Healed coarse chart rollup base fee aggregates",
+			zap.String("network", i.network.Name),
+			zap.Int64("healed_buckets", healed))
+	}
 }

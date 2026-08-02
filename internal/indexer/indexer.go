@@ -1470,7 +1470,12 @@ func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID in
 		return nil
 	}
 	metrics := calculateBlobMetrics(tx, blobBaseFee)
-	now := time.Now()
+	// UTC: this instant lands in timezone-less TIMESTAMP columns
+	// (mempool_blobs.timestamp/last_seen, blob_replacements.replaced_at) and
+	// feeds pending-age math against UTC-based DB expressions; lib/pq encodes
+	// the time in its own location and Postgres discards the offset, so a
+	// local-zone value would be stored shifted on non-UTC hosts.
+	now := time.Now().UTC()
 	rows := make([]models.Blob, 0, len(blobHashes))
 	for _, blobHash := range blobHashes {
 		versionedHash := blobHash.Hex()
@@ -1549,6 +1554,19 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		baseFeeWei = header.BaseFee.String()
 	}
 
+	// The block's beacon slot, shared by every blob row in it. Derivation is
+	// exact for post-merge blocks (consensus pins the timestamp to the slot
+	// grid). Config validation guarantees the clock resolves for every
+	// network the indexer runs, so nil only survives in tests that bypass
+	// validation (and for hypothetical pre-genesis timestamps).
+	var slot *int64
+	if clock, ok := i.network.BeaconClock(); ok {
+		if s, ok := clock.SlotAt(block.Time()); ok {
+			v := int64(s)
+			slot = &v
+		}
+	}
+
 	// Collect all blob records for this block. Each EIP-4844 blob — not each
 	// blob transaction — is one row. blobIndex is the block-wide blob ordinal,
 	// shared by no other row in the same (chain_id, block_number).
@@ -1599,6 +1617,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 				MaxFeePerBlobGas:  metrics.maxFeePerBlobGas,
 				BlobGasUsed:       metrics.blobGasUsed,
 				VersionedHash:     &versionedHash,
+				Slot:              slot,
 				Nonce:             tx.Nonce(),
 			})
 			blobIndex++
@@ -2102,7 +2121,7 @@ func (i *Indexer) completeReorgRecoveryIfCovered(fetchEpoch uint64) {
 
 // blobInsertColumns is the number of columns written per row when inserting
 // into blobs.
-const blobInsertColumns = 14
+const blobInsertColumns = 15
 
 // mempoolBlobInsertColumns is the number of columns written per row when
 // upserting into mempool_blobs.
@@ -2244,11 +2263,14 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 		// Insert all blobs in one multi-row statement so the statement-level
 		// aggregate triggers on blobs (network_blob_stats, blob_user_stats,
 		// blob_chart_rollups) fire once per block instead of once per row.
+		// The upsert is last-write-wins for every column, slot included: a
+		// reorg replacement block re-derives its own slot, and preserving an
+		// old value would let slot and timestamp describe different blocks.
 		insertQuery := `
 			INSERT INTO blobs (
 				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
+				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash, slot
 			) VALUES ` + valuesPlaceholders(len(blobs), blobInsertColumns, nil) + `
 			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
 				tx_hash = EXCLUDED.tx_hash,
@@ -2261,14 +2283,15 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				timestamp = EXCLUDED.timestamp,
 				max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
 				blob_gas_used = EXCLUDED.blob_gas_used,
-				versioned_hash = EXCLUDED.versioned_hash
+				versioned_hash = EXCLUDED.versioned_hash,
+				slot = EXCLUDED.slot
 		`
 		insertArgs := make([]interface{}, 0, len(blobs)*blobInsertColumns)
 		for _, blob := range blobs {
 			insertArgs = append(insertArgs,
 				blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash)
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, blob.Slot)
 		}
 		if _, err := tx.ExecContext(i.ctx, insertQuery, insertArgs...); err != nil {
 			return fmt.Errorf("failed to insert blobs (block: %d): %w", indexedBlock.BlockNumber, err)
@@ -2468,7 +2491,7 @@ func (i *Indexer) refreshPendingBlobLiveness() {
 	defer unlockWrites()
 	if _, err := i.db.ExecContext(i.ctx,
 		"UPDATE mempool_blobs SET last_seen = $2 WHERE chain_id = $1 AND tx_hash = ANY($3)",
-		i.network.ChainID, time.Now(), pq.Array(live)); err != nil {
+		i.network.ChainID, time.Now().UTC(), pq.Array(live)); err != nil {
 		logger.Error("Failed to refresh pending blob liveness",
 			zap.String("network", i.network.Name),
 			zap.Error(err))
@@ -2516,7 +2539,7 @@ func (i *Indexer) runMempoolCleanup() {
 			logger.Info("Mempool cleanup stopped", zap.String("network", i.network.Name))
 			return
 		case <-ticker.C:
-			cutoff := time.Now().Add(-i.mempoolTTL)
+			cutoff := time.Now().UTC().Add(-i.mempoolTTL)
 			unlockWrites := i.lockDBWrites()
 			deleted, err := i.db.DeleteStalePendingBlobs(i.ctx, i.network.ChainID, cutoff)
 			unlockWrites()
@@ -2532,7 +2555,7 @@ func (i *Indexer) runMempoolCleanup() {
 					zap.Int64("deleted_count", deleted))
 			}
 
-			replacementCutoff := time.Now().Add(-blobReplacementRetention)
+			replacementCutoff := time.Now().UTC().Add(-blobReplacementRetention)
 			unlockWrites = i.lockDBWrites()
 			pruned, err := i.db.DeleteStaleBlobReplacements(i.ctx, i.network.ChainID, replacementCutoff)
 			unlockWrites()
