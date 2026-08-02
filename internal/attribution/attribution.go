@@ -128,8 +128,12 @@ func (s *Service) UpdateUserLastSeen(ctx context.Context, address string) error 
 	s.knownUsersMu.RUnlock()
 	if ok {
 		// Update the last seen timestamp
+		// UTC here and below: last_seen/first_seen are timezone-less TIMESTAMP
+		// columns; lib/pq encodes the time in its own location and Postgres
+		// discards the offset, so a local-zone value would be stored shifted
+		// on non-UTC hosts.
 		query := "UPDATE blob_users SET last_seen = $1 WHERE address = $2 AND chain_id = $3"
-		_, err := s.db.ExecContext(ctx, query, time.Now(), normalizedAddress, s.networkID)
+		_, err := s.db.ExecContext(ctx, query, time.Now().UTC(), normalizedAddress, s.networkID)
 		if err != nil {
 			logger.Error("Failed to update user last seen",
 				zap.Int("chain_id", s.networkID),
@@ -166,7 +170,7 @@ func (s *Service) BatchUpdateUserLastSeen(ctx context.Context, addresses []strin
 
 	// Update all known users in a single query
 	query := "UPDATE blob_users SET last_seen = $1 WHERE address = ANY($2) AND chain_id = $3"
-	_, err := s.db.ExecContext(ctx, query, time.Now(), pq.Array(knownAddresses), s.networkID)
+	_, err := s.db.ExecContext(ctx, query, time.Now().UTC(), pq.Array(knownAddresses), s.networkID)
 	if err != nil {
 		logger.Error("Failed to batch update user last seen",
 			zap.Int("chain_id", s.networkID),
@@ -197,7 +201,7 @@ func (s *Service) AddKnownUser(ctx context.Context, address, name, description, 
 			SET name = $1, description = $2, category = $3, last_seen = $4
 			WHERE address = $5 AND chain_id = $6
 		`
-		_, err := s.db.ExecContext(ctx, query, name, description, category, time.Now(), normalizedAddress, s.networkID)
+		_, err := s.db.ExecContext(ctx, query, name, description, category, time.Now().UTC(), normalizedAddress, s.networkID)
 		if err != nil {
 			logger.Error("Failed to update known user",
 				zap.Int("chain_id", s.networkID),
@@ -213,7 +217,7 @@ func (s *Service) AddKnownUser(ctx context.Context, address, name, description, 
 		zap.String("name", name))
 
 	// Add a new user
-	now := time.Now()
+	now := time.Now().UTC()
 	query := `
 		INSERT INTO blob_users (chain_id, address, name, description, category, first_seen, last_seen)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)

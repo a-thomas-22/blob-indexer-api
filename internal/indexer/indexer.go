@@ -1470,7 +1470,12 @@ func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID in
 		return nil
 	}
 	metrics := calculateBlobMetrics(tx, blobBaseFee)
-	now := time.Now()
+	// UTC: this instant lands in timezone-less TIMESTAMP columns
+	// (mempool_blobs.timestamp/last_seen, blob_replacements.replaced_at) and
+	// feeds pending-age math against UTC-based DB expressions; lib/pq encodes
+	// the time in its own location and Postgres discards the offset, so a
+	// local-zone value would be stored shifted on non-UTC hosts.
+	now := time.Now().UTC()
 	rows := make([]models.Blob, 0, len(blobHashes))
 	for _, blobHash := range blobHashes {
 		versionedHash := blobHash.Hex()
@@ -2486,7 +2491,7 @@ func (i *Indexer) refreshPendingBlobLiveness() {
 	defer unlockWrites()
 	if _, err := i.db.ExecContext(i.ctx,
 		"UPDATE mempool_blobs SET last_seen = $2 WHERE chain_id = $1 AND tx_hash = ANY($3)",
-		i.network.ChainID, time.Now(), pq.Array(live)); err != nil {
+		i.network.ChainID, time.Now().UTC(), pq.Array(live)); err != nil {
 		logger.Error("Failed to refresh pending blob liveness",
 			zap.String("network", i.network.Name),
 			zap.Error(err))
@@ -2534,7 +2539,7 @@ func (i *Indexer) runMempoolCleanup() {
 			logger.Info("Mempool cleanup stopped", zap.String("network", i.network.Name))
 			return
 		case <-ticker.C:
-			cutoff := time.Now().Add(-i.mempoolTTL)
+			cutoff := time.Now().UTC().Add(-i.mempoolTTL)
 			unlockWrites := i.lockDBWrites()
 			deleted, err := i.db.DeleteStalePendingBlobs(i.ctx, i.network.ChainID, cutoff)
 			unlockWrites()
@@ -2550,7 +2555,7 @@ func (i *Indexer) runMempoolCleanup() {
 					zap.Int64("deleted_count", deleted))
 			}
 
-			replacementCutoff := time.Now().Add(-blobReplacementRetention)
+			replacementCutoff := time.Now().UTC().Add(-blobReplacementRetention)
 			unlockWrites = i.lockDBWrites()
 			pruned, err := i.db.DeleteStaleBlobReplacements(i.ctx, i.network.ChainID, replacementCutoff)
 			unlockWrites()

@@ -110,6 +110,17 @@ func (r timeRecorder) Match(v driver.Value) bool {
 	return true
 }
 
+// utcTimeArg is a sqlmock argument matcher that accepts a time.Time only if
+// it is pinned to UTC. The matched values land in timezone-less TIMESTAMP
+// columns, which discard the offset lib/pq encodes — a local-zone time would
+// be stored shifted on non-UTC hosts.
+type utcTimeArg struct{}
+
+func (utcTimeArg) Match(v driver.Value) bool {
+	tm, ok := v.(time.Time)
+	return ok && tm.Location() == time.UTC
+}
+
 func TestBackfillFineRollups_ChunksAreAlignedAndContiguous(t *testing.T) {
 	idx := newTestIndexer()
 	idxDB, mock := newMockIndexerDB(t)

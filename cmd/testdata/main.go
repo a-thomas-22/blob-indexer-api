@@ -109,7 +109,7 @@ func addKnownRollups(ctx context.Context, database *db.DB) error {
 
 	// Add each known rollup
 	for _, rollup := range knownRollups {
-		now := time.Now()
+		now := time.Now().UTC()
 		query := `
 			INSERT INTO blob_users (chain_id, address, name, description, category, first_seen, last_seen)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -136,7 +136,7 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 
 	// Generate 100 test blobs
 	startBlock := int64(1000000)
-	timestamp := time.Now().Add(-24 * time.Hour) // Start from yesterday
+	timestamp := time.Now().UTC().Add(-24 * time.Hour) // Start from yesterday
 
 	for i := 0; i < 100; i++ {
 		// Select a random rollup
@@ -217,7 +217,7 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 			BaseFeePerBlobGas: new(big.Int).SetUint64(uint64(100000)).String(),
 			TipPerBlobGas:     new(big.Int).SetUint64(uint64(50000)).String(),
 			TotalCostWei:      new(big.Int).SetUint64(uint64(1000000)).String(),
-			Timestamp:         time.Now().Add(-time.Duration(i) * time.Minute),
+			Timestamp:         time.Now().UTC().Add(-time.Duration(i) * time.Minute),
 			Confirmed:         false,
 			VersionedHash:     versionedHashPtr(fmt.Sprintf("0x01%062x", 0x1000000+i)),
 			Nonce:             uint64(1000 + i),

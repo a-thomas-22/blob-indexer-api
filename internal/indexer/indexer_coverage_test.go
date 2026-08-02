@@ -3190,7 +3190,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			WithArgs(idx.network.ChainID).
 			WillReturnRows(sqlmock.NewRows([]string{"tx_hash"}).AddRow("0xtracked"))
 		mock.ExpectExec("UPDATE mempool_blobs SET last_seen").
-			WithArgs(idx.network.ChainID, sqlmock.AnyArg(), sqlmock.AnyArg()).
+			WithArgs(idx.network.ChainID, utcTimeArg{}, sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
 		idx.refreshPendingBlobLiveness()
@@ -3445,7 +3445,16 @@ func TestRunMempoolCleanup(t *testing.T) {
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
 
-		mock.ExpectExec("DELETE FROM blobs WHERE chain_id = .*").
+		// One tick sweeps stale pending blobs then stale replacements. The
+		// cutoffs must be UTC: they are compared server-side against
+		// timezone-less TIMESTAMP columns, which discard the offset lib/pq
+		// encodes — a local-zone cutoff would sweep shifted by the UTC offset
+		// on non-UTC hosts.
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND COALESCE(last_seen, timestamp) < $2")).
+			WithArgs(idx.network.ChainID, utcTimeArg{}).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_replacements WHERE chain_id = $1 AND replaced_at < $2")).
+			WithArgs(idx.network.ChainID, utcTimeArg{}).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 
 		done := make(chan struct{})
@@ -3463,6 +3472,10 @@ func TestRunMempoolCleanup(t *testing.T) {
 		case <-time.After(200 * time.Millisecond):
 			t.Fatal("runMempoolCleanup did not stop")
 		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("cleanup tick expectations not met: %v", err)
+		}
 	})
 
 	t.Run("handles DB error gracefully", func(t *testing.T) {
@@ -3473,7 +3486,8 @@ func TestRunMempoolCleanup(t *testing.T) {
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
 
-		mock.ExpectExec("DELETE FROM blobs WHERE chain_id = .*").
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND COALESCE(last_seen, timestamp) < $2")).
+			WithArgs(idx.network.ChainID, utcTimeArg{}).
 			WillReturnError(errors.New("db connection lost"))
 
 		done := make(chan struct{})
