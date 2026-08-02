@@ -2258,6 +2258,9 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 		// Insert all blobs in one multi-row statement so the statement-level
 		// aggregate triggers on blobs (network_blob_stats, blob_user_stats,
 		// blob_chart_rollups) fire once per block instead of once per row.
+		// The upsert is last-write-wins for every column, slot included: a
+		// reorg replacement block re-derives its own slot, and preserving an
+		// old value would let slot and timestamp describe different blocks.
 		insertQuery := `
 			INSERT INTO blobs (
 				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
