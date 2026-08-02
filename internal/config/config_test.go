@@ -90,6 +90,48 @@ func TestValidateConfig_RequiresRPC(t *testing.T) {
 	}
 }
 
+func TestValidateConfig_RequiresBeaconClock(t *testing.T) {
+	// Indexed blob rows must carry the beacon slot, so indexer-mode
+	// validation refuses a network whose slot derivation is impossible:
+	// unknown chain ID with no beacon_genesis_time configured.
+	cfg := &Config{
+		Database: DatabaseConfig{URL: "postgres://localhost/test"},
+		Networks: []NetworkConfig{
+			{Name: "devnet", ChainID: 999999, RpcURL: "http://localhost:8545", StartBlock: "100", Enabled: true},
+		},
+	}
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("validateConfig should reject an unknown chain without beacon_genesis_time")
+	}
+
+	// Configuring the genesis time makes the same network valid.
+	cfg.Networks[0].BeaconGenesisTime = 1700000000
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("expected validation to pass with beacon_genesis_time set, got: %v", err)
+	}
+
+	// Known chains need no configuration.
+	cfg.Networks[0] = NetworkConfig{Name: "hoodi", ChainID: 560048, RpcURL: "http://localhost:8545", StartBlock: "100", Enabled: true}
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("expected validation to pass for a known chain, got: %v", err)
+	}
+}
+
+func TestValidateForAPI_DoesNotRequireBeaconClock(t *testing.T) {
+	// The API serves whatever a past indexer wrote and omits slot when it
+	// cannot derive it, so an unknown chain without beacon_genesis_time must
+	// stay valid in API mode.
+	cfg := &Config{
+		Database: DatabaseConfig{URL: "postgres://localhost/test"},
+		Networks: []NetworkConfig{
+			{Name: "devnet", ChainID: 999999, Enabled: true},
+		},
+	}
+	if err := ValidateForAPI(cfg); err != nil {
+		t.Fatalf("ValidateForAPI should not require a beacon clock, got: %v", err)
+	}
+}
+
 func TestValidateDatabaseSSLMode_ProdRejectsDisable(t *testing.T) {
 	cfg := &Config{
 		Database: DatabaseConfig{URL: "postgres://localhost:5432/test?sslmode=disable"},

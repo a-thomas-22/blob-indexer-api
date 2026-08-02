@@ -6,8 +6,6 @@
 // timestamp and the network's beacon genesis time.
 package beacon
 
-import "github.com/a-thomas-22/blob-indexer-api/internal/config"
-
 // DefaultSecondsPerSlot is the beacon-chain SECONDS_PER_SLOT for every
 // supported network. Networks with different slot timing must configure
 // seconds_per_slot explicitly.
@@ -21,6 +19,7 @@ const DefaultSecondsPerSlot = 12
 // config (eth-clients metadata).
 var knownGenesisTimes = map[int]uint64{
 	1:        1606824023, // mainnet — verifies against the merge block: slot 4700013 ⇒ 1606824023 + 12*4700013 = 1663224179
+	5:        1616508000, // goerli/prater — 1614588812 + 1919188; long shut down, but the legacy RPC_URL sniffing can still synthesize chain 5
 	11155111: 1655733600, // sepolia — 1655647200 + 86400
 	17000:    1695902400, // holesky — 1695902100 + 300
 	560048:   1742213400, // hoodi — 1742212800 + 600
@@ -32,25 +31,26 @@ type Clock struct {
 	SecondsPerSlot uint64
 }
 
-// ClockForNetwork resolves the beacon clock for a network: an explicit
-// beacon_genesis_time in the network's configuration wins, else the compiled
-// constant for known chain IDs. The second return is false when neither is
-// available — slot derivation is impossible for such a network until its
-// genesis time is configured.
-func ClockForNetwork(n config.NetworkConfig) (Clock, bool) {
-	genesis := n.BeaconGenesisTime
-	if genesis == 0 {
-		known, ok := knownGenesisTimes[n.ChainID]
+// ResolveClock resolves the beacon clock for a network: an explicit
+// genesisTime (a network's beacon_genesis_time configuration) wins, else the
+// compiled constant for known chain IDs. secondsPerSlot zero means the
+// 12-second default. The second return is false when no genesis time is
+// available — slot derivation is impossible for such a network, which
+// config validation treats as fatal for the indexer (blob-flow depends on
+// the slot field) and the API treats as omission (it may still serve rows a
+// past indexer wrote).
+func ResolveClock(chainID int, genesisTime, secondsPerSlot uint64) (Clock, bool) {
+	if genesisTime == 0 {
+		known, ok := knownGenesisTimes[chainID]
 		if !ok {
 			return Clock{}, false
 		}
-		genesis = known
+		genesisTime = known
 	}
-	secondsPerSlot := n.SecondsPerSlot
 	if secondsPerSlot == 0 {
 		secondsPerSlot = DefaultSecondsPerSlot
 	}
-	return Clock{GenesisTime: genesis, SecondsPerSlot: secondsPerSlot}, true
+	return Clock{GenesisTime: genesisTime, SecondsPerSlot: secondsPerSlot}, true
 }
 
 // SlotAt returns the beacon slot whose slot time is the given block

@@ -161,7 +161,7 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 		}
 		// Derive the beacon slot from the timestamp the same way the indexer
 		// does, so seeded rows look like freshly indexed ones.
-		if clock, ok := beacon.ClockForNetwork(config.NetworkConfig{ChainID: seedChainID}); ok {
+		if clock, ok := beacon.ResolveClock(seedChainID, 0, 0); ok {
 			if s, ok := clock.SlotAt(uint64(blob.Timestamp.Unix())); ok {
 				slot := int64(s)
 				blob.Slot = &slot

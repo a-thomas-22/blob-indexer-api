@@ -1,25 +1,22 @@
 package beacon
 
-import (
-	"testing"
+import "testing"
 
-	"github.com/a-thomas-22/blob-indexer-api/internal/config"
-)
-
-func TestClockForNetwork_KnownChains(t *testing.T) {
+func TestResolveClock_KnownChains(t *testing.T) {
 	tests := []struct {
 		name        string
 		chainID     int
 		wantGenesis uint64
 	}{
 		{"mainnet", 1, 1606824023},
+		{"goerli", 5, 1616508000},
 		{"sepolia", 11155111, 1655733600},
 		{"holesky", 17000, 1695902400},
 		{"hoodi", 560048, 1742213400},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clock, ok := ClockForNetwork(config.NetworkConfig{Name: tt.name, ChainID: tt.chainID})
+			clock, ok := ResolveClock(tt.chainID, 0, 0)
 			if !ok {
 				t.Fatalf("expected a clock for chain %d", tt.chainID)
 			}
@@ -33,19 +30,15 @@ func TestClockForNetwork_KnownChains(t *testing.T) {
 	}
 }
 
-func TestClockForNetwork_UnknownChain(t *testing.T) {
-	if _, ok := ClockForNetwork(config.NetworkConfig{Name: "devnet", ChainID: 999999}); ok {
+func TestResolveClock_UnknownChain(t *testing.T) {
+	if _, ok := ResolveClock(999999, 0, 0); ok {
 		t.Fatal("expected no clock for an unknown chain without configuration")
 	}
 }
 
-func TestClockForNetwork_ConfigOverrides(t *testing.T) {
+func TestResolveClock_ConfigOverrides(t *testing.T) {
 	// An unknown chain becomes derivable once configured.
-	clock, ok := ClockForNetwork(config.NetworkConfig{
-		ChainID:           999999,
-		BeaconGenesisTime: 1700000000,
-		SecondsPerSlot:    5,
-	})
+	clock, ok := ResolveClock(999999, 1700000000, 5)
 	if !ok {
 		t.Fatal("expected a clock for a configured unknown chain")
 	}
@@ -54,14 +47,14 @@ func TestClockForNetwork_ConfigOverrides(t *testing.T) {
 	}
 
 	// Explicit configuration wins over the compiled constant.
-	clock, ok = ClockForNetwork(config.NetworkConfig{ChainID: 1, BeaconGenesisTime: 42})
+	clock, ok = ResolveClock(1, 42, 0)
 	if !ok || clock.GenesisTime != 42 {
 		t.Errorf("configured genesis should override compiled constant, got %+v ok=%v", clock, ok)
 	}
 }
 
 func TestSlotAt(t *testing.T) {
-	mainnet, _ := ClockForNetwork(config.NetworkConfig{ChainID: 1})
+	mainnet, _ := ResolveClock(1, 0, 0)
 
 	// The merge block: slot 4700013 at timestamp 1663224179.
 	slot, ok := mainnet.SlotAt(1663224179)

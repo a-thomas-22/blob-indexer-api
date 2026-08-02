@@ -16,7 +16,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
-	"github.com/a-thomas-22/blob-indexer-api/internal/beacon"
 	"github.com/a-thomas-22/blob-indexer-api/internal/blobparams"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
@@ -275,7 +274,7 @@ func blobSlot(blob models.Blob, network config.NetworkConfig) *uint64 {
 	if !blob.Confirmed {
 		return nil
 	}
-	clock, ok := beacon.ClockForNetwork(network)
+	clock, ok := network.BeaconClock()
 	if !ok {
 		return nil
 	}

@@ -22,7 +22,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/attribution"
-	"github.com/a-thomas-22/blob-indexer-api/internal/beacon"
 	"github.com/a-thomas-22/blob-indexer-api/internal/blobparams"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
@@ -1552,9 +1551,11 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 
 	// The block's beacon slot, shared by every blob row in it. Derivation is
 	// exact for post-merge blocks (consensus pins the timestamp to the slot
-	// grid); nil only when the network's beacon genesis time is unknown.
+	// grid). Config validation guarantees the clock resolves for every
+	// network the indexer runs, so nil only survives in tests that bypass
+	// validation (and for hypothetical pre-genesis timestamps).
 	var slot *int64
-	if clock, ok := beacon.ClockForNetwork(i.network); ok {
+	if clock, ok := i.network.BeaconClock(); ok {
 		if s, ok := clock.SlotAt(block.Time()); ok {
 			v := int64(s)
 			slot = &v
