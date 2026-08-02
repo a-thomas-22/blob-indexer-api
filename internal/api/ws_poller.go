@@ -393,7 +393,7 @@ func (p *Poller) broadcastBlock(ctx context.Context, network config.NetworkConfi
 	pricing := toBlockPricingResponse(metric)
 	brs := make([]BlobResponse, 0, len(blobs))
 	for _, blob := range blobs {
-		brs = append(brs, toBlobResponse(blob, network.Name))
+		brs = append(brs, toBlobResponse(blob, network))
 	}
 
 	p.hub.BroadcastEvent(network.Name, WSEvent{
@@ -555,7 +555,7 @@ func (p *Poller) pollMempool(ctx context.Context, network config.NetworkConfig) 
 				Type: EventMempoolUpdate,
 				Data: MempoolUpdateData{
 					Action: MempoolActionAdd,
-					Blob:   toBlobResponse(blob, network.Name),
+					Blob:   toBlobResponse(blob, network),
 				},
 			})
 		}

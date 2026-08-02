@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/beacon"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
@@ -158,15 +159,23 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 			Confirmed:         true,
 			VersionedHash:     versionedHashPtr(fmt.Sprintf("0x01%062x", i)),
 		}
+		// Derive the beacon slot from the timestamp the same way the indexer
+		// does, so seeded rows look like freshly indexed ones.
+		if clock, ok := beacon.ResolveClock(seedChainID, 0, 0); ok {
+			if s, ok := clock.SlotAt(uint64(blob.Timestamp.Unix())); ok {
+				slot := int64(s)
+				blob.Slot = &slot
+			}
+		}
 
 		// Insert the blob
 		query := `
 			INSERT INTO blobs (
 				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-				timestamp, versioned_hash
+				timestamp, versioned_hash, slot
 			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
 			)
 			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
 				tx_hash = $4,
@@ -177,12 +186,13 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 				tip_per_blob_gas = $9,
 				total_cost_wei = $10,
 				timestamp = $11,
-				versioned_hash = $12
+				versioned_hash = $12,
+				slot = $13
 		`
 		_, err := database.ExecContext(ctx, query,
 			blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 			blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-			blob.Timestamp, blob.VersionedHash,
+			blob.Timestamp, blob.VersionedHash, blob.Slot,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert blob %d: %w", i, err)

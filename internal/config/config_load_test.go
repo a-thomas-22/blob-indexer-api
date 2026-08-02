@@ -32,6 +32,8 @@ networks:
     rpc_url: "http://localhost:8545"
     start_block: "100"
     enabled: true
+    beacon_genesis_time: 1700000000
+    seconds_per_slot: 6
 `
 	if err := os.WriteFile(configFile, []byte(configContent), 0o644); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
@@ -67,6 +69,12 @@ networks:
 	}
 	if cfg.Networks[0].Name != "testnet" {
 		t.Errorf("expected network name 'testnet', got %q", cfg.Networks[0].Name)
+	}
+	if cfg.Networks[0].BeaconGenesisTime != 1700000000 {
+		t.Errorf("expected beacon_genesis_time 1700000000, got %d", cfg.Networks[0].BeaconGenesisTime)
+	}
+	if cfg.Networks[0].SecondsPerSlot != 6 {
+		t.Errorf("expected seconds_per_slot 6, got %d", cfg.Networks[0].SecondsPerSlot)
 	}
 }
 

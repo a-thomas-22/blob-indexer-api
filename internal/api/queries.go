@@ -29,6 +29,7 @@ const blobSelectColumns = `
 	max_fee_per_blob_gas,
 	blob_gas_used,
 	versioned_hash,
+	slot,
 	ARRAY(
 		SELECT b2.versioned_hash FROM blobs b2
 		WHERE b2.chain_id = blobs.chain_id AND b2.tx_hash = blobs.tx_hash
@@ -61,6 +62,7 @@ const mempoolBlobSelectColumns = `
 	max_fee_per_blob_gas,
 	blob_gas_used,
 	versioned_hash,
+	NULL::bigint AS slot,
 	ARRAY(
 		SELECT m2.versioned_hash FROM mempool_blobs m2
 		WHERE m2.chain_id = mempool_blobs.chain_id AND m2.tx_hash = mempool_blobs.tx_hash

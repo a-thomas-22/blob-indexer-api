@@ -66,6 +66,14 @@ type BlobResponse struct {
 	// EIP-4844 versioned blob hashes (0x01-prefixed). Omitted for rows
 	// indexed before versioned hashes were stored.
 	VersionedHashes []string `json:"versioned_hashes,omitempty" example:"0x01a1f8730e4064f7dd90279b721b25e28c07fc3e16d5fd4a26e6d3d5e9e0dbeb"`
+	// Slot is the beacon slot of the including block — the key beacon-side
+	// blob reads (e.g. BlobArchive's /eth/v1/beacon/blobs/{slot}) are indexed
+	// by. Stored at index time; for rows indexed before the slot column
+	// existed it is derived at read time from the block timestamp, which
+	// post-merge consensus makes exact. Omitted for pending (mempool) blobs —
+	// no slot exists until inclusion — and for networks whose beacon genesis
+	// time is not configured.
+	Slot *uint64 `json:"slot,omitempty" example:"11813607"`
 }
 
 // BlobReplacementResponse is one observed replacement event: a pending blob
@@ -209,7 +217,7 @@ type mempoolPressureAggregate struct {
 }
 
 // toBlobResponse converts a models.Blob to a BlobResponse.
-func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
+func toBlobResponse(blob models.Blob, network config.NetworkConfig) BlobResponse {
 	explorerURLs := explorerURLsForBlob(blob.ChainID, blob.TxHash, blob.FromAddress, blob.BlockNumber, blob.Confirmed)
 
 	// Pending (mempool) rows carry the internal block_number sentinel
@@ -224,7 +232,7 @@ func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
 
 	response := BlobResponse{
 		ChainID:               blob.ChainID,
-		NetworkName:           networkName,
+		NetworkName:           network.Name,
 		BlockNumber:           blockNumber,
 		BlobIndex:             blob.BlobIndex,
 		TxHash:                blob.TxHash,
@@ -246,9 +254,40 @@ func toBlobResponse(blob models.Blob, networkName string) BlobResponse {
 		BlobGasUsed:           blob.BlobGasUsed,
 		VersionedHash:         blob.VersionedHash,
 		VersionedHashes:       []string(blob.VersionedHashes),
+		Slot:                  blobSlot(blob, network),
 	}
 	response.RealizedCostWei, response.MaxCostWei, response.HeadroomWei, response.HeadroomPercent = deriveBlobCostFields(blob)
 	return response
+}
+
+// blobSlot resolves a blob's beacon slot: the stored index-time value when
+// present, else — for confirmed rows indexed before the slot column existed —
+// the same derivation the indexer applies (block timestamp against the
+// network's beacon genesis time; exact for post-merge blocks, which every
+// blob-carrying block is). Pending rows have no slot until inclusion, and
+// networks without a known or configured beacon genesis time yield none.
+func blobSlot(blob models.Blob, network config.NetworkConfig) *uint64 {
+	if blob.Slot != nil && *blob.Slot >= 0 {
+		s := uint64(*blob.Slot)
+		return &s
+	}
+	if !blob.Confirmed {
+		return nil
+	}
+	clock, ok := network.BeaconClock()
+	if !ok {
+		return nil
+	}
+	ts := blob.Timestamp.Unix()
+	if ts < 0 {
+		// A zero-value timestamp would wrap the uint64 conversion below.
+		return nil
+	}
+	s, ok := clock.SlotAt(uint64(ts))
+	if !ok {
+		return nil
+	}
+	return &s
 }
 
 func deriveBlobCostFields(blob models.Blob) (realizedCostWei, maxCostWei, headroomWei, headroomPercent *string) {
@@ -406,7 +445,7 @@ func (a *API) cachedBlobList(
 
 		response := make([]BlobResponse, 0, len(blobs))
 		for _, blob := range blobs {
-			response = append(response, toBlobResponse(blob, network.Name))
+			response = append(response, toBlobResponse(blob, network))
 		}
 
 		a.cacheMu.Lock()
@@ -478,7 +517,7 @@ func (a *API) blobList(
 
 	response := make([]BlobResponse, 0, len(blobs))
 	for _, blob := range blobs {
-		response = append(response, toBlobResponse(blob, network.Name))
+		response = append(response, toBlobResponse(blob, network))
 	}
 	return response, true
 }
@@ -812,7 +851,7 @@ func (a *API) GetBlobByTxHash(w http.ResponseWriter, r *http.Request) {
 	if blob.Confirmed {
 		setCacheControl(w, confirmedBlobCacheTTL, confirmedBlobEdgeTTL)
 	}
-	a.respondSuccess(w, toBlobResponse(blob, network.Name))
+	a.respondSuccess(w, toBlobResponse(blob, network))
 }
 
 // GetBlobByVersionedHash godoc
@@ -884,7 +923,7 @@ func (a *API) GetBlobByVersionedHash(w http.ResponseWriter, r *http.Request) {
 	if blob.Confirmed {
 		setCacheControl(w, confirmedBlobCacheTTL, confirmedBlobEdgeTTL)
 	}
-	a.respondSuccess(w, toBlobResponse(blob, network.Name))
+	a.respondSuccess(w, toBlobResponse(blob, network))
 }
 
 // GetBlobPricing godoc

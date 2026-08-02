@@ -86,7 +86,7 @@ func (a *API) GetBlockByNumber(w http.ResponseWriter, r *http.Request) {
 
 	brs := make([]BlobResponse, 0, len(blobs))
 	for _, blob := range blobs {
-		brs = append(brs, toBlobResponse(blob, network.Name))
+		brs = append(brs, toBlobResponse(blob, network))
 	}
 	pricing := toBlockPricingResponse(metric)
 
