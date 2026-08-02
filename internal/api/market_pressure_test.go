@@ -186,8 +186,9 @@ func TestMarketPressureHelpers(t *testing.T) {
 
 // osakaTestChainConfig builds a post-Osaka chain config with an explicit blob
 // schedule so the EIP-7918 reserve-price branch of the next-fee prediction can
-// be exercised deterministically. Cancun/Prague/Osaka share one schedule; only
-// the post-Osaka path (used at the predicted next-block timestamp) matters here.
+// be exercised deterministically. Osaka has no blob schedule of its own — it
+// inherits Prague's — and only the post-Osaka path (used at the predicted
+// next-block timestamp) matters here.
 func osakaTestChainConfig(target, maxBlobs int, updateFraction uint64) *params.ChainConfig {
 	zero := uint64(0)
 	osaka := uint64(1_000)
@@ -201,7 +202,6 @@ func osakaTestChainConfig(target, maxBlobs int, updateFraction uint64) *params.C
 		BlobScheduleConfig: &params.BlobScheduleConfig{
 			Cancun: bc,
 			Prague: bc,
-			Osaka:  bc,
 		},
 	}
 }

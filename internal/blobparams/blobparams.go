@@ -90,8 +90,10 @@ type ScheduleEntry struct {
 }
 
 // maxBlobForkSlots is the number of blob-bearing fork slots go-ethereum's
-// ChainConfig can represent: Cancun, Prague, Osaka, and BPO1..BPO5.
-const maxBlobForkSlots = 8
+// ChainConfig can represent: Cancun, Prague, and BPO1..BPO5. Osaka has no slot
+// of its own since go-ethereum 1.17.5 — it never changed blob parameters, so it
+// inherits Prague's blob config.
+const maxBlobForkSlots = 7
 
 type blobBoundary struct {
 	time uint64
@@ -114,12 +116,14 @@ type blobBoundary struct {
 // that overrides it.
 //
 // Limitation: eth_config carries no fork identity, so for an unknown chain
-// Osaka (which gates EIP-7918) is inferred positionally as the third distinct
-// boundary. With fewer than three boundaries Osaka is not set and EIP-7918 is
-// off; with three or more pre-Osaka boundaries it activates early. This only
-// affects excess-gas / next-fee *prediction* — it does not change the blob
-// schedule selected for a block or the stored blob base fee — and it never
-// applies to compiled chains, whose real Osaka time is preserved.
+// Osaka (which gates EIP-7918 but changes no blob parameters) is inferred
+// positionally: OsakaTime is set to the third distinct boundary, counted
+// before no-op boundaries are collapsed into their predecessor. With fewer
+// than three boundaries Osaka is not set and EIP-7918 is off; with three or
+// more pre-Osaka boundaries it activates early. This only affects excess-gas /
+// next-fee *prediction* — it does not change the blob schedule selected for a
+// block or the stored blob base fee — and it never applies to compiled chains,
+// whose real Osaka time is preserved.
 func BuildChainConfig(chainID int, learned []ScheduleEntry) *params.ChainConfig {
 	base := ChainConfigForID(chainID)
 	if len(learned) == 0 {
@@ -146,9 +150,41 @@ func BuildChainConfig(chainID int, learned []ScheduleEntry) *params.ChainConfig 
 		times = append(times, t)
 	}
 	sortUint64(times)
+
+	// Infer Osaka for chains whose compiled config carries no Osaka time,
+	// BEFORE the no-op collapse below erases the Osaka boundary: eth_config
+	// reports Osaka as its own boundary (same params as Prague, distinct
+	// time), so the third distinct time approximates the true activation. See
+	// the limitation note in the function comment.
+	var inferredOsakaTime *uint64
+	if base.OsakaTime == nil && len(times) >= 3 {
+		t := times[2]
+		inferredOsakaTime = &t
+	}
+
+	// Collapse boundaries that do not change the blob parameters — notably
+	// Osaka, whose eth_config entry duplicates Prague's params — so a no-op
+	// boundary does not consume one of the seven fork slots. Without this, a
+	// chain that has accumulated every boundary through BPO5 would overflow
+	// the slots and truncation would drop Cancun, leaving its historical
+	// blocks with no resolvable config. Resolution is unaffected: the params
+	// are identical on both sides of a collapsed boundary, and keeping the
+	// earliest time of each run preserves where those params first activated.
+	kept := times[:0]
+	var prevCfg *params.BlobConfig
+	for _, t := range times {
+		if prevCfg != nil && *merged[t] == *prevCfg {
+			continue
+		}
+		kept = append(kept, t)
+		prevCfg = merged[t]
+	}
+	times = kept
+
 	// A chain with more distinct blob-param changes than go-ethereum can encode
 	// keeps its most recent boundaries (the ones we actually index against).
-	// Unreachable for any real chain (<=8 boundaries), but log rather than drop
+	// Unreachable for any real chain (<=7 param-changing boundaries through
+	// BPO5, after the no-op collapse above), but log rather than drop
 	// silently so a schedule this large is visible. Blocks before the earliest
 	// retained boundary resolve no config; getBlobBaseFeeFromBlock guards the
 	// resulting CalcBlobFee panic.
@@ -171,13 +207,16 @@ func BuildChainConfig(chainID int, learned []ScheduleEntry) *params.ChainConfig 
 	// Assign boundaries to fork slots in ascending time order. go-ethereum
 	// resolves the active fork as the highest-priority slot whose time is <= the
 	// block time; slot priority ascends with assignment order, so this yields
-	// "the latest boundary at or before the block". The third slot is Osaka, so
-	// OsakaTime — which also gates EIP-7918 — lands on the third boundary. Real
-	// chains follow Cancun→Prague→Osaka→BPO order, so this matches the true
-	// Osaka activation; an arbitrary chain's third distinct blob-param change is
-	// treated as the EIP-7918 boundary.
+	// "the latest boundary at or before the block".
 	for i, t := range times {
 		setBlobSlot(&out, sched, i, t, merged[t])
+	}
+
+	// Osaka carries no blob-config slot, but OsakaTime gates EIP-7918. Compiled
+	// chains keep their real Osaka time (clearBlobForkTimes preserves it);
+	// unknown chains get the positional inference computed above.
+	if out.OsakaTime == nil {
+		out.OsakaTime = inferredOsakaTime
 	}
 	return &out
 }
@@ -195,7 +234,6 @@ func baseBoundaries(cfg *params.ChainConfig) []blobBoundary {
 	}{
 		{cfg.CancunTime, s.Cancun},
 		{cfg.PragueTime, s.Prague},
-		{cfg.OsakaTime, s.Osaka},
 		{cfg.BPO1Time, s.BPO1},
 		{cfg.BPO2Time, s.BPO2},
 		{cfg.BPO3Time, s.BPO3},
@@ -213,10 +251,11 @@ func baseBoundaries(cfg *params.ChainConfig) []blobBoundary {
 
 // clearBlobForkTimes nils the blob-bearing fork time fields so a shallow copy of
 // a compiled config does not leak stale boundaries into the rebuilt schedule.
+// OsakaTime is deliberately preserved: it carries no blob config, only the
+// EIP-7918 activation, which the rebuilt schedule must keep.
 func clearBlobForkTimes(cfg *params.ChainConfig) {
 	cfg.CancunTime = nil
 	cfg.PragueTime = nil
-	cfg.OsakaTime = nil
 	cfg.BPO1Time = nil
 	cfg.BPO2Time = nil
 	cfg.BPO3Time = nil
@@ -224,7 +263,7 @@ func clearBlobForkTimes(cfg *params.ChainConfig) {
 	cfg.BPO5Time = nil
 }
 
-// setBlobSlot writes one boundary into the given fork slot (0=Cancun .. 7=BPO5).
+// setBlobSlot writes one boundary into the given fork slot (0=Cancun .. 6=BPO5).
 func setBlobSlot(cfg *params.ChainConfig, sched *params.BlobScheduleConfig, slot int, time uint64, bc *params.BlobConfig) {
 	t := time
 	switch slot {
@@ -233,16 +272,14 @@ func setBlobSlot(cfg *params.ChainConfig, sched *params.BlobScheduleConfig, slot
 	case 1:
 		cfg.PragueTime, sched.Prague = &t, bc
 	case 2:
-		cfg.OsakaTime, sched.Osaka = &t, bc
-	case 3:
 		cfg.BPO1Time, sched.BPO1 = &t, bc
-	case 4:
+	case 3:
 		cfg.BPO2Time, sched.BPO2 = &t, bc
-	case 5:
+	case 4:
 		cfg.BPO3Time, sched.BPO3 = &t, bc
-	case 6:
+	case 5:
 		cfg.BPO4Time, sched.BPO4 = &t, bc
-	case 7:
+	case 6:
 		cfg.BPO5Time, sched.BPO5 = &t, bc
 	}
 }
@@ -333,8 +370,6 @@ func getActiveBlobConfig(cfg *params.ChainConfig, time uint64) *params.BlobConfi
 		return s.BPO2
 	case cfg.IsBPO1(london, time) && s.BPO1 != nil:
 		return s.BPO1
-	case cfg.IsOsaka(london, time) && s.Osaka != nil:
-		return s.Osaka
 	case cfg.IsPrague(london, time) && s.Prague != nil:
 		return s.Prague
 	case cfg.IsCancun(london, time) && s.Cancun != nil:
