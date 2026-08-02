@@ -329,9 +329,14 @@ func (c *Client) FetchEthConfig(ctx context.Context) (*EthConfig, error) {
 	return &result, nil
 }
 
-// GetBlockTimestamp gets the timestamp of a block
+// GetBlockTimestamp gets the timestamp of a block. The result is pinned to
+// UTC: it is persisted into timezone-less TIMESTAMP columns, and lib/pq
+// encodes a time.Time in its own location while Postgres discards the offset
+// — on a non-UTC host a local time would round-trip shifted by the UTC
+// offset, corrupting every timestamp-derived read (beacon slot fallback,
+// window queries, pending-age math).
 func (c *Client) GetBlockTimestamp(block *types.Block) time.Time {
-	return time.Unix(int64(block.Time()), 0)
+	return time.Unix(int64(block.Time()), 0).UTC()
 }
 
 // GetTransactionByHash gets a transaction by its hash
