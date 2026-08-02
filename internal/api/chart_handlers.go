@@ -44,7 +44,7 @@ const (
 	calldataGasPerByte = 16
 )
 
-const calldataCostModelDescription = "Approximation: calldata equivalent is modeled as 16 gas per blob byte and priced with the indexed blob base fee as the fee-rate proxy because execution base fee is not stored."
+const calldataCostModelDescription = "Approximation: calldata equivalent is modeled as 16 gas per blob byte priced at each bucket's average execution-layer base fee, averaged over blocks with a recorded fee. Buckets without a recorded execution base fee fall back to the indexed blob base fee as the fee-rate proxy and omit average_execution_base_fee_wei."
 
 var chartRangeDurations = map[string]time.Duration{
 	chartRange1h:  time.Hour,
@@ -1413,32 +1413,69 @@ const queryCostComparisonTimeChart = `
 			rb.bucket_start,
 			COUNT(*)::int AS blob_count,
 			COALESCE(SUM(rb.blob_size_bytes), 0)::bigint AS blob_bytes,
-			COALESCE(SUM(rb.total_cost_wei::numeric), 0)::text AS blob_cost_wei,
-			COALESCE(SUM(rb.blob_size_bytes::numeric * $7::numeric * rb.base_fee_per_blob_gas::numeric), 0)::text AS calldata_equivalent_cost_wei
+			COALESCE(SUM(rb.total_cost_wei::numeric), 0) AS blob_cost_wei,
+			COALESCE(SUM(rb.blob_size_bytes::numeric * $7::numeric * rb.base_fee_per_blob_gas::numeric), 0) AS proxy_calldata_cost_wei
 		FROM range_blobs rb
 		GROUP BY rb.bucket_start
 	),
+	bucket_fees AS (
+		SELECT
+			TIMESTAMP 'epoch' + (
+				FLOOR(EXTRACT(EPOCH FROM bm.block_timestamp) / $5::numeric)::bigint
+				* $5::bigint
+				* INTERVAL '1 second'
+			) AS bucket_start,
+			SUM(bm.base_fee_wei::numeric) AS sum_base_fee_wei,
+			COUNT(*) FILTER (WHERE bm.base_fee_wei::numeric > 0) AS base_fee_block_count
+		FROM bounds b
+		JOIN block_metrics bm
+			ON bm.chain_id = $1
+			AND bm.block_timestamp >= b.range_start
+			AND bm.block_timestamp < b.range_end
+		GROUP BY 1
+	),
+	priced_buckets AS (
+		SELECT
+			b.bucket_start,
+			b.range_start,
+			b.range_end,
+			COALESCE(bc.blob_count, 0) AS blob_count,
+			COALESCE(bc.blob_bytes, 0) AS blob_bytes,
+			COALESCE(bc.blob_cost_wei, 0) AS blob_cost_wei,
+			CASE
+				WHEN COALESCE(bf.base_fee_block_count, 0) > 0
+					THEN ROUND(COALESCE(bc.blob_bytes, 0)::numeric * $7::numeric * bf.sum_base_fee_wei / bf.base_fee_block_count)
+				ELSE COALESCE(bc.proxy_calldata_cost_wei, 0)
+			END AS calldata_equivalent_cost_wei,
+			CASE
+				WHEN COALESCE(bf.base_fee_block_count, 0) > 0
+					THEN ROUND(bf.sum_base_fee_wei / bf.base_fee_block_count)
+			END AS average_execution_base_fee_wei
+		FROM buckets b
+		LEFT JOIN bucket_costs bc ON bc.bucket_start = b.bucket_start
+		LEFT JOIN bucket_fees bf ON bf.bucket_start = b.bucket_start
+	),
 	summary_costs AS (
 		SELECT
-			COALESCE(SUM(rb.total_cost_wei::numeric), 0) AS blob_cost_wei,
-			COALESCE(SUM(rb.blob_size_bytes::numeric * $7::numeric * rb.base_fee_per_blob_gas::numeric), 0) AS calldata_equivalent_cost_wei
-		FROM range_blobs rb
+			COALESCE(SUM(pb.blob_cost_wei), 0) AS blob_cost_wei,
+			COALESCE(SUM(pb.calldata_equivalent_cost_wei), 0) AS calldata_equivalent_cost_wei
+		FROM priced_buckets pb
 	)
 	SELECT
-		b.bucket_start AS timestamp,
-		b.range_start,
-		b.range_end,
-		COALESCE(bc.blob_count, 0) AS blob_count,
-		COALESCE(bc.blob_bytes, 0) AS blob_bytes,
-		COALESCE(bc.blob_cost_wei, '0') AS blob_cost_wei,
-		COALESCE(bc.calldata_equivalent_cost_wei, '0') AS calldata_equivalent_cost_wei,
-		(COALESCE(bc.calldata_equivalent_cost_wei, '0')::numeric - COALESCE(bc.blob_cost_wei, '0')::numeric)::text AS savings_wei,
+		pb.bucket_start AS timestamp,
+		pb.range_start,
+		pb.range_end,
+		pb.blob_count,
+		pb.blob_bytes,
+		pb.blob_cost_wei::text AS blob_cost_wei,
+		pb.calldata_equivalent_cost_wei::text AS calldata_equivalent_cost_wei,
+		(pb.calldata_equivalent_cost_wei - pb.blob_cost_wei)::text AS savings_wei,
 		CASE
-			WHEN COALESCE(bc.calldata_equivalent_cost_wei, '0')::numeric > 0
-				THEN ROUND(((bc.calldata_equivalent_cost_wei::numeric - bc.blob_cost_wei::numeric) / bc.calldata_equivalent_cost_wei::numeric) * 100, 6)::float8
+			WHEN pb.calldata_equivalent_cost_wei > 0
+				THEN ROUND(((pb.calldata_equivalent_cost_wei - pb.blob_cost_wei) / pb.calldata_equivalent_cost_wei) * 100, 6)::float8
 			ELSE 0
 		END AS savings_percent,
-		NULL::text AS average_execution_base_fee_wei,
+		pb.average_execution_base_fee_wei::text AS average_execution_base_fee_wei,
 		sc.blob_cost_wei::text AS summary_blob_cost_wei,
 		sc.calldata_equivalent_cost_wei::text AS summary_calldata_equivalent_cost_wei,
 		(sc.calldata_equivalent_cost_wei - sc.blob_cost_wei)::text AS summary_savings_wei,
@@ -1447,10 +1484,9 @@ const queryCostComparisonTimeChart = `
 				THEN ROUND(((sc.calldata_equivalent_cost_wei - sc.blob_cost_wei) / sc.calldata_equivalent_cost_wei) * 100, 6)::float8
 			ELSE 0
 		END AS summary_savings_percent
-	FROM buckets b
-	LEFT JOIN bucket_costs bc ON bc.bucket_start = b.bucket_start
+	FROM priced_buckets pb
 	CROSS JOIN summary_costs sc
-	ORDER BY b.bucket_start ASC
+	ORDER BY pb.bucket_start ASC
 `
 
 const queryCostComparisonBlockChart = `
@@ -1458,7 +1494,7 @@ const queryCostComparisonBlockChart = `
 		SELECT $2::timestamp AS range_start, $3::timestamp AS range_end
 	),
 	selected_blocks AS (
-		SELECT bm.block_number, bm.block_timestamp
+		SELECT bm.block_number, bm.block_timestamp, bm.base_fee_wei
 		FROM block_metrics bm
 		CROSS JOIN bounds b
 		WHERE bm.chain_id = $1
@@ -1470,23 +1506,37 @@ const queryCostComparisonBlockChart = `
 			sb.block_number,
 			COUNT(bl.id)::int AS blob_count,
 			COALESCE(SUM(bl.blob_size_bytes), 0)::bigint AS blob_bytes,
-			COALESCE(SUM(bl.total_cost_wei::numeric), 0)::text AS blob_cost_wei,
-			COALESCE(SUM(bl.blob_size_bytes::numeric * $4::numeric * bl.base_fee_per_blob_gas::numeric), 0)::text AS calldata_equivalent_cost_wei
+			COALESCE(SUM(bl.total_cost_wei::numeric), 0) AS blob_cost_wei,
+			CASE
+				WHEN sb.base_fee_wei::numeric > 0
+					THEN COALESCE(SUM(bl.blob_size_bytes::numeric * $4::numeric * sb.base_fee_wei::numeric), 0)
+				ELSE COALESCE(SUM(bl.blob_size_bytes::numeric * $4::numeric * bl.base_fee_per_blob_gas::numeric), 0)
+			END AS calldata_equivalent_cost_wei,
+			CASE WHEN sb.base_fee_wei::numeric > 0 THEN sb.base_fee_wei::numeric END AS average_execution_base_fee_wei
 		FROM selected_blocks sb
 		LEFT JOIN blobs bl
 			ON bl.chain_id = $1
 			AND bl.block_number = sb.block_number
-		GROUP BY sb.block_number
+		GROUP BY sb.block_number, sb.base_fee_wei
 	),
 	summary_costs AS (
 		SELECT
 			COALESCE(SUM(bl.total_cost_wei::numeric), 0) AS blob_cost_wei,
-			COALESCE(SUM(bl.blob_size_bytes::numeric * $4::numeric * bl.base_fee_per_blob_gas::numeric), 0) AS calldata_equivalent_cost_wei
+			COALESCE(SUM(
+				CASE
+					WHEN COALESCE(bm.base_fee_wei::numeric, 0) > 0
+						THEN bl.blob_size_bytes::numeric * $4::numeric * bm.base_fee_wei::numeric
+					ELSE bl.blob_size_bytes::numeric * $4::numeric * bl.base_fee_per_blob_gas::numeric
+				END
+			), 0) AS calldata_equivalent_cost_wei
 		FROM bounds b
 		LEFT JOIN blobs bl
 			ON bl.chain_id = $1
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
+		LEFT JOIN block_metrics bm
+			ON bm.chain_id = $1
+			AND bm.block_number = bl.block_number
 	)
 	SELECT
 		sb.block_timestamp AS timestamp,
@@ -1494,15 +1544,15 @@ const queryCostComparisonBlockChart = `
 		b.range_end,
 		bc.blob_count,
 		bc.blob_bytes,
-		bc.blob_cost_wei,
-		bc.calldata_equivalent_cost_wei,
-		(bc.calldata_equivalent_cost_wei::numeric - bc.blob_cost_wei::numeric)::text AS savings_wei,
+		bc.blob_cost_wei::text AS blob_cost_wei,
+		bc.calldata_equivalent_cost_wei::text AS calldata_equivalent_cost_wei,
+		(bc.calldata_equivalent_cost_wei - bc.blob_cost_wei)::text AS savings_wei,
 		CASE
-			WHEN bc.calldata_equivalent_cost_wei::numeric > 0
-				THEN ROUND(((bc.calldata_equivalent_cost_wei::numeric - bc.blob_cost_wei::numeric) / bc.calldata_equivalent_cost_wei::numeric) * 100, 6)::float8
+			WHEN bc.calldata_equivalent_cost_wei > 0
+				THEN ROUND(((bc.calldata_equivalent_cost_wei - bc.blob_cost_wei) / bc.calldata_equivalent_cost_wei) * 100, 6)::float8
 			ELSE 0
 		END AS savings_percent,
-		NULL::text AS average_execution_base_fee_wei,
+		bc.average_execution_base_fee_wei::text AS average_execution_base_fee_wei,
 		sc.blob_cost_wei::text AS summary_blob_cost_wei,
 		sc.calldata_equivalent_cost_wei::text AS summary_calldata_equivalent_cost_wei,
 		(sc.calldata_equivalent_cost_wei - sc.blob_cost_wei)::text AS summary_savings_wei,
@@ -1914,11 +1964,14 @@ const queryBlobMarketTimeChartRollup = `
 
 // queryCostComparisonTimeChartRollup mirrors queryCostComparisonTimeChart on
 // rollup rows, regrouping source-bucket rows into display buckets (identity
-// for hour-and-coarser granularities, fine 60s rows for sub-hour ones — the
-// per-point columns are all sums, so both stay exact). Args: $1 network,
-// $2 range label, $3 start, $4 end, $5 display bucket seconds, $6 calldata
-// gas per byte, $7 source bucket seconds. range=all resolves its start from
-// the earliest rollup bucket, which is already day-aligned.
+// for hour-and-coarser granularities, fine 60s rows for sub-hour ones; the
+// per-point columns are all sums, so both stay exact). The execution fee
+// average comes from block_metrics_rollups' sum_base_fee_wei and
+// base_fee_block_count, whose sums regroup exactly too, so the derived
+// average matches the raw path. Args: $1 network, $2 range label, $3 start,
+// $4 end, $5 display bucket seconds, $6 calldata gas per byte, $7 source
+// bucket seconds. range=all resolves its start from the earliest rollup
+// bucket, which is already day-aligned.
 const queryCostComparisonTimeChartRollup = `
 	WITH bounds AS (
 		SELECT
@@ -1967,32 +2020,69 @@ const queryCostComparisonTimeChartRollup = `
 			display_bucket_start AS bucket_start,
 			COALESCE(SUM(blob_count), 0)::int AS blob_count,
 			COALESCE(SUM(blob_bytes), 0)::bigint AS blob_bytes,
-			COALESCE(SUM(total_cost_wei), 0)::text AS blob_cost_wei,
-			COALESCE(SUM(sum_size_base_fee) * $6::numeric, 0)::text AS calldata_equivalent_cost_wei
+			COALESCE(SUM(total_cost_wei), 0) AS blob_cost_wei,
+			COALESCE(SUM(sum_size_base_fee) * $6::numeric, 0) AS proxy_calldata_cost_wei
 		FROM source_costs
 		GROUP BY display_bucket_start
 	),
+	bucket_fees AS (
+		SELECT
+			TIMESTAMP 'epoch' + (
+				FLOOR(EXTRACT(EPOCH FROM r.bucket_start) / $5::numeric)::bigint
+				* ($5::bigint * INTERVAL '1 second')
+			) AS bucket_start,
+			SUM(r.sum_base_fee_wei) AS sum_base_fee_wei,
+			SUM(r.base_fee_block_count) AS base_fee_block_count
+		FROM block_metrics_rollups r
+		CROSS JOIN bounds b
+		WHERE r.chain_id = $1
+			AND r.bucket_seconds = $7::int
+			AND r.bucket_start >= b.range_start
+			AND r.bucket_start < b.range_end
+		GROUP BY 1
+	),
+	priced_buckets AS (
+		SELECT
+			b.bucket_start,
+			b.range_start,
+			b.range_end,
+			COALESCE(bc.blob_count, 0) AS blob_count,
+			COALESCE(bc.blob_bytes, 0) AS blob_bytes,
+			COALESCE(bc.blob_cost_wei, 0) AS blob_cost_wei,
+			CASE
+				WHEN COALESCE(bf.base_fee_block_count, 0) > 0
+					THEN ROUND(COALESCE(bc.blob_bytes, 0)::numeric * $6::numeric * bf.sum_base_fee_wei / bf.base_fee_block_count)
+				ELSE COALESCE(bc.proxy_calldata_cost_wei, 0)
+			END AS calldata_equivalent_cost_wei,
+			CASE
+				WHEN COALESCE(bf.base_fee_block_count, 0) > 0
+					THEN ROUND(bf.sum_base_fee_wei / bf.base_fee_block_count)
+			END AS average_execution_base_fee_wei
+		FROM buckets b
+		LEFT JOIN bucket_costs bc ON bc.bucket_start = b.bucket_start
+		LEFT JOIN bucket_fees bf ON bf.bucket_start = b.bucket_start
+	),
 	summary_costs AS (
 		SELECT
-			COALESCE(SUM(total_cost_wei), 0) AS blob_cost_wei,
-			COALESCE(SUM(sum_size_base_fee) * $6::numeric, 0) AS calldata_equivalent_cost_wei
-		FROM source_costs
+			COALESCE(SUM(pb.blob_cost_wei), 0) AS blob_cost_wei,
+			COALESCE(SUM(pb.calldata_equivalent_cost_wei), 0) AS calldata_equivalent_cost_wei
+		FROM priced_buckets pb
 	)
 	SELECT
-		b.bucket_start AS timestamp,
-		b.range_start,
-		b.range_end,
-		COALESCE(bc.blob_count, 0) AS blob_count,
-		COALESCE(bc.blob_bytes, 0) AS blob_bytes,
-		COALESCE(bc.blob_cost_wei, '0') AS blob_cost_wei,
-		COALESCE(bc.calldata_equivalent_cost_wei, '0') AS calldata_equivalent_cost_wei,
-		(COALESCE(bc.calldata_equivalent_cost_wei, '0')::numeric - COALESCE(bc.blob_cost_wei, '0')::numeric)::text AS savings_wei,
+		pb.bucket_start AS timestamp,
+		pb.range_start,
+		pb.range_end,
+		pb.blob_count,
+		pb.blob_bytes,
+		pb.blob_cost_wei::text AS blob_cost_wei,
+		pb.calldata_equivalent_cost_wei::text AS calldata_equivalent_cost_wei,
+		(pb.calldata_equivalent_cost_wei - pb.blob_cost_wei)::text AS savings_wei,
 		CASE
-			WHEN COALESCE(bc.calldata_equivalent_cost_wei, '0')::numeric > 0
-				THEN ROUND(((bc.calldata_equivalent_cost_wei::numeric - bc.blob_cost_wei::numeric) / bc.calldata_equivalent_cost_wei::numeric) * 100, 6)::float8
+			WHEN pb.calldata_equivalent_cost_wei > 0
+				THEN ROUND(((pb.calldata_equivalent_cost_wei - pb.blob_cost_wei) / pb.calldata_equivalent_cost_wei) * 100, 6)::float8
 			ELSE 0
 		END AS savings_percent,
-		NULL::text AS average_execution_base_fee_wei,
+		pb.average_execution_base_fee_wei::text AS average_execution_base_fee_wei,
 		sc.blob_cost_wei::text AS summary_blob_cost_wei,
 		sc.calldata_equivalent_cost_wei::text AS summary_calldata_equivalent_cost_wei,
 		(sc.calldata_equivalent_cost_wei - sc.blob_cost_wei)::text AS summary_savings_wei,
@@ -2001,10 +2091,9 @@ const queryCostComparisonTimeChartRollup = `
 				THEN ROUND(((sc.calldata_equivalent_cost_wei - sc.blob_cost_wei) / sc.calldata_equivalent_cost_wei) * 100, 6)::float8
 			ELSE 0
 		END AS summary_savings_percent
-	FROM buckets b
-	LEFT JOIN bucket_costs bc ON bc.bucket_start = b.bucket_start
+	FROM priced_buckets pb
 	CROSS JOIN summary_costs sc
-	ORDER BY b.bucket_start ASC
+	ORDER BY pb.bucket_start ASC
 `
 
 // queryAttributionUsageTimeChartRollup mirrors queryAttributionUsageTimeChart

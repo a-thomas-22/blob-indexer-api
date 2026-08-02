@@ -67,7 +67,7 @@ const backfillFineBlockMetricsRollupsChunk = `
 		chain_id, bucket_seconds, bucket_start, block_count, start_block, end_block,
 		sum_blob_count, sum_blob_gas_used, sum_blob_gas_target, sum_blob_base_fee,
 		sum_utilization, median_blob_base_fee, p95_blob_base_fee,
-		blocks_above_target, blocks_at_max, updated_at
+		blocks_above_target, blocks_at_max, sum_base_fee_wei, base_fee_block_count, updated_at
 	)
 	SELECT
 		bm.chain_id,
@@ -89,6 +89,8 @@ const backfillFineBlockMetricsRollupsChunk = `
 		COUNT(*) FILTER (
 			WHERE bm.max_blob_gas > 0 AND bm.effective_blob_gas_used >= bm.max_blob_gas
 		)::bigint,
+		COALESCE(SUM(bm.base_fee_wei::numeric), 0),
+		COUNT(*) FILTER (WHERE bm.base_fee_wei::numeric > 0)::bigint,
 		NOW()
 	FROM (
 		SELECT
@@ -100,6 +102,7 @@ const backfillFineBlockMetricsRollupsChunk = `
 			blob_gas_target,
 			blob_base_fee,
 			utilization_ratio,
+			base_fee_wei,
 			GREATEST(blob_gas_used, 0)::bigint AS effective_blob_gas_used,
 			CASE
 				WHEN blob_gas_target > 0 THEN blob_gas_target
@@ -130,6 +133,8 @@ const backfillFineBlockMetricsRollupsChunk = `
 		p95_blob_base_fee = EXCLUDED.p95_blob_base_fee,
 		blocks_above_target = EXCLUDED.blocks_above_target,
 		blocks_at_max = EXCLUDED.blocks_at_max,
+		sum_base_fee_wei = EXCLUDED.sum_base_fee_wei,
+		base_fee_block_count = EXCLUDED.base_fee_block_count,
 		updated_at = NOW()
 `
 
