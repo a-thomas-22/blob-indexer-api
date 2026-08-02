@@ -283,17 +283,33 @@ func TestGetCostComparisonChart_Success(t *testing.T) {
 				{
 					Timestamp:                        bucket,
 					RangeStart:                       bucket,
-					RangeEnd:                         bucket.Add(time.Hour),
+					RangeEnd:                         bucket.Add(2 * time.Hour),
+					BlobCount:                        1,
+					BlobBytes:                        131072,
+					BlobCostWei:                      "100",
+					CalldataEquivalentCostWei:        "6291456000",
+					SavingsWei:                       "6291455900",
+					SavingsPercent:                   99.999998,
+					AverageExecutionBaseFeeWei:       sql.NullString{String: "3000000", Valid: true},
+					SummaryBlobCostWei:               "200",
+					SummaryCalldataEquivalentCostWei: "6291457600",
+					SummarySavingsWei:                "6291457400",
+					SummarySavingsPercent:            99.999997,
+				},
+				{
+					Timestamp:                        bucket.Add(time.Hour),
+					RangeStart:                       bucket,
+					RangeEnd:                         bucket.Add(2 * time.Hour),
 					BlobCount:                        1,
 					BlobBytes:                        131072,
 					BlobCostWei:                      "100",
 					CalldataEquivalentCostWei:        "1600",
 					SavingsWei:                       "1500",
 					SavingsPercent:                   93.75,
-					SummaryBlobCostWei:               "100",
-					SummaryCalldataEquivalentCostWei: "1600",
-					SummarySavingsWei:                "1500",
-					SummarySavingsPercent:            93.75,
+					SummaryBlobCostWei:               "200",
+					SummaryCalldataEquivalentCostWei: "6291457600",
+					SummarySavingsWei:                "6291457400",
+					SummarySavingsPercent:            99.999997,
 				},
 			})
 			return nil
@@ -322,13 +338,28 @@ func TestGetCostComparisonChart_Success(t *testing.T) {
 	if resp.Data.Model.CalldataGasPerByte != calldataGasPerByte || !strings.Contains(resp.Data.Model.Description, "Approximation") {
 		t.Fatalf("unexpected model: %+v", resp.Data.Model)
 	}
+	if !strings.Contains(resp.Data.Model.Description, "execution-layer base fee") ||
+		!strings.Contains(resp.Data.Model.Description, "fall back to the indexed blob base fee") {
+		t.Fatalf("model description does not document execution pricing and proxy fallback: %q", resp.Data.Model.Description)
+	}
 	if resp.Data.Model.BlobSizeBytes != blobSizeBytes {
 		t.Fatalf("blob_size_bytes = %d, want %d", resp.Data.Model.BlobSizeBytes, blobSizeBytes)
 	}
-	if resp.Data.Points[0].AverageExecutionBaseFeeWei != nil {
-		t.Fatalf("expected omitted execution base fee, got %v", *resp.Data.Points[0].AverageExecutionBaseFeeWei)
+	if len(resp.Data.Points) != 2 {
+		t.Fatalf("expected 2 points, got %d", len(resp.Data.Points))
 	}
-	if resp.Data.Summary.SavingsPercent != 93.75 {
+	execPoint := resp.Data.Points[0]
+	if execPoint.AverageExecutionBaseFeeWei == nil || *execPoint.AverageExecutionBaseFeeWei != "3000000" {
+		t.Fatalf("expected execution base fee 3000000 on execution-priced point, got %+v", execPoint.AverageExecutionBaseFeeWei)
+	}
+	if execPoint.SavingsPercent == 93.75 {
+		t.Fatalf("execution-priced point must not collapse to the constant proxy ratio: %+v", execPoint)
+	}
+	proxyPoint := resp.Data.Points[1]
+	if proxyPoint.AverageExecutionBaseFeeWei != nil {
+		t.Fatalf("expected omitted execution base fee on proxy-priced point, got %v", *proxyPoint.AverageExecutionBaseFeeWei)
+	}
+	if resp.Data.Summary.SavingsPercent != 99.999997 {
 		t.Fatalf("unexpected summary: %+v", resp.Data.Summary)
 	}
 }

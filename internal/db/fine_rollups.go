@@ -67,7 +67,7 @@ const backfillFineBlockMetricsRollupsChunk = `
 		chain_id, bucket_seconds, bucket_start, block_count, start_block, end_block,
 		sum_blob_count, sum_blob_gas_used, sum_blob_gas_target, sum_blob_base_fee,
 		sum_utilization, median_blob_base_fee, p95_blob_base_fee,
-		blocks_above_target, blocks_at_max, updated_at
+		blocks_above_target, blocks_at_max, sum_base_fee_wei, base_fee_block_count, updated_at
 	)
 	SELECT
 		bm.chain_id,
@@ -89,6 +89,8 @@ const backfillFineBlockMetricsRollupsChunk = `
 		COUNT(*) FILTER (
 			WHERE bm.max_blob_gas > 0 AND bm.effective_blob_gas_used >= bm.max_blob_gas
 		)::bigint,
+		COALESCE(SUM(bm.base_fee_wei::numeric), 0),
+		COUNT(*) FILTER (WHERE bm.base_fee_wei::numeric > 0)::bigint,
 		NOW()
 	FROM (
 		SELECT
@@ -100,6 +102,7 @@ const backfillFineBlockMetricsRollupsChunk = `
 			blob_gas_target,
 			blob_base_fee,
 			utilization_ratio,
+			base_fee_wei,
 			GREATEST(blob_gas_used, 0)::bigint AS effective_blob_gas_used,
 			CASE
 				WHEN blob_gas_target > 0 THEN blob_gas_target
@@ -130,6 +133,8 @@ const backfillFineBlockMetricsRollupsChunk = `
 		p95_blob_base_fee = EXCLUDED.p95_blob_base_fee,
 		blocks_above_target = EXCLUDED.blocks_above_target,
 		blocks_at_max = EXCLUDED.blocks_at_max,
+		sum_base_fee_wei = EXCLUDED.sum_base_fee_wei,
+		base_fee_block_count = EXCLUDED.base_fee_block_count,
 		updated_at = NOW()
 `
 
@@ -165,6 +170,67 @@ func (db *DB) BackfillFineChartRollupsChunk(ctx context.Context, networkID int, 
 			networkID, start.Format(time.RFC3339), end.Format(time.RFC3339), err)
 	}
 	return nil
+}
+
+// staleCoarseRollupBaseFeeBuckets finds coarse chart-rollup buckets whose
+// rows predate the base fee aggregate columns: base_fee_block_count = 0 even
+// though the bucket contains blocks with a recorded (non-zero) execution base
+// fee. The subselect bound skips the pre-000010 history in one cheap
+// timestamp comparison, so buckets that can never heal (no fee data exists)
+// do not pay a per-bucket block_metrics probe on every startup; the EXISTS
+// probe then confirms real fee rows for the few candidates left. Fine (60s)
+// buckets are excluded: the startup backfill rebuilds those wholesale.
+const staleCoarseRollupBaseFeeBuckets = `
+	SELECT r.bucket_seconds, r.bucket_start
+	FROM block_metrics_rollups r
+	WHERE r.chain_id = $1
+		AND r.bucket_seconds <> $2
+		AND r.base_fee_block_count = 0
+		AND r.bucket_start + (r.bucket_seconds * INTERVAL '1 second') > COALESCE((
+			SELECT MIN(bm.block_timestamp)
+			FROM block_metrics bm
+			WHERE bm.chain_id = $1 AND bm.base_fee_wei::numeric > 0
+		), 'infinity'::timestamp)
+		AND EXISTS (
+			SELECT 1
+			FROM block_metrics bm
+			WHERE bm.chain_id = r.chain_id
+				AND bm.block_timestamp >= r.bucket_start
+				AND bm.block_timestamp < r.bucket_start + (r.bucket_seconds * INTERVAL '1 second')
+				AND bm.base_fee_wei::numeric > 0
+		)
+	ORDER BY r.bucket_seconds ASC, r.bucket_start ASC
+`
+
+// HealCoarseRollupBaseFees refreshes coarse block_metrics_rollups buckets
+// whose rows were written before the base fee aggregate columns existed, so
+// rollup-served cost-comparison ranges pick up execution-fee pricing for the
+// window between the 000010 and 000012 deploys (heavy backfills stay out of
+// schema migrations; see internal/db/migrations/README.md). Returns how many
+// buckets were refreshed. Each refresh recomputes its bucket from raw
+// block_metrics via the same function the statement triggers call; recompute
+// is idempotent and last-write-wins against a concurrent trigger refresh of
+// the same bucket, so no write serialization is needed. Once healed (or on
+// databases with no stale rows) the candidate query returns nothing and this
+// is a cheap no-op.
+func (db *DB) HealCoarseRollupBaseFees(ctx context.Context, networkID int) (int64, error) {
+	var buckets []struct {
+		BucketSeconds int       `db:"bucket_seconds"`
+		BucketStart   time.Time `db:"bucket_start"`
+	}
+	if err := db.SelectContext(ctx, &buckets, staleCoarseRollupBaseFeeBuckets, networkID, FineChartRollupBucketSeconds); err != nil {
+		return 0, fmt.Errorf("failed to find stale coarse rollup buckets for network %d: %w", networkID, err)
+	}
+	var healed int64
+	for _, bucket := range buckets {
+		if _, err := db.ExecContext(ctx, "SELECT block_metrics_rollups_refresh($1, $2, $3)",
+			networkID, bucket.BucketSeconds, bucket.BucketStart); err != nil {
+			return healed, fmt.Errorf("failed to refresh stale coarse rollup bucket (network %d, %ds, %s): %w",
+				networkID, bucket.BucketSeconds, bucket.BucketStart.Format(time.RFC3339), err)
+		}
+		healed++
+	}
+	return healed, nil
 }
 
 // PruneFineChartRollups deletes fine (60s) rollup buckets that are entirely

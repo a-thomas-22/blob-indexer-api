@@ -121,3 +121,69 @@ func TestPruneFineChartRollups_Error(t *testing.T) {
 		t.Fatal("expected prune error")
 	}
 }
+
+func TestHealCoarseRollupBaseFees(t *testing.T) {
+	db, mock := newMockDB(t)
+	hourBucket := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	dayBucket := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("SELECT r.bucket_seconds, r.bucket_start").
+		WithArgs(1, FineChartRollupBucketSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"bucket_seconds", "bucket_start"}).
+			AddRow(3600, hourBucket).
+			AddRow(86400, dayBucket))
+	mock.ExpectExec("SELECT block_metrics_rollups_refresh").
+		WithArgs(1, 3600, hourBucket).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("SELECT block_metrics_rollups_refresh").
+		WithArgs(1, 86400, dayBucket).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	healed, err := db.HealCoarseRollupBaseFees(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if healed != 2 {
+		t.Fatalf("expected 2 healed buckets, got %d", healed)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestHealCoarseRollupBaseFees_Errors(t *testing.T) {
+	t.Run("candidate probe fails", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectQuery("SELECT r.bucket_seconds, r.bucket_start").
+			WillReturnError(errors.New("probe failed"))
+
+		healed, err := db.HealCoarseRollupBaseFees(context.Background(), 1)
+		if err == nil || !strings.Contains(err.Error(), "find stale coarse rollup buckets") {
+			t.Fatalf("expected probe error, got %v", err)
+		}
+		if healed != 0 {
+			t.Fatalf("expected 0 healed buckets on probe failure, got %d", healed)
+		}
+	})
+
+	t.Run("refresh fails partway", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		bucket := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+		mock.ExpectQuery("SELECT r.bucket_seconds, r.bucket_start").
+			WillReturnRows(sqlmock.NewRows([]string{"bucket_seconds", "bucket_start"}).
+				AddRow(3600, bucket).
+				AddRow(21600, bucket))
+		mock.ExpectExec("SELECT block_metrics_rollups_refresh").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec("SELECT block_metrics_rollups_refresh").
+			WillReturnError(errors.New("refresh failed"))
+
+		healed, err := db.HealCoarseRollupBaseFees(context.Background(), 1)
+		if err == nil || !strings.Contains(err.Error(), "refresh stale coarse rollup bucket") {
+			t.Fatalf("expected refresh error, got %v", err)
+		}
+		if healed != 1 {
+			t.Fatalf("expected 1 healed bucket before the failure, got %d", healed)
+		}
+	})
+}

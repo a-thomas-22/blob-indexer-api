@@ -28,6 +28,9 @@ func TestRunFineRollupMaintenance_BackfillsThenPrunes(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectCommit()
 	}
+	// After the backfill, the coarse base fee heal probes for stale buckets.
+	mock.ExpectQuery("SELECT r.bucket_seconds, r.bucket_start").
+		WillReturnRows(sqlmock.NewRows([]string{"bucket_seconds", "bucket_start"}))
 	// First prune tick deletes expired fine buckets from both tables.
 	mock.ExpectExec("DELETE FROM blob_chart_rollups").
 		WillReturnResult(sqlmock.NewResult(0, 3))
@@ -66,6 +69,9 @@ func TestRunFineRollupMaintenance_PruneErrorKeepsLoopAlive(t *testing.T) {
 	mock.ExpectExec("INSERT INTO blob_chart_rollups").
 		WillReturnError(errors.New("backfill failed"))
 	mock.ExpectRollback()
+	// A failed coarse heal must not stop the loop either.
+	mock.ExpectQuery("SELECT r.bucket_seconds, r.bucket_start").
+		WillReturnError(errors.New("heal probe failed"))
 	// A failed prune tick must not stop the loop: a later tick still runs.
 	mock.ExpectExec("DELETE FROM blob_chart_rollups").
 		WillReturnError(errors.New("prune failed"))
@@ -163,5 +169,26 @@ func TestBackfillFineRollups_ChunksAreAlignedAndContiguous(t *testing.T) {
 	}
 	if got := ends[0].Sub(starts[total-1]); got != db.FineChartRollupRetention {
 		t.Fatalf("backfill covered %s, want %s", got, db.FineChartRollupRetention)
+	}
+}
+
+func TestHealCoarseRollupBaseFees_RefreshesStaleBuckets(t *testing.T) {
+	idx := newTestIndexer()
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	bucket := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("SELECT r.bucket_seconds, r.bucket_start").
+		WithArgs(idx.network.ChainID, db.FineChartRollupBucketSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"bucket_seconds", "bucket_start"}).
+			AddRow(3600, bucket))
+	mock.ExpectExec("SELECT block_metrics_rollups_refresh").
+		WithArgs(idx.network.ChainID, 3600, bucket).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	idx.healCoarseRollupBaseFees()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
 	}
 }
