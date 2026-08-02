@@ -140,9 +140,9 @@ func TestBuildChainConfig_UnknownChainFromLearned(t *testing.T) {
 }
 
 func TestBuildChainConfig_FillsAllSlotsAndTruncates(t *testing.T) {
-	// Nine ascending boundaries exceed the eight representable fork slots; the
-	// builder keeps the eight most recent and drops the oldest. Also exercises
-	// the BPO3..BPO5 slots.
+	// Nine ascending boundaries exceed the seven representable fork slots; the
+	// builder keeps the seven most recent and drops the two oldest. Also
+	// exercises the BPO3..BPO5 slots.
 	learned := make([]ScheduleEntry, 0, 9)
 	for i := 0; i < 9; i++ {
 		learned = append(learned, ScheduleEntry{
@@ -154,10 +154,10 @@ func TestBuildChainConfig_FillsAllSlotsAndTruncates(t *testing.T) {
 	}
 	cfg := BuildChainConfig(9001, learned)
 
-	// Oldest boundary (t=1000) was dropped; the earliest retained boundary is
-	// t=2000, so a query at t=2500 resolves the second-oldest learned entry.
-	if bp := GetBlobParams(cfg, 2500); bp.Target != 4 || bp.Max != 7 {
-		t.Errorf("earliest retained boundary = %d/%d, want 4/7", bp.Target, bp.Max)
+	// Boundaries t=1000 and t=2000 were dropped; the earliest retained boundary
+	// is t=3000, so a query at t=3500 resolves the third-oldest learned entry.
+	if bp := GetBlobParams(cfg, 3500); bp.Target != 5 || bp.Max != 8 {
+		t.Errorf("earliest retained boundary = %d/%d, want 5/8", bp.Target, bp.Max)
 	}
 	// Latest boundary (t=9000, target 11 / max 14) sits in the BPO5 slot.
 	if bp := GetBlobParams(cfg, 9500); bp.Target != 11 || bp.Max != 14 {
@@ -361,7 +361,6 @@ func TestForkName_AllBranches(t *testing.T) {
 		BlobScheduleConfig: &params.BlobScheduleConfig{
 			Cancun: bc,
 			Prague: bc,
-			Osaka:  bc,
 			BPO1:   bc,
 			BPO2:   bc,
 			BPO3:   bc,
@@ -420,7 +419,6 @@ func TestGetActiveBlobConfig_AllBranches(t *testing.T) {
 		BlobScheduleConfig: &params.BlobScheduleConfig{
 			Cancun: bc,
 			Prague: bc,
-			Osaka:  bc,
 			BPO1:   bc,
 			BPO2:   bc,
 			BPO3:   bc,
