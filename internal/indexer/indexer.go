@@ -205,22 +205,29 @@ type Indexer struct {
 	// are pruned; a field so tests can shrink it. Defaults to
 	// defaultFineRollupPruneInterval.
 	fineRollupPruneInterval time.Duration
-	ctx                     context.Context
-	cancel                  context.CancelFunc
-	wg                      sync.WaitGroup
-	lastIndexedBlock        uint64 // accessed with sync/atomic
-	indexerVersion          string
-	mu                      sync.Mutex // protects DB metadata writes
-	dbWriteMu               sync.Mutex // serializes same-network writes that fire summary rollup triggers
-	blockTaskCh             chan BlockTask
-	useWebsocket            bool
-	blockSub                *ethereum.BlockSubscription
-	pendingTxSub            *ethereum.PendingTxSubscription
-	mempoolPollingStarted   uint32
-	failedBlocks            map[uint64]int // block number -> cumulative failure count
-	failedBlockNextRetry    map[uint64]time.Time
-	failedBlocksMu          sync.Mutex
-	reorgDetected           uint32 // atomic flag: 1 = reorg detected, main loop should reset
+	// streakBackfillEnabled gates the startup /records streak backfill; a
+	// field so tests can turn it off. Defaults to true.
+	streakBackfillEnabled bool
+	// streakBackfillRetryBackoff scales the wait between chunk retries; a
+	// field so tests can shrink it. Defaults to
+	// defaultStreakBackfillRetryBackoff.
+	streakBackfillRetryBackoff time.Duration
+	ctx                        context.Context
+	cancel                     context.CancelFunc
+	wg                         sync.WaitGroup
+	lastIndexedBlock           uint64 // accessed with sync/atomic
+	indexerVersion             string
+	mu                         sync.Mutex // protects DB metadata writes
+	dbWriteMu                  sync.Mutex // serializes same-network writes that fire summary rollup triggers
+	blockTaskCh                chan BlockTask
+	useWebsocket               bool
+	blockSub                   *ethereum.BlockSubscription
+	pendingTxSub               *ethereum.PendingTxSubscription
+	mempoolPollingStarted      uint32
+	failedBlocks               map[uint64]int // block number -> cumulative failure count
+	failedBlockNextRetry       map[uint64]time.Time
+	failedBlocksMu             sync.Mutex
+	reorgDetected              uint32 // atomic flag: 1 = reorg detected, main loop should reset
 	// reorgRangeMu guards reorgRewindFrom/reorgInvalidatedThrough, which are
 	// only meaningful while reorgDetected == 1. Reorgs signaled before the main
 	// loop consumes the flag merge into the widest invalidated range.
@@ -273,31 +280,33 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 	useWebsocket := ethClient.IsWebsocket()
 
 	idx := &Indexer{
-		db:                        database,
-		ethClient:                 ethClient,
-		attribution:               attributionSvc,
-		config:                    cfg,
-		network:                   network,
-		batchSize:                 cfg.Indexer.BatchSize,
-		pollingInterval:           cfg.Indexer.PollingInterval,
-		mempoolPollingInterval:    cfg.Indexer.MempoolPollingInterval,
-		mempoolTTL:                cfg.Indexer.MempoolTTL,
-		mempoolCleanupInterval:    cfg.Indexer.MempoolCleanupInterval,
-		mempoolReconcileInterval:  defaultMempoolReconcileInterval,
-		workerCount:               workerCount,
-		maxBlockRetries:           cfg.Indexer.MaxBlockRetries,
-		gapScanInterval:           cfg.Indexer.GapScanInterval,
-		maxReorgDepth:             cfg.Indexer.MaxReorgDepth,
-		startupGapScanBlocks:      cfg.Indexer.StartupGapScanBlocks,
-		pendingTxResubBaseBackoff: pendingTxResubscribeBaseBackoff,
-		fineRollupPruneInterval:   defaultFineRollupPruneInterval,
-		ctx:                       indexerCtx,
-		cancel:                    cancel,
-		indexerVersion:            cfg.Indexer.Version,
-		blockTaskCh:               make(chan BlockTask, 1000), // Buffer for block tasks
-		useWebsocket:              useWebsocket,
-		failedBlocks:              make(map[uint64]int),
-		failedBlockNextRetry:      make(map[uint64]time.Time),
+		db:                         database,
+		ethClient:                  ethClient,
+		attribution:                attributionSvc,
+		config:                     cfg,
+		network:                    network,
+		batchSize:                  cfg.Indexer.BatchSize,
+		pollingInterval:            cfg.Indexer.PollingInterval,
+		mempoolPollingInterval:     cfg.Indexer.MempoolPollingInterval,
+		mempoolTTL:                 cfg.Indexer.MempoolTTL,
+		mempoolCleanupInterval:     cfg.Indexer.MempoolCleanupInterval,
+		mempoolReconcileInterval:   defaultMempoolReconcileInterval,
+		workerCount:                workerCount,
+		maxBlockRetries:            cfg.Indexer.MaxBlockRetries,
+		gapScanInterval:            cfg.Indexer.GapScanInterval,
+		maxReorgDepth:              cfg.Indexer.MaxReorgDepth,
+		startupGapScanBlocks:       cfg.Indexer.StartupGapScanBlocks,
+		pendingTxResubBaseBackoff:  pendingTxResubscribeBaseBackoff,
+		fineRollupPruneInterval:    defaultFineRollupPruneInterval,
+		streakBackfillEnabled:      true,
+		streakBackfillRetryBackoff: defaultStreakBackfillRetryBackoff,
+		ctx:                        indexerCtx,
+		cancel:                     cancel,
+		indexerVersion:             cfg.Indexer.Version,
+		blockTaskCh:                make(chan BlockTask, 1000), // Buffer for block tasks
+		useWebsocket:               useWebsocket,
+		failedBlocks:               make(map[uint64]int),
+		failedBlockNextRetry:       make(map[uint64]time.Time),
 	}
 	// Seed the chain config from the compiled baseline; refreshed with the
 	// node's learned eth_config schedule on startup and on the poll ticker.
@@ -541,6 +550,16 @@ func (i *Indexer) Start() error {
 		go func() {
 			defer i.wg.Done()
 			i.runFineRollupMaintenance()
+		}()
+	}
+
+	// Rebuild the /records streak leaderboards over history indexed before
+	// this process; new blocks are maintained by the block_metrics triggers.
+	if i.db != nil && i.streakBackfillEnabled {
+		i.wg.Add(1)
+		go func() {
+			defer i.wg.Done()
+			i.runStreakBackfill()
 		}()
 	}
 
