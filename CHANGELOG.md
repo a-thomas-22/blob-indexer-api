@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.14.0...blob-indexer-api-v0.15.0) (2026-08-03)
+
+
+### Features
+
+* **api:** add GET /api/v1/records historical leaderboards ([#316](https://github.com/a-thomas-22/blob-indexer-api/issues/316)) ([0370814](https://github.com/a-thomas-22/blob-indexer-api/commit/0370814aa8d60081782ece212ec410a3bba3add9))
+
+
+### Dependencies
+
+* bump github.com/ethereum/go-ethereum from 1.17.4 to 1.17.5 ([#309](https://github.com/a-thomas-22/blob-indexer-api/issues/309)) ([b288d3a](https://github.com/a-thomas-22/blob-indexer-api/commit/b288d3a27a7480c33471d1908113acfcabdd5508))
+
 ## [0.14.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.13.0...blob-indexer-api-v0.14.0) (2026-08-02)
 
 
