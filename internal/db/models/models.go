@@ -211,6 +211,11 @@ const (
 	// provably covers the range again.
 	MetadataReorgRewindFrom         = "reorg_rewind_from"
 	MetadataReorgInvalidatedThrough = "reorg_invalidated_through"
+	// MetadataStreakBackfillBlock is the highest block the /records streak
+	// backfill has rebuilt. It makes the backfill resumable across restarts:
+	// a fresh deploy walks all indexed history once and later starts pick up
+	// where the last run stopped.
+	MetadataStreakBackfillBlock = "records_streak_backfill_block"
 )
 
 // FormatMetadataTimestamp serializes metadata timestamps consistently.

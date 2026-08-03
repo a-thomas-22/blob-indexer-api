@@ -1243,4 +1243,79 @@ const (
 		ORDER BY name ASC
 		LIMIT $3
 	`
+
+	// queryRecordTopStreaks reads the longest maintained runs of one kind for
+	// /records. blob_block_streaks holds one row per maximal run (see
+	// migration 000013), and idx_blob_block_streaks_chain_kind_length is in
+	// this exact order, so the read is a top-N index scan with no sort.
+	queryRecordTopStreaks = `
+		SELECT start_block, end_block, length, start_timestamp, end_timestamp
+		FROM blob_block_streaks
+		WHERE chain_id = $1 AND kind = $2
+		ORDER BY length DESC, end_block DESC
+		LIMIT $3
+	`
+
+	// queryRecordCurrentStreak reads the run that ends at the network's last
+	// indexed block, or nothing when the tip block does not qualify. Runs are
+	// disjoint, so the run with the greatest start_block is also the one with
+	// the greatest end_block; comparing to the tip in the same statement makes
+	// "still running" a server-side check rather than two round trips.
+	//
+	// The tip is the highest block_metrics row, which the indexer can reach
+	// before its predecessor lands (blocks commit concurrently). During that
+	// window a run in progress can read as shorter than it is, or as absent;
+	// the next block's commit corrects it.
+	queryRecordCurrentStreak = `
+		SELECT s.start_block, s.end_block, s.length, s.start_timestamp, s.end_timestamp
+		FROM blob_block_streaks s
+		WHERE s.chain_id = $1
+			AND s.kind = $2
+			AND s.start_block = (
+				SELECT MAX(start_block) FROM blob_block_streaks
+				WHERE chain_id = $1 AND kind = $2
+			)
+			AND s.end_block = (
+				SELECT MAX(block_number) FROM block_metrics WHERE chain_id = $1
+			)
+	`
+
+	// queryRecordBaseFeePeaks reads the blocks with the highest blob base fee,
+	// one row per block. Served in order by
+	// idx_block_metrics_chain_blob_base_fee, which also INCLUDEs the projected
+	// columns, so this is an index-only top-N read.
+	queryRecordBaseFeePeaks = `
+		SELECT block_number, block_timestamp, blob_base_fee, blob_count
+		FROM block_metrics
+		WHERE chain_id = $1
+		ORDER BY blob_base_fee DESC, block_number DESC
+		LIMIT $2
+	`
+
+	// queryRecordBusiestHours ranks UTC hour buckets by blob count. The
+	// ranking comes from the trigger-maintained hourly block_metrics_rollups
+	// rows via idx_block_metrics_rollups_hourly_blob_count (a top-N index
+	// scan), and only those few buckets then pay a keyed lookup into
+	// blob_chart_rollups for the hour's blob cost. Buckets with no blobs are
+	// excluded so an empty leaderboard stays empty rather than listing
+	// arbitrary idle hours. Ties on blob count break by most recent bucket,
+	// keeping the response deterministic.
+	queryRecordBusiestHours = `
+		SELECT
+			r.bucket_start AS hour_start,
+			r.sum_blob_count AS blob_count,
+			COALESCE((
+				SELECT SUM(c.total_cost_wei)
+				FROM blob_chart_rollups c
+				WHERE c.chain_id = r.chain_id
+					AND c.bucket_seconds = 3600
+					AND c.bucket_start = r.bucket_start
+			), 0)::text AS total_cost_wei
+		FROM block_metrics_rollups r
+		WHERE r.chain_id = $1
+			AND r.bucket_seconds = 3600
+			AND r.sum_blob_count > 0
+		ORDER BY r.sum_blob_count DESC, r.bucket_start DESC
+		LIMIT $2
+	`
 )

@@ -205,22 +205,25 @@ type Indexer struct {
 	// are pruned; a field so tests can shrink it. Defaults to
 	// defaultFineRollupPruneInterval.
 	fineRollupPruneInterval time.Duration
-	ctx                     context.Context
-	cancel                  context.CancelFunc
-	wg                      sync.WaitGroup
-	lastIndexedBlock        uint64 // accessed with sync/atomic
-	indexerVersion          string
-	mu                      sync.Mutex // protects DB metadata writes
-	dbWriteMu               sync.Mutex // serializes same-network writes that fire summary rollup triggers
-	blockTaskCh             chan BlockTask
-	useWebsocket            bool
-	blockSub                *ethereum.BlockSubscription
-	pendingTxSub            *ethereum.PendingTxSubscription
-	mempoolPollingStarted   uint32
-	failedBlocks            map[uint64]int // block number -> cumulative failure count
-	failedBlockNextRetry    map[uint64]time.Time
-	failedBlocksMu          sync.Mutex
-	reorgDetected           uint32 // atomic flag: 1 = reorg detected, main loop should reset
+	// streakBackfillEnabled gates the startup /records streak backfill; a
+	// field so tests can turn it off. Defaults to true.
+	streakBackfillEnabled bool
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	wg                    sync.WaitGroup
+	lastIndexedBlock      uint64 // accessed with sync/atomic
+	indexerVersion        string
+	mu                    sync.Mutex // protects DB metadata writes
+	dbWriteMu             sync.Mutex // serializes same-network writes that fire summary rollup triggers
+	blockTaskCh           chan BlockTask
+	useWebsocket          bool
+	blockSub              *ethereum.BlockSubscription
+	pendingTxSub          *ethereum.PendingTxSubscription
+	mempoolPollingStarted uint32
+	failedBlocks          map[uint64]int // block number -> cumulative failure count
+	failedBlockNextRetry  map[uint64]time.Time
+	failedBlocksMu        sync.Mutex
+	reorgDetected         uint32 // atomic flag: 1 = reorg detected, main loop should reset
 	// reorgRangeMu guards reorgRewindFrom/reorgInvalidatedThrough, which are
 	// only meaningful while reorgDetected == 1. Reorgs signaled before the main
 	// loop consumes the flag merge into the widest invalidated range.
@@ -291,6 +294,7 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		startupGapScanBlocks:      cfg.Indexer.StartupGapScanBlocks,
 		pendingTxResubBaseBackoff: pendingTxResubscribeBaseBackoff,
 		fineRollupPruneInterval:   defaultFineRollupPruneInterval,
+		streakBackfillEnabled:     true,
 		ctx:                       indexerCtx,
 		cancel:                    cancel,
 		indexerVersion:            cfg.Indexer.Version,
@@ -541,6 +545,16 @@ func (i *Indexer) Start() error {
 		go func() {
 			defer i.wg.Done()
 			i.runFineRollupMaintenance()
+		}()
+	}
+
+	// Rebuild the /records streak leaderboards over history indexed before
+	// this process; new blocks are maintained by the block_metrics triggers.
+	if i.db != nil && i.streakBackfillEnabled {
+		i.wg.Add(1)
+		go func() {
+			defer i.wg.Done()
+			i.runStreakBackfill()
 		}()
 	}
 

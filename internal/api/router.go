@@ -43,6 +43,7 @@ type API struct {
 	latestBlobsCache  map[string]blobListCacheEntry
 	mempoolBlobsCache map[string]blobListCacheEntry
 	pricingCache      map[string]pricingCacheEntry
+	recordsCache      map[string]recordsCacheEntry
 	blobScheduleCache map[int]blobScheduleCacheEntry
 	hub               *Hub
 	poller            *Poller
@@ -181,6 +182,7 @@ func newAPI(ctx context.Context, db DBProvider, cfg *config.Config) *API {
 		latestBlobsCache:  make(map[string]blobListCacheEntry),
 		mempoolBlobsCache: make(map[string]blobListCacheEntry),
 		pricingCache:      make(map[string]pricingCacheEntry),
+		recordsCache:      make(map[string]recordsCacheEntry),
 		blobScheduleCache: make(map[int]blobScheduleCacheEntry),
 		hub:               hub,
 		poller:            poller,
@@ -209,6 +211,7 @@ func (a *API) invalidateBlockCaches(chainID int) {
 	chain := strconv.Itoa(chainID)
 	latestPrefix := "latest_blobs:" + chain + ":"
 	pricingPrefix := "pricing:" + chain + ":"
+	recordsPrefix := "records:" + chain + ":"
 
 	a.cacheMu.Lock()
 	defer a.cacheMu.Unlock()
@@ -220,6 +223,13 @@ func (a *API) invalidateBlockCaches(chainID int) {
 	for key := range a.pricingCache {
 		if strings.HasPrefix(key, pricingPrefix) {
 			delete(a.pricingCache, key)
+		}
+	}
+	// Records include the streak in progress at the tip, which can change on
+	// every block even though the historical leaderboards rarely do.
+	for key := range a.recordsCache {
+		if strings.HasPrefix(key, recordsPrefix) {
+			delete(a.recordsCache, key)
 		}
 	}
 	delete(a.statsCache, chainID)
@@ -356,6 +366,11 @@ func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) 
 			r.With(aggregateLimit).Get("/breakdown", a.GetUserBreakdown)
 			r.With(aggregateLimit).Get("/{address}", a.GetUserByAddress)
 		})
+
+		// Records endpoint: historical leaderboards. Every list is a top-N
+		// read over incrementally maintained summaries, but it is four of them
+		// per request, so it takes the aggregate rate limit.
+		r.With(aggregateLimit).Get("/records", a.GetBlobRecords)
 
 		// Stats endpoints
 		r.Route("/stats", func(r chi.Router) {
