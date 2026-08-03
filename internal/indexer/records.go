@@ -208,7 +208,16 @@ func (i *Indexer) claimStreakRebuild(fromBlock int64, fingerprint string, finger
 		})
 	}
 
+	// Indexer.mu serializes metadata writes, so hold it here too. The streak
+	// keys are written by nothing else and each write is an atomic upsert, so
+	// no lost update is actually reachable; taking the lock anyway keeps the
+	// one convention for this table rather than leaving a future reader to
+	// re-derive that these particular keys are unshared. Nothing here takes
+	// dbWriteMu, so this cannot invert the dbWriteMu-then-mu order handleReorg
+	// uses.
+	i.mu.Lock()
 	err := i.db.SetNetworkMetadataBatch(i.ctx, i.network.ChainID, entries)
+	i.mu.Unlock()
 	if err != nil && i.ctx.Err() == nil {
 		logger.Warn("Failed to claim streak rebuild; the next start will rebuild history again",
 			zap.String("network", i.network.Name),
@@ -244,8 +253,11 @@ func (i *Indexer) streakBackfillWatermark() (int64, bool) {
 // costs redundant work on the next start, so it is logged and the backfill
 // continues.
 func (i *Indexer) setStreakBackfillWatermark(block int64) {
+	// Under Indexer.mu for the same reason as claimStreakRebuild.
+	i.mu.Lock()
 	err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID,
 		models.MetadataStreakBackfillBlock, strconv.FormatInt(block, 10))
+	i.mu.Unlock()
 	if err != nil && i.ctx.Err() == nil {
 		logger.Warn("Failed to checkpoint streak backfill progress",
 			zap.String("network", i.network.Name),

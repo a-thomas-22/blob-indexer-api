@@ -350,6 +350,48 @@ func TestRunStreakBackfill_ChunkRetrySucceeds(t *testing.T) {
 	}
 }
 
+// The backfill's metadata writes take Indexer.mu, the mutex the rest of the
+// indexer uses for metadata. That is only safe because the backfill never
+// holds dbWriteMu across them: handleReorg takes dbWriteMu and then mu, so
+// acquiring them in the other order here would be a lock-ordering inversion.
+// This test would deadlock rather than fail if that ever regressed.
+func TestRunStreakBackfill_MetadataWritesTakeMetadataMutex(t *testing.T) {
+	idx, mock := newStreakTestIndexer(t)
+
+	expectBounds(mock, 100, 200)
+	expectFingerprintRead(mock)
+	expectStoredFingerprintRead(mock, nil)
+	expectDefinitionsClaimed(mock)
+	expectChunk(mock, idx.network.ChainID, 100, 200)
+
+	// Hold the metadata mutex; the backfill must block on its first write
+	// rather than sailing past it.
+	idx.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		idx.runStreakBackfill()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		idx.mu.Unlock()
+		t.Fatal("backfill wrote metadata without taking Indexer.mu")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	idx.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backfill did not finish after the metadata mutex was released")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestStreakBackfillMetadataKey(t *testing.T) {
 	if models.MetadataStreakBackfillBlock != "records_streak_backfill_block" {
 		t.Fatalf("streak backfill metadata key changed to %q, which would silently restart every backfill",
