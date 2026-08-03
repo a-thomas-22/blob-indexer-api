@@ -389,6 +389,184 @@ func TestStreakDefinitionFingerprint_Integration(t *testing.T) {
 	}
 }
 
+// Two writers mutating the same network concurrently must not corrupt the
+// summary. The recompute reads the current runs and then replaces them, so
+// without database-level serialization two overlapping transactions each widen
+// from a snapshot the other invalidates. The result is not a transient glitch:
+// it leaves overlapping runs, which breaks the disjointness the widening
+// depends on, and the table never heals because the left probe then picks the
+// wrong row and the delete can never reach the stale one.
+//
+// Serializing in the indexer process is not enough to prevent this, which is
+// the point of the test: a rolling deploy with two pods briefly live, or an
+// operator issuing an UPDATE by hand, is sufficient.
+func TestBlobBlockStreaks_ConcurrentWritersDoNotCorrupt(t *testing.T) {
+	db := newRecordsTestDB(t)
+
+	blocks := map[int64]int{}
+	for block := int64(1); block <= 10; block++ {
+		blocks[block] = 6
+	}
+	seedBlocks(t, db, blocks)
+	assertStreaks(t, db, "full", streakRun{StartBlock: 1, EndBlock: 10, Length: 10})
+
+	// Two independent connections, so neither can be serialized by sqlx.
+	first, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect first writer: %v", err)
+	}
+	defer first.Close()
+	second, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect second writer: %v", err)
+	}
+	defer second.Close()
+
+	tx, err := first.Begin()
+	if err != nil {
+		t.Fatalf("begin first writer: %v", err)
+	}
+	// The first writer takes block 5 out of the run and holds its transaction
+	// open, so its trigger's work is committed only later.
+	if _, err := tx.Exec(
+		"UPDATE block_metrics SET blob_count = 0 WHERE chain_id = $1 AND block_number = 5",
+		recordsTestChainID); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("first writer update: %v", err)
+	}
+
+	// The second writer takes out block 6 while the first is still open. Its
+	// trigger must block until the first commits rather than proceeding from a
+	// snapshot that still shows block 5 qualifying.
+	secondDone := make(chan error, 1)
+	go func() {
+		_, execErr := second.Exec(
+			"UPDATE block_metrics SET blob_count = 0 WHERE chain_id = $1 AND block_number = 6",
+			recordsTestChainID)
+		secondDone <- execErr
+	}()
+
+	// Give the second writer time to reach the lock, then let the first
+	// through. If the second had not blocked, it would already have written
+	// its (stale) view by now.
+	select {
+	case err := <-secondDone:
+		_ = tx.Rollback()
+		t.Fatalf("second writer completed while the first held its transaction open (err: %v); recomputes are not serialized", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit first writer: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second writer update: %v", err)
+	}
+
+	// Blocks 5 and 6 are both out, so the run splits cleanly in two.
+	assertStreaks(t, db, "full",
+		streakRun{StartBlock: 1, EndBlock: 4, Length: 4},
+		streakRun{StartBlock: 7, EndBlock: 10, Length: 4},
+	)
+	assertMatchesFromScratch(t, db, "full")
+}
+
+// The most-expensive-blocks index is partial on blob_count > 0. Without that,
+// a network with fewer blob-carrying blocks than the requested limit walks
+// every zero-blob block in its history looking for more: they sort last, so
+// they are never returned, but they are still read and discarded.
+func TestRecordsExpensiveBlocksSkipsEmptyBlocks(t *testing.T) {
+	db := newRecordsTestDB(t)
+
+	blocks := make(map[int64]int, 5000)
+	for block := int64(1); block <= 5000; block++ {
+		if block <= 3 {
+			blocks[block] = 6
+		} else {
+			blocks[block] = 0
+		}
+	}
+	seedBlocks(t, db, blocks)
+	if _, err := db.Exec("ANALYZE block_metrics"); err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+
+	var lines []string
+	err := db.Select(&lines, `EXPLAIN (ANALYZE) SELECT block_number, blob_count, blob_base_fee
+		FROM block_metrics WHERE chain_id = $1 AND blob_count > 0
+		ORDER BY (blob_base_fee * blob_count) DESC, block_number DESC LIMIT 10`,
+		recordsTestChainID)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	plan := strings.Join(lines, "\n")
+
+	if !strings.Contains(plan, "idx_block_metrics_chain_blob_spend") {
+		t.Fatalf("expected the spend index in plan:\n%s", plan)
+	}
+	// The whole point: the empty blocks must never be visited.
+	if strings.Contains(plan, "Rows Removed by Filter") {
+		t.Fatalf("empty blocks were scanned and discarded, so the read scales with history:\n%s", plan)
+	}
+}
+
+// Senders tied on spend, count, and last-seen must still rank deterministically.
+// blob_user_stats is keyed by (chain_id, from_address), so with no unique tail
+// on the ORDER BY the surviving order follows physical row layout: rewriting a
+// logically identical row can silently reorder the leaderboard and change who
+// falls outside the limit.
+func TestRecordsTopSpendersTieBreakIsStable(t *testing.T) {
+	db := newRecordsTestDB(t)
+
+	seen := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	for _, address := range []string{"0xbbb", "0xaaa"} {
+		if _, err := db.Exec(`
+			INSERT INTO blob_user_stats (chain_id, from_address, user_attribution, blob_count, total_cost_wei, last_timestamp)
+			VALUES ($1, $2, '', 10, 1000, $3)
+		`, recordsTestChainID, address, seen); err != nil {
+			t.Fatalf("seed spender %s: %v", address, err)
+		}
+	}
+
+	topSpender := func() string {
+		t.Helper()
+		var address string
+		err := db.Get(&address, `
+			SELECT s.from_address FROM blob_user_stats s
+			WHERE s.chain_id = $1 AND s.total_cost_wei > 0
+			ORDER BY s.total_cost_wei DESC, s.blob_count DESC, s.last_timestamp DESC, s.from_address ASC
+			LIMIT 1
+		`, recordsTestChainID)
+		if err != nil {
+			t.Fatalf("read top spender: %v", err)
+		}
+		return address
+	}
+
+	first := topSpender()
+	if first != "0xaaa" {
+		t.Fatalf("expected the address tie-break to pick 0xaaa, got %s", first)
+	}
+
+	// Rewrite the winning row so its physical position changes. The ranking
+	// must not move with it.
+	if _, err := db.Exec(
+		"DELETE FROM blob_user_stats WHERE chain_id = $1 AND from_address = '0xaaa'",
+		recordsTestChainID); err != nil {
+		t.Fatalf("delete spender: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO blob_user_stats (chain_id, from_address, user_attribution, blob_count, total_cost_wei, last_timestamp)
+		VALUES ($1, '0xaaa', '', 10, 1000, $2)
+	`, recordsTestChainID, seen); err != nil {
+		t.Fatalf("reinsert spender: %v", err)
+	}
+
+	if got := topSpender(); got != first {
+		t.Fatalf("tied leaderboard reordered after a row rewrite: was %s, now %s", first, got)
+	}
+}
+
 func TestIndexedBlockBounds_Integration(t *testing.T) {
 	db := newRecordsTestDB(t)
 	wrapped := &DB{DB: db}

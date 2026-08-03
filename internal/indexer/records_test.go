@@ -10,6 +10,9 @@ import (
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 )
 
+// testIndexerChainID is newTestIndexer's network.
+const testIndexerChainID = 42
+
 // testStreakFingerprint is what the canned catalog/version rows below
 // fingerprint to.
 const testStreakFingerprint = "v2:above_target,below_target,drought,full"
@@ -50,14 +53,19 @@ func expectMetadataRead(mock sqlmock.Sqlmock, value interface{}) {
 	query.WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(value))
 }
 
-// expectDefinitionsClaimed queues the two writes a rebuild makes before its
-// first chunk: reset the checkpoint, then record the definitions it is
-// rebuilding under.
+// expectDefinitionsClaimed queues the write a rebuild makes before its first
+// chunk. It must be ONE statement carrying both the checkpoint reset and the
+// definitions: split across two, a failed reset paired with a successful
+// fingerprint write would leave the next start trusting a stale-high watermark
+// and never rebuilding the history below it.
 func expectDefinitionsClaimed(mock sqlmock.Sqlmock) {
 	mock.ExpectExec("INSERT INTO indexer_metadata").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO indexer_metadata").
-		WillReturnResult(sqlmock.NewResult(0, 1))
+		WithArgs(
+			testIndexerChainID,
+			models.MetadataStreakBackfillBlock, sqlmock.AnyArg(),
+			models.MetadataStreakBackfillKinds, sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(0, 2))
 }
 
 func expectChunk(mock sqlmock.Sqlmock, chainID int, from, to int64) {
@@ -267,9 +275,28 @@ func TestRunStreakBackfill_FingerprintReadFailureRebuilds(t *testing.T) {
 	expectBounds(mock, 100, 200)
 	mock.ExpectQuery("SELECT\\s+COALESCE").
 		WillReturnError(errors.New("catalog probe failed"))
-	// The checkpoint is reset, but no fingerprint is recorded: the next start
-	// must try to read the definitions again rather than trust an empty one.
 	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectChunk(mock, idx.network.ChainID, 100, 200)
+
+	idx.runStreakBackfill()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// When the definitions could not be read, the checkpoint is still reset so
+// this run rebuilds, but no fingerprint is claimed: recording an empty one
+// would match the next failed read and wrongly suppress the rebuild.
+func TestRunStreakBackfill_UnreadableDefinitionsClaimNoFingerprint(t *testing.T) {
+	idx, mock := newStreakTestIndexer(t)
+
+	expectBounds(mock, 100, 200)
+	mock.ExpectQuery("SELECT\\s+COALESCE").
+		WillReturnError(errors.New("catalog probe failed"))
+	mock.ExpectExec("INSERT INTO indexer_metadata").
+		WithArgs(testIndexerChainID, models.MetadataStreakBackfillBlock, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	expectChunk(mock, idx.network.ChainID, 100, 200)
 

@@ -137,6 +137,22 @@ DECLARE
     v_to BIGINT := GREATEST(p_from_block, p_to_block);
     v_edge RECORD;
 BEGIN
+    -- Step 0: serialize recomputes for this network.
+    --
+    -- Steps 1 to 3 read the current runs and then replace them, so two
+    -- concurrent recomputes can each widen from a snapshot the other is about
+    -- to invalidate. That corrupts the table permanently rather than
+    -- transiently: the result is overlapping runs, which breaks the
+    -- disjointness the widening relies on, and from then on the left probe
+    -- picks the wrong row and the step-2 delete can never remove the stale
+    -- one. Serializing in the application is not enough, because that only
+    -- covers a single indexer process; a rolling deploy with two pods briefly
+    -- live, or an operator running an UPDATE by hand, is sufficient to break
+    -- it. The lock is per network so unrelated chains never contend, and it
+    -- is transaction-scoped so it is released on commit or rollback with no
+    -- cleanup path to get wrong.
+    PERFORM pg_advisory_xact_lock(8442, p_chain_id);
+
     -- Step 1: widen to whole runs.
     SELECT start_block, end_block INTO v_edge
     FROM blob_block_streaks

@@ -8,6 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/db"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
 )
@@ -66,15 +67,10 @@ func (i *Indexer) runStreakBackfill() {
 		logger.Info("Rebuilding blob block streaks from the earliest indexed block",
 			zap.String("network", i.network.Name),
 			zap.String("definitions", fingerprint))
-		// Claim the new definitions before the first chunk lands. A crash
-		// mid-backfill then resumes from the chunk checkpoint under the same
-		// definitions rather than restarting the whole walk; a crash before
-		// any chunk leaves no checkpoint, which reads as "start from the
-		// beginning" anyway.
-		i.setStreakBackfillWatermark(bounds.Min)
-		if fingerprintOK {
-			i.setStreakDefinitionFingerprint(fingerprint)
-		}
+		// Claim the new definitions before the first chunk lands, so a crash
+		// mid-backfill resumes from the chunk checkpoint under the same
+		// definitions rather than restarting the whole walk.
+		i.claimStreakRebuild(bounds.Min, fingerprint, fingerprintOK)
 	} else if resume, ok := i.streakBackfillWatermark(); ok && resume >= bounds.Min {
 		// Resume at the checkpointed block rather than past it: redoing one
 		// block is free (the recompute is idempotent) and it keeps the run
@@ -184,11 +180,37 @@ func (i *Indexer) storedStreakFingerprint() string {
 	return value
 }
 
-func (i *Indexer) setStreakDefinitionFingerprint(fingerprint string) {
-	err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID,
-		models.MetadataStreakBackfillKinds, fingerprint)
+// claimStreakRebuild resets the checkpoint to the start of history and records
+// the definitions being rebuilt under, in one statement.
+//
+// The atomicity matters. Written separately, a failed checkpoint reset paired
+// with a successful fingerprint write leaves the stored fingerprint current
+// and the watermark stale-high; the next start then sees definitions it thinks
+// it has already applied and resumes near the tip, so every block below the
+// old watermark keeps the previous definitions forever. Batched, either both
+// land or neither does, and "neither" simply repeats the rebuild next start.
+//
+// A failure here is therefore not fatal: this run still rebuilds from the
+// earliest block, and because the fingerprint was not claimed, the next start
+// rebuilds again rather than trusting a checkpoint it did not write.
+func (i *Indexer) claimStreakRebuild(fromBlock int64, fingerprint string, fingerprintOK bool) {
+	entries := []db.MetadataKV{{
+		Key:   models.MetadataStreakBackfillBlock,
+		Value: strconv.FormatInt(fromBlock, 10),
+	}}
+	// Only claim definitions that were actually read. Recording an empty
+	// fingerprint would match the next failed read and wrongly suppress a
+	// rebuild.
+	if fingerprintOK {
+		entries = append(entries, db.MetadataKV{
+			Key:   models.MetadataStreakBackfillKinds,
+			Value: fingerprint,
+		})
+	}
+
+	err := i.db.SetNetworkMetadataBatch(i.ctx, i.network.ChainID, entries)
 	if err != nil && i.ctx.Err() == nil {
-		logger.Warn("Failed to record streak definitions; the next start will rebuild history again",
+		logger.Warn("Failed to claim streak rebuild; the next start will rebuild history again",
 			zap.String("network", i.network.Name),
 			zap.Error(err))
 	}

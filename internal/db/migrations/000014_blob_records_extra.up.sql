@@ -66,6 +66,10 @@ DECLARE
     v_to BIGINT := GREATEST(p_from_block, p_to_block);
     v_edge RECORD;
 BEGIN
+    -- Step 0: serialize recomputes for this network. See 000013 for why an
+    -- application-level lock is not sufficient.
+    PERFORM pg_advisory_xact_lock(8442, p_chain_id);
+
     -- Step 1: widen to whole runs.
     SELECT start_block, end_block INTO v_edge
     FROM blob_block_streaks
@@ -159,10 +163,20 @@ $$ LANGUAGE plpgsql;
 -- idx_block_metrics_chain_blob_base_fee; this is a different ranking, since a
 -- full block at a moderate fee can outspend a near-empty block at a peak fee.
 --
+-- The index is partial on blob_count > 0, matching the read's filter. Without
+-- that, a network whose blob-carrying blocks number fewer than the requested
+-- limit walks every remaining zero-blob block looking for more: the product
+-- sorts empty blocks last, so they are never returned, but they are still
+-- scanned and discarded. Measured at 200k zero-blob blocks that is 20ms and
+-- growing linearly, and it degrades exactly where it is least affordable, on
+-- new or quiet networks. Restricting the index to qualifying rows means the
+-- scan simply ends.
+--
 -- Locking: same CREATE INDEX caveat as 000013. block_metrics is one row per
 -- block, so the build is seconds at the current scale; pre-run it with
 -- CREATE INDEX CONCURRENTLY IF NOT EXISTS under the same name and definition
 -- if the table has grown, and this migration then no-ops.
 CREATE INDEX IF NOT EXISTS idx_block_metrics_chain_blob_spend
     ON block_metrics(chain_id, ((blob_base_fee * blob_count)) DESC, block_number DESC)
-    INCLUDE (block_timestamp, blob_count, blob_base_fee);
+    INCLUDE (block_timestamp, blob_count, blob_base_fee)
+    WHERE blob_count > 0;

@@ -1401,6 +1401,12 @@ const (
 	// idx_blob_user_stats_chain_spend. Attribution falls back to the known
 	// blob_users name exactly as queryTopBlobUsersAllBase does, so a sender
 	// carries the same label on both endpoints.
+	//
+	// from_address is the final sort key because the three preceding ones can
+	// all tie, and blob_user_stats is keyed by (chain_id, from_address): with
+	// no unique tail the row order among tied senders follows physical layout,
+	// so an unrelated write that moves a row can silently reorder the
+	// leaderboard and change who falls outside the limit.
 	queryRecordTopSpenders = `
 		SELECT
 			s.from_address,
@@ -1412,7 +1418,7 @@ const (
 			ON bu.chain_id = s.chain_id
 			AND LOWER(bu.address) = LOWER(s.from_address)
 		WHERE s.chain_id = $1 AND s.total_cost_wei > 0
-		ORDER BY s.total_cost_wei DESC, s.blob_count DESC, s.last_timestamp DESC
+		ORDER BY s.total_cost_wei DESC, s.blob_count DESC, s.last_timestamp DESC, s.from_address ASC
 		LIMIT $2
 	`
 )
