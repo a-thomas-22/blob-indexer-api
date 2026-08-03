@@ -74,7 +74,7 @@ RETURNS INTEGER AS $$
     END;
 $$ LANGUAGE sql IMMUTABLE;
 
--- blob_record_streak_kinds is the catalogue of maintained predicates. The
+-- blob_record_streak_kinds is the catalog of maintained predicates. The
 -- maintenance triggers loop over it, so adding a kind here plus a branch in
 -- blob_block_streaks_recompute is all a new streak leaderboard needs.
 CREATE OR REPLACE FUNCTION blob_record_streak_kinds()

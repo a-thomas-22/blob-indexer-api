@@ -14,17 +14,26 @@ import (
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
 
-// recordsMockDB answers the four /records reads from canned rows, recording
-// the limit each one was issued with.
+// recordsListCount is how many limit-sized top lists one /records response
+// contains: four streak leaderboards plus base fee peaks, expensive blocks,
+// busiest hours, busiest days, utilization days, and top spenders.
+const recordsListCount = 10
+
+// recordsMockDB answers the /records reads from canned rows, recording the
+// limit each one was issued with.
 type recordsMockDB struct {
 	mockDB
-	topStreaks   map[string][]recordStreakRow
-	currentRuns  map[string]*recordStreakRow
-	peaks        []recordBaseFeePeakRow
-	hours        []recordBusiestHourRow
-	selectLimits []int
-	selectErr    error
-	getErr       error
+	topStreaks      map[string][]recordStreakRow
+	currentRuns     map[string]*recordStreakRow
+	peaks           []recordBaseFeePeakRow
+	expensiveBlocks []recordExpensiveBlockRow
+	hours           []recordBucketRow
+	days            []recordBucketRow
+	utilizationDays []recordUtilizationDayRow
+	spenders        []recordTopSpenderRow
+	selectLimits    []int
+	selectErr       error
+	getErr          error
 }
 
 func newRecordsMockDB() *recordsMockDB {
@@ -49,13 +58,27 @@ func (m *recordsMockDB) handleSelect(_ context.Context, dest interface{}, query 
 	case *[]recordBaseFeePeakRow:
 		m.selectLimits = append(m.selectLimits, args[1].(int))
 		*typed = m.peaks
-	case *[]recordBusiestHourRow:
+	case *[]recordExpensiveBlockRow:
 		m.selectLimits = append(m.selectLimits, args[1].(int))
-		*typed = m.hours
+		*typed = m.expensiveBlocks
+	case *[]recordBucketRow:
+		// The hourly and daily rankings share a row type, so they are told
+		// apart by the bucket size baked into the query text.
+		m.selectLimits = append(m.selectLimits, args[1].(int))
+		if strings.Contains(query, "86400") {
+			*typed = m.days
+		} else {
+			*typed = m.hours
+		}
+	case *[]recordUtilizationDayRow:
+		m.selectLimits = append(m.selectLimits, args[1].(int))
+		*typed = m.utilizationDays
+	case *[]recordTopSpenderRow:
+		m.selectLimits = append(m.selectLimits, args[1].(int))
+		*typed = m.spenders
 	default:
 		return errors.New("unexpected select destination")
 	}
-	_ = query
 	return nil
 }
 
@@ -100,6 +123,12 @@ func seedRecordsMock(m *recordsMockDB) {
 	m.topStreaks[streakKindAboveTarget] = []recordStreakRow{
 		{StartBlock: 21000000, EndBlock: 21000099, Length: 100, StartTimestamp: start, EndTimestamp: start.Add(1200 * time.Second)},
 	}
+	m.topStreaks[streakKindDrought] = []recordStreakRow{
+		{StartBlock: 20000000, EndBlock: 20000031, Length: 32, StartTimestamp: start, EndTimestamp: start.Add(384 * time.Second)},
+	}
+	m.topStreaks[streakKindBelowTarget] = []recordStreakRow{
+		{StartBlock: 20500000, EndBlock: 20500199, Length: 200, StartTimestamp: start, EndTimestamp: start.Add(2400 * time.Second)},
+	}
 	m.currentRuns[streakKindAboveTarget] = &recordStreakRow{
 		StartBlock: 22900000, EndBlock: 22900003, Length: 4,
 		StartTimestamp: start, EndTimestamp: start.Add(36 * time.Second),
@@ -107,8 +136,21 @@ func seedRecordsMock(m *recordsMockDB) {
 	m.peaks = []recordBaseFeePeakRow{
 		{BlockNumber: 19426587, BlockTimestamp: start, BlobBaseFee: "496587109376", BlobCount: 6},
 	}
-	m.hours = []recordBusiestHourRow{
-		{HourStart: start.Truncate(time.Hour), BlobCount: 4211, TotalCostWei: "18446744073709551616"},
+	m.expensiveBlocks = []recordExpensiveBlockRow{
+		{BlockNumber: 19426580, BlockTimestamp: start, BlobCount: 6, BlobBaseFee: "400000000000", TotalCostWei: "314572800000000000"},
+	}
+	m.hours = []recordBucketRow{
+		{BucketStart: start.Truncate(time.Hour), BlobCount: 4211, TotalCostWei: "18446744073709551616"},
+	}
+	m.days = []recordBucketRow{
+		{BucketStart: start.Truncate(24 * time.Hour), BlobCount: 98431, TotalCostWei: "28446744073709551616"},
+	}
+	m.utilizationDays = []recordUtilizationDayRow{
+		{DayStart: start.Truncate(24 * time.Hour), BlockCount: 7150, BlobCount: 39204,
+			AverageUtilizationPercent: 87.42, BlocksAtMax: 1204, BlocksAboveTarget: 5310},
+	}
+	m.spenders = []recordTopSpenderRow{
+		{FromAddress: validTestAddress, UserAttribution: "Arbitrum", BlobCount: 1284102, TotalCostWei: "18446744073709551616"},
 	}
 }
 
@@ -242,7 +284,7 @@ func TestGetBlobRecords_TimestampsAreUTC(t *testing.T) {
 	shifted := time.Date(2026, 6, 1, 21, 0, 0, 0, tokyo)
 	db.topStreaks[streakKindFull][0].StartTimestamp = shifted
 	db.peaks[0].BlockTimestamp = shifted
-	db.hours[0].HourStart = shifted
+	db.hours[0].BucketStart = shifted
 
 	a := newTestAPIWithDB(db)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/records", http.NoBody)
@@ -282,10 +324,9 @@ func TestGetBlobRecords_LimitHandling(t *testing.T) {
 			if w.Code != http.StatusOK {
 				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 			}
-			// Every top list is sized by the same limit: two streak reads, the
-			// peaks read, and the hours read.
-			if len(db.selectLimits) != 4 {
-				t.Fatalf("expected 4 limited reads, got %d", len(db.selectLimits))
+			// Every top list is sized by the same limit.
+			if len(db.selectLimits) != recordsListCount {
+				t.Fatalf("expected %d limited reads, got %d", recordsListCount, len(db.selectLimits))
 			}
 			for _, got := range db.selectLimits {
 				if got != tc.want {
@@ -422,8 +463,8 @@ func TestGetBlobRecords_CacheIsPerLimit(t *testing.T) {
 		w := httptest.NewRecorder()
 		a.GetBlobRecords(w, req)
 	}
-	if len(db.selectLimits) != 8 {
-		t.Fatalf("expected 8 reads across two distinct limits, got %v", db.selectLimits)
+	if len(db.selectLimits) != recordsListCount*2 {
+		t.Fatalf("expected %d reads across two distinct limits, got %v", recordsListCount*2, db.selectLimits)
 	}
 }
 

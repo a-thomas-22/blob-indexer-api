@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"strconv"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -17,6 +18,15 @@ import (
 // keeping statements short matters because the backfill holds the network write
 // lock for each one.
 const streakBackfillChunkBlocks int64 = 50000
+
+// streakBackfillChunkAttempts is how many times one chunk is tried before the
+// backfill gives up, and defaultStreakBackfillRetryBackoff scales the wait
+// between attempts. A chunk is one idempotent statement, so retrying it is
+// always safe.
+const (
+	streakBackfillChunkAttempts       = 3
+	defaultStreakBackfillRetryBackoff = 2 * time.Second
+)
 
 // runStreakBackfill rebuilds the /records streak leaderboards across all
 // indexed history that predates this process, then returns. New blocks are
@@ -44,8 +54,28 @@ func (i *Indexer) runStreakBackfill() {
 		return
 	}
 
+	// A checkpoint records how far a backfill got, never which definitions it
+	// got there with. Pair it with the database's current streak fingerprint
+	// so that adding a kind or changing a predicate rebuilds history instead
+	// of applying only to blocks indexed from then on.
+	fingerprint, fingerprintOK := i.streakDefinitionFingerprint()
+	definitionsChanged := !fingerprintOK || fingerprint != i.storedStreakFingerprint()
+
 	from := bounds.Min
-	if resume, ok := i.streakBackfillWatermark(); ok && resume >= bounds.Min {
+	if definitionsChanged {
+		logger.Info("Rebuilding blob block streaks from the earliest indexed block",
+			zap.String("network", i.network.Name),
+			zap.String("definitions", fingerprint))
+		// Claim the new definitions before the first chunk lands. A crash
+		// mid-backfill then resumes from the chunk checkpoint under the same
+		// definitions rather than restarting the whole walk; a crash before
+		// any chunk leaves no checkpoint, which reads as "start from the
+		// beginning" anyway.
+		i.setStreakBackfillWatermark(bounds.Min)
+		if fingerprintOK {
+			i.setStreakDefinitionFingerprint(fingerprint)
+		}
+	} else if resume, ok := i.streakBackfillWatermark(); ok && resume >= bounds.Min {
 		// Resume at the checkpointed block rather than past it: redoing one
 		// block is free (the recompute is idempotent) and it keeps the run
 		// straddling the checkpoint from depending on the previous run's
@@ -67,14 +97,16 @@ func (i *Indexer) runStreakBackfill() {
 			chunkEnd = bounds.Max
 		}
 
-		unlockWrites := i.lockDBWrites()
-		err := i.db.BackfillBlobBlockStreaksChunk(i.ctx, i.network.ChainID, chunkStart, chunkEnd)
-		unlockWrites()
-		if err != nil {
+		if err := i.backfillStreakChunk(chunkStart, chunkEnd); err != nil {
 			if i.ctx.Err() == nil {
-				logger.Error("Blob block streak backfill aborted",
+				// Giving up leaves /records serving the records found so far,
+				// which for an unfinished first backfill understates the
+				// all-time maxima. The checkpoint means the next start
+				// resumes rather than rewalks.
+				logger.Error("Blob block streak backfill aborted; records stay partial until the next start",
 					zap.String("network", i.network.Name),
 					zap.Int64("chunk_start", chunkStart),
+					zap.Int64("through_block", chunkStart-1),
 					zap.Error(err))
 			}
 			return
@@ -92,6 +124,74 @@ func (i *Indexer) runStreakBackfill() {
 	logger.Info("Blob block streak backfill complete",
 		zap.String("network", i.network.Name),
 		zap.Int64("through_block", bounds.Max))
+}
+
+// backfillStreakChunk rebuilds one chunk, retrying a failure a few times
+// before giving up. A chunk is a single idempotent statement, so a transient
+// database error (a failover, a statement timeout under load) should not cost
+// the whole backfill and leave /records reporting partial all-time records
+// until the process happens to restart.
+func (i *Indexer) backfillStreakChunk(chunkStart, chunkEnd int64) error {
+	var err error
+	for attempt := 1; attempt <= streakBackfillChunkAttempts; attempt++ {
+		unlockWrites := i.lockDBWrites()
+		err = i.db.BackfillBlobBlockStreaksChunk(i.ctx, i.network.ChainID, chunkStart, chunkEnd)
+		unlockWrites()
+		if err == nil || i.ctx.Err() != nil {
+			return err
+		}
+
+		if attempt < streakBackfillChunkAttempts {
+			logger.Warn("Retrying blob block streak backfill chunk",
+				zap.String("network", i.network.Name),
+				zap.Int64("chunk_start", chunkStart),
+				zap.Int("attempt", attempt),
+				zap.Error(err))
+			select {
+			case <-i.ctx.Done():
+				return err
+			case <-time.After(time.Duration(attempt) * i.streakBackfillRetryBackoff):
+			}
+		}
+	}
+	return err
+}
+
+// streakDefinitionFingerprint reads the database's current streak definitions.
+// The bool is false when the read fails, which callers treat as "assume they
+// changed": a redundant rebuild is cheap, a skipped one leaves history wrong.
+func (i *Indexer) streakDefinitionFingerprint() (string, bool) {
+	fingerprint, err := i.db.StreakDefinitionFingerprint(i.ctx)
+	if err != nil {
+		if i.ctx.Err() == nil {
+			logger.Warn("Failed to read streak definitions; rebuilding history to be safe",
+				zap.String("network", i.network.Name),
+				zap.Error(err))
+		}
+		return "", false
+	}
+	return fingerprint, true
+}
+
+// storedStreakFingerprint reads the definitions the last backfill ran under.
+// An absent value means the checkpoint predates fingerprinting, which must
+// force a rebuild.
+func (i *Indexer) storedStreakFingerprint() string {
+	value, err := i.db.GetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataStreakBackfillKinds)
+	if err != nil {
+		return ""
+	}
+	return value
+}
+
+func (i *Indexer) setStreakDefinitionFingerprint(fingerprint string) {
+	err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID,
+		models.MetadataStreakBackfillKinds, fingerprint)
+	if err != nil && i.ctx.Err() == nil {
+		logger.Warn("Failed to record streak definitions; the next start will rebuild history again",
+			zap.String("network", i.network.Name),
+			zap.Error(err))
+	}
 }
 
 // streakBackfillWatermark reads the highest block a previous backfill run

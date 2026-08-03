@@ -216,6 +216,14 @@ const (
 	// a fresh deploy walks all indexed history once and later starts pick up
 	// where the last run stopped.
 	MetadataStreakBackfillBlock = "records_streak_backfill_block"
+	// MetadataStreakBackfillKinds fingerprints the streak definitions the
+	// checkpoint above was produced with. A watermark alone would silently
+	// apply a changed or newly added predicate to new blocks only, because a
+	// network that finished its backfill never revisits history. Storing what
+	// was built alongside how far makes a definition change reset the
+	// checkpoint automatically instead of needing a hand-written DELETE in
+	// whichever migration introduced it.
+	MetadataStreakBackfillKinds = "records_streak_backfill_kinds"
 )
 
 // FormatMetadataTimestamp serializes metadata timestamps consistently.

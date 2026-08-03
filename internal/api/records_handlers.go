@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -16,10 +17,13 @@ import (
 )
 
 // Streak kinds stored in blob_block_streaks. These are part of the schema
-// contract with migration 000013, not free-form strings.
+// contract with migrations 000013 and 000014, not free-form strings: the
+// table's CHECK constraint and blob_record_streak_kinds() list the same set.
 const (
 	streakKindFull        = "full"
 	streakKindAboveTarget = "above_target"
+	streakKindDrought     = "drought"
+	streakKindBelowTarget = "below_target"
 )
 
 // DefaultRecordsLimit is the size of each /records top list when no limit is
@@ -79,6 +83,63 @@ type RecordBusiestHourResponse struct {
 	TotalCostWei string `json:"total_cost_wei" example:"18446744073709551616"`
 }
 
+// RecordBusiestDayResponse is one UTC day bucket among those carrying the most
+// blobs.
+type RecordBusiestDayResponse struct {
+	// DayStart is the start of the UTC day bucket.
+	DayStart  time.Time `json:"day_start"`
+	BlobCount int64     `json:"blob_count" example:"98431"`
+	// TotalCostWei is the summed realized blob cost over the day, in wei, as a
+	// decimal integer string.
+	TotalCostWei string `json:"total_cost_wei" example:"18446744073709551616"`
+}
+
+// RecordUtilizationDayResponse is one UTC day bucket among those with the
+// highest mean blob utilization.
+type RecordUtilizationDayResponse struct {
+	DayStart time.Time `json:"day_start"`
+	// AverageUtilizationPercent is the mean per-block blob utilization over
+	// the day. It comes from the day's utilization sum divided by its block
+	// count, so it is a true mean rather than an average of averages.
+	AverageUtilizationPercent float64 `json:"average_utilization_percent" example:"87.42"`
+	BlockCount                int64   `json:"block_count" example:"7150"`
+	BlobCount                 int64   `json:"blob_count" example:"39204"`
+	// BlocksAtMax and BlocksAboveTarget count the day's full and above-target
+	// blocks. These are the rollup's own counters, which classify a block by
+	// blob gas rather than blob count; the two agree whenever blob gas used is
+	// the blob count times 131072, which is every well-formed block.
+	BlocksAtMax       int64 `json:"blocks_at_max" example:"1204"`
+	BlocksAboveTarget int64 `json:"blocks_above_target" example:"5310"`
+}
+
+// RecordExpensiveBlockResponse is one block among those that burned the most
+// on blob fees.
+type RecordExpensiveBlockResponse struct {
+	BlockNumber int64     `json:"block_number" example:"19426587"`
+	Timestamp   time.Time `json:"timestamp"`
+	BlobCount   int       `json:"blob_count" example:"6"`
+	// BlobBaseFee is the block's blob base fee in wei as a decimal integer
+	// string; BlobBaseFeeGwei is the same value in gwei.
+	BlobBaseFee     string `json:"blob_base_fee" example:"496587109376"`
+	BlobBaseFeeGwei string `json:"blob_base_fee_gwei" example:"496.587109376"`
+	// TotalCostWei is the block's total blob spend in wei as a decimal integer
+	// string: blob base fee times blob count times 131072 gas per blob.
+	TotalCostWei string `json:"total_cost_wei" example:"390497402831634432"`
+}
+
+// RecordTopSpenderResponse is one sender among the largest all-history blob
+// spenders. These are the same maintained totals /users?sort=spend serves.
+type RecordTopSpenderResponse struct {
+	Address string `json:"address" example:"0xc1b634853cb333d3ad8663715b08f41a3aec47cc"`
+	// UserAttribution is the known rollup name for the sender, omitted when
+	// the address is unattributed.
+	UserAttribution string `json:"user_attribution,omitempty" example:"Arbitrum"`
+	BlobCount       int64  `json:"blob_count" example:"1284102"`
+	// TotalCostWei is the sender's all-history blob spend in wei as a decimal
+	// integer string.
+	TotalCostWei string `json:"total_cost_wei" example:"18446744073709551616"`
+}
+
 // RecordsResponse is the /records payload: historical leaderboards over a
 // network's whole indexed history.
 type RecordsResponse struct {
@@ -90,9 +151,20 @@ type RecordsResponse struct {
 	FullBlockStreaks RecordStreaksResponse `json:"full_block_streaks"`
 	// AboveTargetStreaks ranks runs of blocks that used more than their blob
 	// target, the same predicate as is_above_target on /blob/pricing.
-	AboveTargetStreaks RecordStreaksResponse       `json:"above_target_streaks"`
-	BaseFeePeaks       []RecordBaseFeePeakResponse `json:"base_fee_peaks"`
-	BusiestHours       []RecordBusiestHourResponse `json:"busiest_hours"`
+	AboveTargetStreaks RecordStreaksResponse `json:"above_target_streaks"`
+	// DroughtStreaks ranks runs of consecutive indexed blocks that carried no
+	// blobs at all. Unlike the other streaks this one needs no fork schedule,
+	// so it classifies every indexed block.
+	DroughtStreaks RecordStreaksResponse `json:"drought_streaks"`
+	// BelowTargetStreaks ranks runs of blocks strictly under their blob
+	// target: the calm-market counterpart to AboveTargetStreaks.
+	BelowTargetStreaks     RecordStreaksResponse          `json:"below_target_streaks"`
+	BaseFeePeaks           []RecordBaseFeePeakResponse    `json:"base_fee_peaks"`
+	MostExpensiveBlocks    []RecordExpensiveBlockResponse `json:"most_expensive_blocks"`
+	BusiestHours           []RecordBusiestHourResponse    `json:"busiest_hours"`
+	BusiestDays            []RecordBusiestDayResponse     `json:"busiest_days"`
+	HighestUtilizationDays []RecordUtilizationDayResponse `json:"highest_utilization_days"`
+	TopSpenders            []RecordTopSpenderResponse     `json:"top_spenders"`
 }
 
 type recordsCacheEntry struct {
@@ -115,15 +187,41 @@ type recordBaseFeePeakRow struct {
 	BlobCount      int       `db:"blob_count"`
 }
 
-type recordBusiestHourRow struct {
-	HourStart    time.Time `db:"hour_start"`
+// recordBucketRow is one ranked rollup bucket. The hourly and daily busiest
+// queries project the same columns, so they share a row type.
+type recordBucketRow struct {
+	BucketStart  time.Time `db:"bucket_start"`
 	BlobCount    int64     `db:"blob_count"`
 	TotalCostWei string    `db:"total_cost_wei"`
 }
 
+type recordUtilizationDayRow struct {
+	DayStart                  time.Time `db:"day_start"`
+	BlockCount                int64     `db:"block_count"`
+	BlobCount                 int64     `db:"blob_count"`
+	AverageUtilizationPercent float64   `db:"average_utilization_percent"`
+	BlocksAtMax               int64     `db:"blocks_at_max"`
+	BlocksAboveTarget         int64     `db:"blocks_above_target"`
+}
+
+type recordExpensiveBlockRow struct {
+	BlockNumber    int64     `db:"block_number"`
+	BlockTimestamp time.Time `db:"block_timestamp"`
+	BlobCount      int       `db:"blob_count"`
+	BlobBaseFee    string    `db:"blob_base_fee"`
+	TotalCostWei   string    `db:"total_cost_wei"`
+}
+
+type recordTopSpenderRow struct {
+	FromAddress     string `db:"from_address"`
+	UserAttribution string `db:"user_attribution"`
+	BlobCount       int64  `db:"blob_count"`
+	TotalCostWei    string `db:"total_cost_wei"`
+}
+
 // GetBlobRecords godoc
 // @Summary Get historical blob records
-// @Description Retrieve all-time leaderboards for a network: longest runs of full and above-target blocks (with the run in progress, if any), the highest blob base fees, and the busiest UTC hours. Streak runs are maintained incrementally at index time, so the response cost does not grow with indexed history. A run is broken by any block that fails the predicate and by any gap in indexed history, including blocks removed by a reorg.
+// @Description Retrieve all-time leaderboards for a network: longest runs of full, above-target, below-target, and zero-blob (drought) blocks, each with the run in progress if there is one; the highest blob base fees; the blocks that spent the most on blob fees; the busiest UTC hours and days; the days with the highest mean blob utilization; and the largest all-time blob spenders. Every list is a top-N read over incrementally maintained summaries, so the response cost does not grow with indexed history. A streak run is broken by any block that fails the predicate and by any gap in indexed history, including blocks removed by a reorg.
 // @Tags records
 // @Accept json
 // @Produce json
@@ -200,11 +298,17 @@ func (a *API) GetBlobRecords(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseRecordsLimit reads the limit query parameter, which sizes every top
-// list in the response. Out-of-range values clamp into 1..MaxQueryLimit;
-// values that are not numbers at all are a client bug and get a 400, matching
-// the other list endpoints.
+// list in the response.
+//
+// This deliberately differs from parsePagination and the chart limit parsers,
+// which reject a non-positive limit with 400: here an out-of-range value
+// clamps into 1..MaxQueryLimit instead, so a caller asking for more entries
+// than exist gets the full leaderboard rather than an error. Only input that
+// is not a number at all is a 400, which does match the other endpoints. The
+// divergence is worth naming because it means limit=0 is a 400 on
+// /blob/latest and a one-entry leaderboard here.
 func parseRecordsLimit(r *http.Request) (int, error) {
-	raw := r.URL.Query().Get("limit")
+	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
 	if raw == "" {
 		return DefaultRecordsLimit, nil
 	}
@@ -238,10 +342,28 @@ func (a *API) queryBlobRecords(ctx context.Context, network config.NetworkConfig
 	if response.AboveTargetStreaks, err = a.queryRecordStreaks(queryCtx, network.ChainID, streakKindAboveTarget, limit); err != nil {
 		return RecordsResponse{}, err
 	}
+	if response.DroughtStreaks, err = a.queryRecordStreaks(queryCtx, network.ChainID, streakKindDrought, limit); err != nil {
+		return RecordsResponse{}, err
+	}
+	if response.BelowTargetStreaks, err = a.queryRecordStreaks(queryCtx, network.ChainID, streakKindBelowTarget, limit); err != nil {
+		return RecordsResponse{}, err
+	}
 	if response.BaseFeePeaks, err = a.queryRecordBaseFeePeaks(queryCtx, network.ChainID, limit); err != nil {
 		return RecordsResponse{}, err
 	}
+	if response.MostExpensiveBlocks, err = a.queryRecordExpensiveBlocks(queryCtx, network.ChainID, limit); err != nil {
+		return RecordsResponse{}, err
+	}
 	if response.BusiestHours, err = a.queryRecordBusiestHours(queryCtx, network.ChainID, limit); err != nil {
+		return RecordsResponse{}, err
+	}
+	if response.BusiestDays, err = a.queryRecordBusiestDays(queryCtx, network.ChainID, limit); err != nil {
+		return RecordsResponse{}, err
+	}
+	if response.HighestUtilizationDays, err = a.queryRecordUtilizationDays(queryCtx, network.ChainID, limit); err != nil {
+		return RecordsResponse{}, err
+	}
+	if response.TopSpenders, err = a.queryRecordTopSpenders(queryCtx, network.ChainID, limit); err != nil {
 		return RecordsResponse{}, err
 	}
 
@@ -294,20 +416,105 @@ func (a *API) queryRecordBaseFeePeaks(ctx context.Context, networkID, limit int)
 }
 
 func (a *API) queryRecordBusiestHours(ctx context.Context, networkID, limit int) ([]RecordBusiestHourResponse, error) {
-	var rows []recordBusiestHourRow
-	if err := a.db.SelectContext(ctx, &rows, queryRecordBusiestHours, networkID, limit); err != nil {
+	rows, err := a.queryRecordBuckets(ctx, queryRecordBusiestHours, networkID, limit)
+	if err != nil {
 		return nil, err
 	}
 
 	hours := make([]RecordBusiestHourResponse, 0, len(rows))
 	for _, row := range rows {
 		hours = append(hours, RecordBusiestHourResponse{
-			HourStart:    row.HourStart.UTC(),
+			HourStart:    row.BucketStart.UTC(),
 			BlobCount:    row.BlobCount,
 			TotalCostWei: row.TotalCostWei,
 		})
 	}
 	return hours, nil
+}
+
+func (a *API) queryRecordBusiestDays(ctx context.Context, networkID, limit int) ([]RecordBusiestDayResponse, error) {
+	rows, err := a.queryRecordBuckets(ctx, queryRecordBusiestDays, networkID, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	days := make([]RecordBusiestDayResponse, 0, len(rows))
+	for _, row := range rows {
+		days = append(days, RecordBusiestDayResponse{
+			DayStart:     row.BucketStart.UTC(),
+			BlobCount:    row.BlobCount,
+			TotalCostWei: row.TotalCostWei,
+		})
+	}
+	return days, nil
+}
+
+// queryRecordBuckets runs one of the busiest-bucket rankings, which differ
+// only in the rollup bucket size baked into the query.
+func (a *API) queryRecordBuckets(ctx context.Context, query string, networkID, limit int) ([]recordBucketRow, error) {
+	var rows []recordBucketRow
+	if err := a.db.SelectContext(ctx, &rows, query, networkID, limit); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (a *API) queryRecordUtilizationDays(ctx context.Context, networkID, limit int) ([]RecordUtilizationDayResponse, error) {
+	var rows []recordUtilizationDayRow
+	if err := a.db.SelectContext(ctx, &rows, queryRecordHighestUtilizationDays, networkID, limit); err != nil {
+		return nil, err
+	}
+
+	days := make([]RecordUtilizationDayResponse, 0, len(rows))
+	for _, row := range rows {
+		days = append(days, RecordUtilizationDayResponse{
+			DayStart:                  row.DayStart.UTC(),
+			AverageUtilizationPercent: row.AverageUtilizationPercent,
+			BlockCount:                row.BlockCount,
+			BlobCount:                 row.BlobCount,
+			BlocksAtMax:               row.BlocksAtMax,
+			BlocksAboveTarget:         row.BlocksAboveTarget,
+		})
+	}
+	return days, nil
+}
+
+func (a *API) queryRecordExpensiveBlocks(ctx context.Context, networkID, limit int) ([]RecordExpensiveBlockResponse, error) {
+	var rows []recordExpensiveBlockRow
+	if err := a.db.SelectContext(ctx, &rows, queryRecordMostExpensiveBlocks, networkID, limit); err != nil {
+		return nil, err
+	}
+
+	blocks := make([]RecordExpensiveBlockResponse, 0, len(rows))
+	for _, row := range rows {
+		blocks = append(blocks, RecordExpensiveBlockResponse{
+			BlockNumber:     row.BlockNumber,
+			Timestamp:       row.BlockTimestamp.UTC(),
+			BlobCount:       row.BlobCount,
+			BlobBaseFee:     row.BlobBaseFee,
+			BlobBaseFeeGwei: formatWeiAsGwei(row.BlobBaseFee),
+			TotalCostWei:    row.TotalCostWei,
+		})
+	}
+	return blocks, nil
+}
+
+func (a *API) queryRecordTopSpenders(ctx context.Context, networkID, limit int) ([]RecordTopSpenderResponse, error) {
+	var rows []recordTopSpenderRow
+	if err := a.db.SelectContext(ctx, &rows, queryRecordTopSpenders, networkID, limit); err != nil {
+		return nil, err
+	}
+
+	spenders := make([]RecordTopSpenderResponse, 0, len(rows))
+	for _, row := range rows {
+		spenders = append(spenders, RecordTopSpenderResponse{
+			Address:         row.FromAddress,
+			UserAttribution: row.UserAttribution,
+			BlobCount:       row.BlobCount,
+			TotalCostWei:    row.TotalCostWei,
+		})
+	}
+	return spenders, nil
 }
 
 func toRecordRunResponse(row recordStreakRow) RecordRunResponse {

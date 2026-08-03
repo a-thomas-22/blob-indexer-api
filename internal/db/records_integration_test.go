@@ -111,6 +111,8 @@ func assertMatchesFromScratch(t *testing.T, db *sqlx.DB, kind string) {
 	predicate := map[string]string{
 		"full":         "blob_count >= 6",
 		"above_target": "blob_count > 3",
+		"drought":      "blob_count <= 0",
+		"below_target": "blob_count < 3",
 	}[kind]
 	if predicate == "" {
 		t.Fatalf("unknown streak kind %q", kind)
@@ -307,6 +309,86 @@ func TestBackfillBlobBlockStreaksChunk_RebuildsHistoryAcrossChunkBoundaries(t *t
 	assertMatchesFromScratch(t, db, "full")
 }
 
+// The drought and below-target kinds added in 000014 must be maintained by the
+// same triggers, and drought in particular must classify blocks with no fork
+// schedule at all, since an empty block is empty under any blob parameters.
+func TestBlobBlockStreaks_DroughtAndBelowTargetKinds(t *testing.T) {
+	db := newRecordsTestDB(t)
+
+	seedBlocks(t, db, map[int64]int{
+		600: 0, 601: 0, 602: 0, 603: 2, 604: 6, 605: 0, 606: 1, 607: 0,
+	})
+
+	assertStreaks(t, db, "drought",
+		streakRun{StartBlock: 600, EndBlock: 602, Length: 3},
+		streakRun{StartBlock: 605, EndBlock: 605, Length: 1},
+		streakRun{StartBlock: 607, EndBlock: 607, Length: 1},
+	)
+	// Below target is blob_count < 3, so the empty blocks count here too.
+	assertStreaks(t, db, "below_target",
+		streakRun{StartBlock: 600, EndBlock: 603, Length: 4},
+		streakRun{StartBlock: 605, EndBlock: 607, Length: 3},
+	)
+
+	// A block with neither blob params nor gas columns is unclassifiable for
+	// the schedule-dependent kinds, but a drought needs no schedule.
+	if _, err := db.Exec(`
+		INSERT INTO block_metrics (
+			chain_id, block_number, block_timestamp, blob_count,
+			blob_gas_used, blob_gas_target, blob_gas_limit,
+			excess_blob_gas, blob_base_fee, base_fee_wei, utilization_ratio,
+			blob_params_target, blob_params_max, update_fraction
+		) VALUES ($1, 608, $2, 0, 0, 0, 0, 0, 10, 500, 0.5, 0, 0, 3338477)
+	`, recordsTestChainID, time.Date(2026, 1, 1, 2, 1, 36, 0, time.UTC)); err != nil {
+		t.Fatalf("seed scheduleless block: %v", err)
+	}
+	assertStreaks(t, db, "drought",
+		streakRun{StartBlock: 600, EndBlock: 602, Length: 3},
+		streakRun{StartBlock: 605, EndBlock: 605, Length: 1},
+		streakRun{StartBlock: 607, EndBlock: 608, Length: 2},
+	)
+	// The scheduleless block breaks the below-target run rather than extending
+	// it, matching how the other schedule-dependent predicates treat it.
+	assertStreaks(t, db, "below_target",
+		streakRun{StartBlock: 600, EndBlock: 603, Length: 4},
+		streakRun{StartBlock: 605, EndBlock: 607, Length: 3},
+	)
+
+	for _, kind := range []string{"full", "above_target", "drought"} {
+		assertMatchesFromScratch(t, db, kind)
+	}
+}
+
+// The definition fingerprint is what makes a kind addition rebuild history
+// rather than apply to new blocks only, so it must actually change when the
+// catalog does.
+func TestStreakDefinitionFingerprint_Integration(t *testing.T) {
+	db := newRecordsTestDB(t)
+	wrapped := &DB{DB: db}
+	ctx := context.Background()
+
+	fingerprint, err := wrapped.StreakDefinitionFingerprint(ctx)
+	if err != nil {
+		t.Fatalf("fingerprint: %v", err)
+	}
+	if fingerprint != "v2:above_target,below_target,drought,full" {
+		t.Fatalf("unexpected fingerprint: %q", fingerprint)
+	}
+
+	// A schema that predates the version function reports "unknown" instead of
+	// erroring, which is what forces the one-time rebuild on upgrade.
+	if _, err := db.Exec("DROP FUNCTION blob_record_streak_definition_version()"); err != nil {
+		t.Fatalf("drop version function: %v", err)
+	}
+	fingerprint, err = wrapped.StreakDefinitionFingerprint(ctx)
+	if err != nil {
+		t.Fatalf("fingerprint without version function: %v", err)
+	}
+	if !strings.HasPrefix(fingerprint, "vunknown:") {
+		t.Fatalf("expected an unknown version, got %q", fingerprint)
+	}
+}
+
 func TestIndexedBlockBounds_Integration(t *testing.T) {
 	db := newRecordsTestDB(t)
 	wrapped := &DB{DB: db}
@@ -330,13 +412,45 @@ func TestIndexedBlockBounds_Integration(t *testing.T) {
 	}
 }
 
-// The /records reads must be served by the indexes migration 000013 adds, not
-// by a sort over the whole table: that is the difference between the endpoint
-// scaling with history and not.
+// The /records reads must be served by their indexes, not by a sort over the
+// whole table: that is the difference between the endpoint scaling with
+// history and not.
+//
+// This seeds enough rows for the planner to make a cost-based choice. An
+// earlier version asserted the index name against a three-row fixture, where
+// every access path costs the same and the choice is arbitrary; it passed
+// until a second (chain_id, ...) index existed and then started reporting the
+// other one. Each case now also asserts the plan has no Sort node, which is
+// the property actually worth protecting: the index must supply the order.
 func TestRecordsReadsUseIndexes(t *testing.T) {
 	db := newRecordsTestDB(t)
 
-	seedBlocks(t, db, map[int64]int{800: 6, 801: 6, 802: 1})
+	blocks := make(map[int64]int, 3000)
+	for block := int64(1); block <= 3000; block++ {
+		blocks[block] = int(block % 7)
+	}
+	seedBlocks(t, db, blocks)
+
+	// 3000 blocks span only ten hours, so the hourly rollup table would hold a
+	// dozen rows and a sequential scan really would be cheapest. Its rows are
+	// written straight in to reach the scale a long-lived network has (24 a
+	// day, so tens of thousands after a few years), which is where the index
+	// earns its place. This is a read-plan test, so bypassing the triggers
+	// that would normally produce these rows is the point.
+	if _, err := db.Exec(`
+		INSERT INTO block_metrics_rollups (chain_id, bucket_seconds, bucket_start, block_count, sum_blob_count)
+		SELECT $1, 3600, TIMESTAMP '2020-01-01' + (g * INTERVAL '1 hour'), 300, (g * 7919) % 100000
+		FROM generate_series(1, 20000) g
+		ON CONFLICT DO NOTHING
+	`, recordsTestChainID); err != nil {
+		t.Fatalf("seed hourly rollups: %v", err)
+	}
+
+	for _, table := range []string{"block_metrics", "block_metrics_rollups", "blob_block_streaks"} {
+		if _, err := db.Exec("ANALYZE " + table); err != nil {
+			t.Fatalf("analyze %s: %v", table, err)
+		}
+	}
 
 	cases := []struct {
 		name  string
@@ -366,18 +480,18 @@ func TestRecordsReadsUseIndexes(t *testing.T) {
 			args:  []interface{}{recordsTestChainID},
 			index: "idx_block_metrics_rollups_hourly_blob_count",
 		},
+		{
+			name: "most expensive blocks",
+			query: `SELECT block_number, blob_count, blob_base_fee FROM block_metrics
+				WHERE chain_id = $1 AND blob_count > 0
+				ORDER BY (blob_base_fee * blob_count) DESC, block_number DESC LIMIT 10`,
+			args:  []interface{}{recordsTestChainID},
+			index: "idx_block_metrics_chain_blob_spend",
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Fixtures are far too small for the planner to prefer an index on
-			// cost, so sequential scans are disabled to assert that the index
-			// is capable of serving the query at all.
-			if _, err := db.Exec("SET enable_seqscan = off"); err != nil {
-				t.Fatalf("disable seqscan: %v", err)
-			}
-			defer func() { _, _ = db.Exec("RESET enable_seqscan") }()
-
 			var lines []string
 			if err := db.Select(&lines, "EXPLAIN "+tc.query, tc.args...); err != nil {
 				t.Fatalf("explain: %v", err)
@@ -385,6 +499,15 @@ func TestRecordsReadsUseIndexes(t *testing.T) {
 			plan := strings.Join(lines, "\n")
 			if !strings.Contains(plan, tc.index) {
 				t.Fatalf("expected %s in plan:\n%s", tc.index, plan)
+			}
+			// A Sort means the index supplied rows but not their order, so the
+			// read would have to materialize the whole matching set before
+			// applying the LIMIT.
+			if strings.Contains(plan, "Sort") {
+				t.Fatalf("expected the index to supply the ordering, but the plan sorts:\n%s", plan)
+			}
+			if strings.Contains(plan, "Seq Scan") {
+				t.Fatalf("expected an index scan, got a sequential scan:\n%s", plan)
 			}
 		})
 	}

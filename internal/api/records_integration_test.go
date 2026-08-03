@@ -167,6 +167,78 @@ func TestGetBlobRecordsAgainstRealPostgres(t *testing.T) {
 		t.Fatalf("unexpected hourly cost: %q", hour.TotalCostWei)
 	}
 
+	// Droughts: blocks 100..109 all carry blobs, so there is no drought run.
+	if len(data.DroughtStreaks.Top) != 0 {
+		t.Fatalf("expected no drought runs, got %+v", data.DroughtStreaks.Top)
+	}
+	// Below target is strictly under the 3-blob target, so blocks 100 (1 blob)
+	// and 105 (2) qualify while block 107, which sits exactly at target, does
+	// not. That strictness is the whole point of the predicate.
+	if len(data.BelowTargetStreaks.Top) != 2 {
+		t.Fatalf("expected 2 below-target runs, got %+v", data.BelowTargetStreaks.Top)
+	}
+	for _, run := range data.BelowTargetStreaks.Top {
+		if run.StartBlock == 107 || run.EndBlock == 107 {
+			t.Fatalf("a block exactly at target must not count as below it: %+v", run)
+		}
+	}
+
+	// Most expensive block: fee times blob count. Block 109 has the highest fee
+	// and a full 6 blobs, so it also spends the most; block 108 follows. This
+	// ordering differs from base_fee_peaks, where 107 (fee 1000107, 3 blobs)
+	// outranks 106 (fee 1000106, 5 blobs).
+	if len(data.MostExpensiveBlocks) != 5 {
+		t.Fatalf("expected 5 expensive blocks, got %d", len(data.MostExpensiveBlocks))
+	}
+	if got := data.MostExpensiveBlocks[0]; got.BlockNumber != 109 || got.BlobCount != 6 {
+		t.Fatalf("unexpected top spender block: %+v", got)
+	}
+	// 1000109 wei/gas * 6 blobs * 131072 gas per blob.
+	if got := data.MostExpensiveBlocks[0].TotalCostWei; got != "786517721088" {
+		t.Fatalf("unexpected block spend: %q", got)
+	}
+	// The two block leaderboards must actually rank differently, or this one
+	// is just base_fee_peaks under another name. Fees rise with block number
+	// here, so the fee ranking is 109, 108, 107, ... while the spend ranking
+	// promotes the 6-blob blocks over the higher-fee but emptier 107 (3 blobs)
+	// and 106 (5): volume beats price.
+	if got := data.BaseFeePeaks[2].BlockNumber; got != 107 {
+		t.Fatalf("expected block 107 third by fee, got %d", got)
+	}
+	if got := data.MostExpensiveBlocks[2].BlockNumber; got != 104 {
+		t.Fatalf("expected block 104 third by spend, got %d", got)
+	}
+	for _, b := range data.MostExpensiveBlocks {
+		if b.BlockNumber == 106 || b.BlockNumber == 107 {
+			t.Fatalf("a partly filled block outranked a full one by spend: %+v", data.MostExpensiveBlocks)
+		}
+	}
+
+	// One UTC day bucket holds every seeded block.
+	if len(data.BusiestDays) != 1 || data.BusiestDays[0].BlobCount != 45 {
+		t.Fatalf("unexpected busiest days: %+v", data.BusiestDays)
+	}
+	if !data.BusiestDays[0].DayStart.Equal(base.Truncate(24 * time.Hour)) {
+		t.Fatalf("unexpected day bucket start: %s", data.BusiestDays[0].DayStart)
+	}
+	if len(data.HighestUtilizationDays) != 1 {
+		t.Fatalf("unexpected utilization days: %+v", data.HighestUtilizationDays)
+	}
+	if got := data.HighestUtilizationDays[0]; got.BlockCount != 10 || got.BlobCount != 45 {
+		t.Fatalf("unexpected utilization day counts: %+v", got)
+	}
+
+	// One sender carries every blob, at 131072000 wei each.
+	if len(data.TopSpenders) != 1 {
+		t.Fatalf("unexpected top spenders: %+v", data.TopSpenders)
+	}
+	if got := data.TopSpenders[0]; got.Address != "0xfrom" || got.BlobCount != 45 {
+		t.Fatalf("unexpected top spender: %+v", got)
+	}
+	if got := data.TopSpenders[0].TotalCostWei; got != "5898240000" {
+		t.Fatalf("unexpected spender total: %q", got)
+	}
+
 	// A block that stops qualifying at the tip clears the current run without
 	// touching the historical leaderboard.
 	if _, err := sqlxDB.Exec(`

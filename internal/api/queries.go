@@ -1300,9 +1300,16 @@ const (
 	// excluded so an empty leaderboard stays empty rather than listing
 	// arbitrary idle hours. Ties on blob count break by most recent bucket,
 	// keeping the response deterministic.
+	//
+	// The two figures come from different tables: the count from block
+	// headers, the cost from the blobs those headers describe. The indexer
+	// writes both in one transaction, so they cannot drift; if they ever did,
+	// the COALESCE would render an unknown cost as "0" rather than flagging
+	// it. Neither table's hourly buckets are pruned (PruneFineChartRollups
+	// only touches the 60s buckets), so retention cannot open a gap either.
 	queryRecordBusiestHours = `
 		SELECT
-			r.bucket_start AS hour_start,
+			r.bucket_start AS bucket_start,
 			r.sum_blob_count AS blob_count,
 			COALESCE((
 				SELECT SUM(c.total_cost_wei)
@@ -1316,6 +1323,96 @@ const (
 			AND r.bucket_seconds = 3600
 			AND r.sum_blob_count > 0
 		ORDER BY r.sum_blob_count DESC, r.bucket_start DESC
+		LIMIT $2
+	`
+
+	// queryRecordBusiestDays is the same ranking over the daily rollup
+	// buckets, which the same triggers maintain. A network accumulates roughly
+	// 365 daily rows a year, so this one needs no index of its own: the
+	// primary-key prefix scan already reads a trivial number of rows, which is
+	// also why the bucket size is not factored out into a shared query with
+	// the hourly form (that one depends on a partial index keyed to 3600).
+	queryRecordBusiestDays = `
+		SELECT
+			r.bucket_start AS bucket_start,
+			r.sum_blob_count AS blob_count,
+			COALESCE((
+				SELECT SUM(c.total_cost_wei)
+				FROM blob_chart_rollups c
+				WHERE c.chain_id = r.chain_id
+					AND c.bucket_seconds = 86400
+					AND c.bucket_start = r.bucket_start
+			), 0)::text AS total_cost_wei
+		FROM block_metrics_rollups r
+		WHERE r.chain_id = $1
+			AND r.bucket_seconds = 86400
+			AND r.sum_blob_count > 0
+		ORDER BY r.sum_blob_count DESC, r.bucket_start DESC
+		LIMIT $2
+	`
+
+	// queryRecordHighestUtilizationDays ranks days by mean blob utilization.
+	// block_metrics_rollups stores the utilization sum and the block count, so
+	// the average is exact rather than an average of averages. Days with no
+	// blocks are excluded, and the ratio is rendered as a percentage to two
+	// decimal places to match utilization_percent on /blob/pricing.
+	queryRecordHighestUtilizationDays = `
+		SELECT
+			r.bucket_start AS day_start,
+			r.block_count,
+			r.sum_blob_count AS blob_count,
+			ROUND((r.sum_utilization / r.block_count) * 100, 2)::float8 AS average_utilization_percent,
+			r.blocks_at_max,
+			r.blocks_above_target
+		FROM block_metrics_rollups r
+		WHERE r.chain_id = $1
+			AND r.bucket_seconds = 86400
+			AND r.block_count > 0
+			AND r.sum_utilization > 0
+		ORDER BY (r.sum_utilization / r.block_count) DESC, r.bucket_start DESC
+		LIMIT $2
+	`
+
+	// queryRecordMostExpensiveBlocks ranks blocks by total blob spend, which
+	// is blob_base_fee * blob_count * 131072 (params.BlobTxBlobGasPerBlob).
+	// The constant factor cannot change the ordering, so
+	// idx_block_metrics_chain_blob_spend indexes the bare product and the
+	// projection multiplies it out; the ORDER BY must stay written exactly as
+	// the index expression for the ordered scan to be used.
+	//
+	// This is a genuinely different ranking from queryRecordBaseFeePeaks: a
+	// full block at a moderate fee can outspend a near-empty block at a peak
+	// fee. Zero-blob blocks are excluded so an empty leaderboard stays empty.
+	queryRecordMostExpensiveBlocks = `
+		SELECT
+			block_number,
+			block_timestamp,
+			blob_count,
+			blob_base_fee,
+			(blob_base_fee * blob_count * 131072)::text AS total_cost_wei
+		FROM block_metrics
+		WHERE chain_id = $1 AND blob_count > 0
+		ORDER BY (blob_base_fee * blob_count) DESC, block_number DESC
+		LIMIT $2
+	`
+
+	// queryRecordTopSpenders ranks senders by all-history blob spend straight
+	// off blob_user_stats, the same trigger-maintained table /users reads, via
+	// idx_blob_user_stats_chain_spend. Attribution falls back to the known
+	// blob_users name exactly as queryTopBlobUsersAllBase does, so a sender
+	// carries the same label on both endpoints.
+	queryRecordTopSpenders = `
+		SELECT
+			s.from_address,
+			COALESCE(NULLIF(BTRIM(s.user_attribution), ''), NULLIF(BTRIM(bu.name), ''), '') AS user_attribution,
+			s.blob_count,
+			s.total_cost_wei::text AS total_cost_wei
+		FROM blob_user_stats s
+		LEFT JOIN blob_users bu
+			ON bu.chain_id = s.chain_id
+			AND LOWER(bu.address) = LOWER(s.from_address)
+		WHERE s.chain_id = $1 AND s.total_cost_wei > 0
+		ORDER BY s.total_cost_wei DESC, s.blob_count DESC, s.last_timestamp DESC
 		LIMIT $2
 	`
 )

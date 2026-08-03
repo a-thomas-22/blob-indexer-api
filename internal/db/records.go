@@ -22,6 +22,47 @@ const indexedBlockBounds = `
 	WHERE chain_id = $1
 `
 
+// streakDefinitionCatalog reads the kind catalog and reports whether the
+// schema carries a definition version function. The version cannot be read in
+// the same statement: Postgres resolves every function name at parse time, so
+// naming a function that a pre-000014 (or rolled-back) schema lacks would fail
+// the whole query however the call is guarded.
+const streakDefinitionCatalog = `
+	SELECT
+		COALESCE((
+			SELECT string_agg(kind, ',' ORDER BY kind) FROM blob_record_streak_kinds()
+		), '') AS kinds,
+		to_regprocedure('blob_record_streak_definition_version()') IS NOT NULL AS has_version
+`
+
+const streakDefinitionVersion = `SELECT blob_record_streak_definition_version()::text`
+
+// StreakDefinitionFingerprint returns a stable identifier for the streak
+// predicates the database currently maintains. The indexer stores it beside
+// its backfill checkpoint: when the fingerprint moves, history has to be
+// rebuilt, because a checkpoint says only how far a backfill got, never which
+// definitions it got there with.
+//
+// A schema with no version function fingerprints as "unknown", which never
+// matches a stored value and so forces exactly one rebuild on upgrade.
+func (db *DB) StreakDefinitionFingerprint(ctx context.Context) (string, error) {
+	var catalog struct {
+		Kinds      string `db:"kinds"`
+		HasVersion bool   `db:"has_version"`
+	}
+	if err := db.GetContext(ctx, &catalog, streakDefinitionCatalog); err != nil {
+		return "", fmt.Errorf("failed to read streak definition catalog: %w", err)
+	}
+
+	version := "unknown"
+	if catalog.HasVersion {
+		if err := db.GetContext(ctx, &version, streakDefinitionVersion); err != nil {
+			return "", fmt.Errorf("failed to read streak definition version: %w", err)
+		}
+	}
+	return "v" + version + ":" + catalog.Kinds, nil
+}
+
 // BlockRange is a closed [Min, Max] range of indexed block numbers.
 // HasBlocks is false when the network has no indexed blocks at all, in which
 // case the bounds carry no meaning.
