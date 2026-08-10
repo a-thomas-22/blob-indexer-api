@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/lib/pq"
 )
 
 const testBlobListAddress = "0xabcdef1234567890abcdef1234567890abcdef12"
@@ -126,6 +128,9 @@ func TestRefreshBlobList_SyncsClaimsAndReattributesExistingBlobs(t *testing.T) {
 	mock.ExpectExec("INSERT INTO blob_attribution_claims").
 		WithArgs(1, blobListSource, testBlobListAddress, "base", "Base", "rollup", "batcher", "confirmed", "active", int64(100), nil).
 		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("DELETE FROM blob_users").
+		WithArgs(1, blobListUserDescriptionPrefix, pq.Array([]string{testBlobListAddress})).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("INSERT INTO blob_users").
 		WithArgs(1, testBlobListAddress, "Base", sqlmock.AnyArg(), "rollup").
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -576,6 +581,198 @@ func TestStartBlobListRefresh(t *testing.T) {
 	})
 }
 
+// TestSyncBlobListClaims_ReconcilesBlobUsersWhenClaimExpiresThenDrops walks the
+// sequence that used to leak a blob_users row: a claim goes current, the chain
+// passes its valid_to_block with the artifact unchanged, and the artifact later
+// drops the claim. The old deletion diffed two projections both evaluated at
+// the new tip, so the expired address appeared in neither and its row was never
+// deleted — the name survived in /search and the /users fallback after the
+// registry stopped standing behind it.
+func TestSyncBlobListClaims_ReconcilesBlobUsersWhenClaimExpiresThenDrops(t *testing.T) {
+	svc, mock := newMockService(t)
+	ctx := context.TODO()
+	toBlock := int64(150)
+	expiredClaim := Claim{
+		ChainID:        1,
+		Source:         blobListSource,
+		Address:        testBlobListAddress,
+		EntityID:       "base",
+		Name:           "Base",
+		Category:       "rollup",
+		Role:           "batcher",
+		Confidence:     claimConfidenceConfirmed,
+		Status:         claimStatusActive,
+		ValidFromBlock: 100,
+		ValidToBlock:   &toBlock,
+	}
+	storedClaim := func() *sqlmock.Rows {
+		return sqlmock.NewRows([]string{
+			"chain_id", "source", "address", "entity_id", "name", "category", "role",
+			"confidence", "status", "valid_from_block", "valid_to_block",
+		}).AddRow(1, blobListSource, testBlobListAddress, "base", "Base", "rollup", "batcher",
+			claimConfidenceConfirmed, claimStatusActive, 100, toBlock)
+	}
+
+	// Refresh 1: the chain is past valid_to_block=150 but the artifact still
+	// carries the claim, so nothing about the claim set changed. The row must
+	// still go: blob_users only holds claims current at the tip.
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT chain_id, source, address").
+		WithArgs(1, blobListSource).
+		WillReturnRows(storedClaim())
+	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(block_number\\), -1\\)").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(int64(200)))
+	mock.ExpectExec("DELETE FROM blob_attribution_claims").
+		WithArgs(1, blobListSource).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO blob_attribution_claims").
+		WithArgs(1, blobListSource, testBlobListAddress, "base", "Base", "rollup", "batcher",
+			claimConfidenceConfirmed, claimStatusActive, int64(100), toBlock).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("DELETE FROM blob_users").
+		WithArgs(1, blobListUserDescriptionPrefix, pq.Array([]string{})).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	stats, err := svc.syncBlobListClaims(ctx, []Claim{expiredClaim})
+	if err != nil {
+		t.Fatalf("syncBlobListClaims() expired-claim refresh error = %v", err)
+	}
+	if stats.BlobUsersDeleted != 1 {
+		t.Fatalf("expected the expired claim's blob_users row to be deleted, got %d deletions", stats.BlobUsersDeleted)
+	}
+	if stats.CurrentUsers != 0 {
+		t.Fatalf("expected no current users past valid_to_block, got %d", stats.CurrentUsers)
+	}
+
+	// Refresh 2: the artifact drops the claim entirely. Per-blob attribution is
+	// cleared, and the reconcile still targets blob-list-owned rows so a row
+	// that survived an earlier release cannot outlive its claim.
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT chain_id, source, address").
+		WithArgs(1, blobListSource).
+		WillReturnRows(storedClaim())
+	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(block_number\\), -1\\)").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(int64(200)))
+	mock.ExpectExec("DELETE FROM blob_attribution_claims").
+		WithArgs(1, blobListSource).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("DELETE FROM blob_users").
+		WithArgs(1, blobListUserDescriptionPrefix, pq.Array([]string{})).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE blobs").
+		WithArgs(1, pq.Array([]string{testBlobListAddress})).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec("UPDATE mempool_blobs").
+		WithArgs(1, pq.Array([]string{testBlobListAddress})).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	stats, err = svc.syncBlobListClaims(ctx, nil)
+	if err != nil {
+		t.Fatalf("syncBlobListClaims() dropped-claim refresh error = %v", err)
+	}
+	if stats.BlobUsersDeleted != 1 {
+		t.Fatalf("expected the dropped claim's blob_users row to be deleted, got %d deletions", stats.BlobUsersDeleted)
+	}
+	if stats.BlobsCleared != 2 {
+		t.Fatalf("expected 2 blob attributions cleared, got %d", stats.BlobsCleared)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// TestSyncBlobListClaims_SkipsReconcileWithoutATip guards the reindex case: with
+// no indexed blobs the tip is -1, at which only open-ended genesis claims count
+// as current, so reconciling would delete the entire projection. The rows must
+// be left alone until there is a real tip.
+func TestSyncBlobListClaims_SkipsReconcileWithoutATip(t *testing.T) {
+	svc, mock := newMockService(t)
+	claim := Claim{
+		ChainID:        1,
+		Source:         blobListSource,
+		Address:        testBlobListAddress,
+		EntityID:       "base",
+		Name:           "Base",
+		Category:       "rollup",
+		Confidence:     claimConfidenceConfirmed,
+		Status:         claimStatusActive,
+		ValidFromBlock: 100,
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT chain_id, source, address").
+		WithArgs(1, blobListSource).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"chain_id", "source", "address", "entity_id", "name", "category", "role",
+			"confidence", "status", "valid_from_block", "valid_to_block",
+		}))
+	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(block_number\\), -1\\)").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(int64(-1)))
+	mock.ExpectExec("DELETE FROM blob_attribution_claims").
+		WithArgs(1, blobListSource).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO blob_attribution_claims").
+		WithArgs(1, blobListSource, testBlobListAddress, "base", "Base", "rollup", "",
+			claimConfidenceConfirmed, claimStatusActive, int64(100), nil).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	// No DELETE FROM blob_users: any such statement fails the ordered mock.
+	mock.ExpectExec("UPDATE blobs").
+		WithArgs(1, pq.Array([]string{testBlobListAddress})).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("UPDATE mempool_blobs").
+		WithArgs(1, pq.Array([]string{testBlobListAddress})).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("UPDATE blobs").
+		WithArgs("Base", 1, testBlobListAddress, int64(100)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	stats, err := svc.syncBlobListClaims(context.TODO(), []Claim{claim})
+	if err != nil {
+		t.Fatalf("syncBlobListClaims() without a tip error = %v", err)
+	}
+	if stats.BlobUsersDeleted != 0 {
+		t.Fatalf("expected no deletions without a usable tip, got %d", stats.BlobUsersDeleted)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestSyncBlobListClaims_StaleBlobUsersDeleteError(t *testing.T) {
+	svc, mock := newMockService(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT chain_id, source, address").
+		WithArgs(1, blobListSource).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"chain_id", "source", "address", "entity_id", "name", "category", "role",
+			"confidence", "status", "valid_from_block", "valid_to_block",
+		}))
+	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(block_number\\), -1\\)").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(int64(10)))
+	mock.ExpectExec("DELETE FROM blob_attribution_claims").
+		WithArgs(1, blobListSource).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("DELETE FROM blob_users").
+		WithArgs(1, blobListUserDescriptionPrefix, pq.Array([]string{})).
+		WillReturnError(assertiveError("delete failed"))
+	mock.ExpectRollback()
+
+	if _, err := svc.syncBlobListClaims(context.TODO(), nil); err == nil {
+		t.Fatal("expected stale blob_users delete error")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestSyncBlobListClaims_BeginError(t *testing.T) {
 	svc, mock := newMockService(t)
 	mock.ExpectBegin().WillReturnError(assertiveError("begin failed"))
@@ -619,6 +816,15 @@ func TestClaimDescription(t *testing.T) {
 	minimal := Claim{Source: blobListSource, EntityID: "x"}.description()
 	if contains(minimal, "role=") || contains(minimal, "confidence=") || contains(minimal, "status=") {
 		t.Errorf("expected minimal description to omit empty fields, got %q", minimal)
+	}
+
+	// The stale-row reconcile in syncBlobListClaims matches this prefix to tell
+	// its own blob_users rows from hand-added ones, so every blob-list claim
+	// must carry it regardless of which optional fields are set.
+	for _, desc := range []string{full, minimal} {
+		if !strings.HasPrefix(desc, blobListUserDescriptionPrefix) {
+			t.Errorf("expected description %q to start with the ownership marker %q", desc, blobListUserDescriptionPrefix)
+		}
 	}
 }
 
