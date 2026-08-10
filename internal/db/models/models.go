@@ -140,6 +140,21 @@ type BlobUserStats struct {
 	SpendSharePercent float64   `db:"spend_share_percent" json:"spend_share_percent,omitempty"`
 }
 
+// BlobUserGroupStats holds one row of the entity-grouped users leaderboard:
+// attributed addresses collapse into one row per attribution entity, while
+// unattributed addresses stay one row each, keyed by their address.
+type BlobUserGroupStats struct {
+	Key               string         `db:"group_key" json:"key"`
+	Name              string         `db:"user_attribution" json:"name"`
+	Category          string         `db:"category" json:"category,omitempty"`
+	Addresses         pq.StringArray `db:"addresses" json:"addresses"`
+	BlobCount         int            `db:"blob_count" json:"blob_count"`
+	TotalCostWei      string         `db:"total_cost_wei" json:"total_cost_wei"`
+	LastTimestamp     time.Time      `db:"last_timestamp" json:"last_timestamp"`
+	BlobSharePercent  float64        `db:"blob_share_percent" json:"blob_share_percent,omitempty"`
+	SpendSharePercent float64        `db:"spend_share_percent" json:"spend_share_percent,omitempty"`
+}
+
 // BlobUserCategoryShare holds category-level blob user market share statistics.
 type BlobUserCategoryShare struct {
 	Category          string  `db:"category" json:"category"`

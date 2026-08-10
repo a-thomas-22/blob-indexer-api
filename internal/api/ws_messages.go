@@ -45,7 +45,14 @@ type WSEvent struct {
 	// lives on the envelope because the users_update data payload is a bare
 	// array, which can't grow a field without breaking its shape. Empty for
 	// event types that have no aggregation window.
-	Range string      `json:"range,omitempty"`
+	Range string `json:"range,omitempty"`
+	// Group identifies the row grouping a users_update payload uses, matching
+	// the REST `group` values on GET /users: absent for per-address rows,
+	// "entity" for entity-grouped rows. Both variants are broadcast on every
+	// users update, so clients must filter on this field — a table in one
+	// mode has to drop pushes for the other or the two payloads overwrite
+	// each other. Envelope-level for the same reason as Range.
+	Group string      `json:"group,omitempty"`
 	Data  interface{} `json:"data,omitempty"`
 }
 

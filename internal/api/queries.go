@@ -461,6 +461,195 @@ const (
 	queryTopUnattributedBlobUsersAllByCount = queryTopUnattributedBlobUsersAllBase + userSortByCountClause
 	queryTopUnattributedBlobUsersAllBySpend = queryTopUnattributedBlobUsersAllBase + userSortBySpendClause
 
+	// userGroupTailSQL is the shared tail of the entity-grouped /users queries
+	// (group=entity). It expects a `keyed` CTE of per-address rows
+	// (from_address, user_attribution, category, blob_count, total_cost_wei,
+	// last_timestamp, entity_slug — '' when the address is unattributed or its
+	// attribution slugs to nothing) and a `totals` CTE carrying the same share
+	// denominators as the per-address variant. Attributed rows collapse into
+	// one row per entity slug — the same key scheme as the
+	// /charts/attribution-usage series, so leaderboard rows and chart series
+	// cross-reference — while unattributed rows pass through keyed by address.
+	// Ordering and LIMIT/OFFSET run AFTER grouping, which is the point of the
+	// grouped mode: an entity spread across many addresses ranks by its
+	// combined totals instead of being truncated because individual addresses
+	// fell below the per-address cutoff. Shares are computed from the exact
+	// grouped sums, which equals summing the per-address shares without their
+	// per-row rounding. Member addresses are ordered busiest first so the
+	// first element serves as the group's primary address; the trailing
+	// group_key sort key keeps ordering and pagination deterministic across
+	// ties. The bare entity_slug joins group_key in GROUP BY both to license
+	// the slug references in the select list (the group-key CASE alone would
+	// not) and to keep an address-keyed row distinct from an equal entity
+	// slug; within a group the slug is constant, so the partitioning is
+	// unchanged. The display name is the busiest member's attribution
+	// spelling — members can differ in case while sharing a slug, and the
+	// busiest-first pick is deterministic where MIN would be
+	// collation-dependent.
+	userGroupTailSQL = `,
+		grouped AS (
+			SELECT
+				CASE WHEN k.entity_slug = '' THEN k.from_address ELSE k.entity_slug END AS group_key,
+				CASE
+					WHEN k.entity_slug = '' THEN ''
+					ELSE (array_agg(k.user_attribution ORDER BY k.blob_count DESC, k.total_cost_wei DESC, k.from_address ASC))[1]
+				END AS user_attribution,
+				CASE
+					WHEN k.entity_slug = '' THEN MIN(k.category)
+					ELSE COALESCE(NULLIF(MIN(NULLIF(k.category, 'unknown')), ''), 'unknown')
+				END AS category,
+				array_agg(k.from_address ORDER BY k.blob_count DESC, k.total_cost_wei DESC, k.from_address ASC) AS addresses,
+				COALESCE(SUM(k.blob_count), 0)::bigint AS blob_count,
+				COALESCE(SUM(k.total_cost_wei), 0) AS total_cost_wei,
+				MAX(k.last_timestamp) AS last_timestamp
+			FROM keyed k
+			GROUP BY
+				CASE WHEN k.entity_slug = '' THEN k.from_address ELSE k.entity_slug END,
+				k.entity_slug
+		)
+		SELECT
+			grouped.group_key,
+			grouped.user_attribution,
+			grouped.category,
+			grouped.addresses,
+			grouped.blob_count,
+			grouped.total_cost_wei::text AS total_cost_wei,
+			grouped.last_timestamp,
+			CASE
+				WHEN totals.total_blobs > 0 THEN ROUND((grouped.blob_count::numeric / totals.total_blobs::numeric) * 100, 6)::float8
+				ELSE 0
+			END AS blob_share_percent,
+			CASE
+				WHEN totals.total_spend > 0 THEN ROUND((grouped.total_cost_wei / totals.total_spend) * 100, 6)::float8
+				ELSE 0
+			END AS spend_share_percent
+		FROM grouped
+		CROSS JOIN totals
+		ORDER BY
+			CASE WHEN $5 = 'count' THEN grouped.blob_count END DESC,
+			CASE WHEN $5 = 'spend' THEN grouped.total_cost_wei END DESC,
+			grouped.blob_count DESC,
+			grouped.total_cost_wei DESC,
+			grouped.group_key ASC
+		LIMIT $2 OFFSET $3
+	`
+
+	// userGroupSlugExpr normalizes an attribution name into its entity slug,
+	// mirroring the /charts/attribution-usage key scheme
+	// (attributionEntityBaseSQL): lowercase, non-alphanumeric runs collapsed
+	// to '_', outer underscores trimmed. Unattributed rows (and degenerate
+	// names that slug to nothing) yield '' so the tail keys them by address.
+	userGroupSlugExpr = `COALESCE(NULLIF(TRIM(BOTH '_' FROM regexp_replace(lower(ut.user_attribution), '[^a-z0-9]+', '_', 'g')), ''), '')`
+
+	// queryTopBlobUserGroupsWithOptions is the entity-grouped variant of
+	// queryTopBlobUsersWithOptions: identical per-address window aggregation
+	// and share denominator (every sender in the window), then collapsed by
+	// attribution entity via userGroupTailSQL. Same rollup-backed window
+	// semantics and argument list ($1 chain, $2 limit, $3 offset, $4 window,
+	// $5 sort) as the per-address query.
+	queryTopBlobUserGroupsWithOptions = `
+		WITH window_params AS (
+			SELECT
+				CASE WHEN $4 = '1h' THEN 60 ELSE 3600 END AS bucket_seconds,
+				-- bucket_start is a naive UTC timestamp, so the bound must be
+				-- computed in UTC wall time; bare NOW() would shift the window
+				-- by the session TimeZone offset.
+				CASE
+					WHEN $4 = '1h' THEN date_trunc('minute', (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 hour')
+					WHEN $4 = '24h' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours')
+					WHEN $4 = '30d' THEN date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days')
+					ELSE date_trunc('hour', (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days')
+				END AS start_time
+		),
+		user_totals AS (
+			SELECT
+				r.from_address,
+				COALESCE(NULLIF(MAX(BTRIM(r.user_attribution)), ''), NULLIF(MAX(BTRIM(bu.name)), ''), '') AS user_attribution,
+				COALESCE(NULLIF(MAX(BTRIM(bu.category)), ''), 'unknown') AS category,
+				COALESCE(SUM(r.blob_count), 0)::bigint AS blob_count,
+				COALESCE(SUM(r.total_cost_wei), 0) AS total_cost_wei,
+				MAX(r.bucket_start) AS last_bucket_start
+			FROM blob_chart_rollups r
+			CROSS JOIN window_params wp
+			LEFT JOIN blob_users bu
+				ON bu.chain_id = r.chain_id
+				AND LOWER(bu.address) = LOWER(r.from_address)
+			WHERE r.chain_id = $1
+				AND r.bucket_seconds = wp.bucket_seconds
+				AND r.bucket_start >= wp.start_time
+			GROUP BY r.from_address
+		),
+		totals AS (
+			SELECT
+				COALESCE(SUM(blob_count), 0) AS total_blobs,
+				COALESCE(SUM(total_cost_wei), 0) AS total_spend
+			FROM user_totals
+		),
+		keyed AS (
+			SELECT
+				ut.from_address,
+				ut.user_attribution,
+				ut.category,
+				ut.blob_count,
+				ut.total_cost_wei,
+				COALESCE(s.last_timestamp, ut.last_bucket_start) AS last_timestamp,
+				` + userGroupSlugExpr + ` AS entity_slug
+			FROM user_totals ut
+			LEFT JOIN blob_user_stats s
+				ON s.chain_id = $1
+				AND s.from_address = ut.from_address
+		)` + userGroupTailSQL
+
+	// queryTopBlobUserGroupsAll is the entity-grouped variant of the
+	// all-history queryTopBlobUsersAll* queries: identical per-address rollup
+	// read and share denominator (network totals plus the pending set), then
+	// collapsed by attribution entity via userGroupTailSQL. Unlike the
+	// per-address all-history variants there is no static-ORDER BY split —
+	// grouping has to aggregate every sender row anyway, so the ordered-LIMIT
+	// index shortcut does not apply and the sort arrives as $5 like the
+	// windowed query.
+	queryTopBlobUserGroupsAll = `
+		WITH user_totals AS (
+			SELECT
+				s.from_address,
+				COALESCE(NULLIF(BTRIM(s.user_attribution), ''), NULLIF(BTRIM(bu.name), ''), '') AS user_attribution,
+				COALESCE(NULLIF(BTRIM(bu.category), ''), 'unknown') AS category,
+				s.blob_count,
+				s.total_cost_wei,
+				s.last_timestamp
+			FROM blob_user_stats s
+			LEFT JOIN blob_users bu
+				ON bu.chain_id = s.chain_id
+				AND LOWER(bu.address) = LOWER(s.from_address)
+			WHERE s.chain_id = $1
+				AND $4::text = 'all'
+		),
+		pending AS (
+			SELECT
+				COUNT(*)::bigint AS total_pending_blobs,
+				COALESCE(SUM(total_cost_wei::numeric), 0) AS pending_total_cost
+			FROM mempool_blobs
+			WHERE chain_id = $1
+		),
+		totals AS (
+			SELECT
+				(COALESCE(s.total_confirmed_blobs, 0) + p.total_pending_blobs) AS total_blobs,
+				(COALESCE(s.sum_total_cost, 0) + p.pending_total_cost) AS total_spend
+			FROM pending p
+			LEFT JOIN network_blob_stats s ON s.chain_id = $1
+		),
+		keyed AS (
+			SELECT
+				ut.from_address,
+				ut.user_attribution,
+				ut.category,
+				ut.blob_count,
+				ut.total_cost_wei,
+				ut.last_timestamp,
+				` + userGroupSlugExpr + ` AS entity_slug
+			FROM user_totals ut
+		)` + userGroupTailSQL
+
 	// queryBlobUserCategoryBreakdown aggregates windowed blob usage by known user
 	// category ($2 is '1h', '24h', '7d', or '30d'; all-history reads use
 	// queryBlobUserCategoryBreakdownAll). Same rollup-backed window semantics as

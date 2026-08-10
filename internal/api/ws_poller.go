@@ -444,7 +444,11 @@ func (p *Poller) broadcastStatsUpdate(ctx context.Context, network config.Networ
 	})
 }
 
-// broadcastUsersUpdate queries top blob users and broadcasts a users_update event.
+// broadcastUsersUpdate queries top blob users and broadcasts users_update
+// events: the per-address rows first (the historical payload), then the
+// entity-grouped rows tagged with the envelope group field, mirroring GET
+// /users?group=entity so live tables in either mode can apply matching
+// pushes and drop the other variant.
 func (p *Poller) broadcastUsersUpdate(ctx context.Context, network config.NetworkConfig) {
 	queryCtx, cancel := context.WithTimeout(ctx, pollerQueryTimeout)
 	defer cancel()
@@ -466,6 +470,28 @@ func (p *Poller) broadcastUsersUpdate(ctx context.Context, network config.Networ
 		Type:  EventUsersUpdate,
 		Range: string(userWindowAll),
 		Data:  response,
+	})
+
+	// A grouped-query failure only costs the grouped variant this tick; the
+	// per-address broadcast above already went out.
+	var groups []models.BlobUserGroupStats
+	if err := p.db.SelectContext(queryCtx, &groups, queryTopBlobUserGroupsAll, network.ChainID, 10, 0, string(userWindowAll), string(userSortCount)); err != nil {
+		logger.Error("Poller: failed to query top user groups",
+			zap.String("network", network.Name),
+			zap.Error(err))
+		return
+	}
+
+	groupedResponse := make([]UserResponse, 0, len(groups))
+	for _, userGroup := range groups {
+		groupedResponse = append(groupedResponse, toGroupedUserResponse(userGroup, network.ChainID, network.Name))
+	}
+
+	p.hub.BroadcastEvent(network.Name, WSEvent{
+		Type:  EventUsersUpdate,
+		Range: string(userWindowAll),
+		Group: string(userGroupEntity),
+		Data:  groupedResponse,
 	})
 }
 

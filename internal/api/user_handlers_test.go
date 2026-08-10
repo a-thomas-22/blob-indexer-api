@@ -14,6 +14,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/go-chi/chi/v5"
+	"github.com/lib/pq"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
@@ -361,6 +362,220 @@ func TestGetTopBlobUsers_RangeAllUsesRollupAndEchoesMeta(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"meta":{"range":"all"}`) {
 		t.Fatalf("expected meta range echo, got %s", w.Body.String())
+	}
+}
+
+func TestGetTopBlobUsers_GroupEntityDefaultAll(t *testing.T) {
+	var gotQuery string
+	var gotArgs []interface{}
+	db := &mockDB{
+		selectFn: func(_ context.Context, dest interface{}, query string, args ...interface{}) error {
+			gotQuery = query
+			gotArgs = append([]interface{}{}, args...)
+			groups := dest.(*[]models.BlobUserGroupStats)
+			*groups = []models.BlobUserGroupStats{
+				{
+					Key:               "scroll",
+					Name:              "Scroll",
+					Category:          "rollup",
+					Addresses:         pq.StringArray{"0xbusy", "0xquiet"},
+					BlobCount:         348007,
+					TotalCostWei:      "4718548746240",
+					LastTimestamp:     time.Now(),
+					BlobSharePercent:  57.142857,
+					SpendSharePercent: 40,
+				},
+				{
+					Key:           "0xsolo",
+					Category:      "unknown",
+					Addresses:     pq.StringArray{"0xsolo"},
+					BlobCount:     12,
+					TotalCostWei:  "42",
+					LastTimestamp: time.Now(),
+				},
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42&group=entity", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if gotQuery != queryTopBlobUserGroupsAll {
+		t.Fatal("expected all-window grouped query to be used")
+	}
+	// Grouped all-history queries always take the sort parameter, unlike the
+	// per-address all-history variants with their static ORDER BY.
+	wantArgs := []interface{}{42, 10, 0, "all", "count"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+
+	var resp struct {
+		Success bool           `json:"success"`
+		Data    []UserResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resp.Success || len(resp.Data) != 2 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	entity := resp.Data[0]
+	if entity.Key != "scroll" || entity.Name != "Scroll" || entity.Category != "rollup" {
+		t.Fatalf("unexpected entity identity: %+v", entity)
+	}
+	if entity.Address != "0xbusy" || !reflect.DeepEqual(entity.Addresses, []string{"0xbusy", "0xquiet"}) {
+		t.Fatalf("expected busiest-first member addresses with primary echo, got %+v", entity)
+	}
+	if entity.BlobCount != 348007 || entity.TotalCostWei != "4718548746240" || entity.BlobSharePercent != 57.142857 {
+		t.Fatalf("unexpected entity aggregates: %+v", entity)
+	}
+	solo := resp.Data[1]
+	if solo.Key != "0xsolo" || solo.Address != "0xsolo" || solo.Name != "" || len(solo.Addresses) != 1 {
+		t.Fatalf("unexpected unattributed grouped row: %+v", solo)
+	}
+}
+
+func TestGetTopBlobUsers_GroupEntityMetaEcho(t *testing.T) {
+	for _, tc := range []struct {
+		url      string
+		wantMeta string
+	}{
+		{"/?network=42&group=entity", `"meta":{"group":"entity"}`},
+		{"/?network=42&range=24h&group=entity", `"meta":{"range":"24h","group":"entity"}`},
+		{"/?network=42&group=address", `"meta":{"group":"address"}`},
+	} {
+		t.Run(tc.url, func(t *testing.T) {
+			a := newTestAPIWithDB(&mockDB{})
+			req := httptest.NewRequest(http.MethodGet, tc.url, http.NoBody)
+			w := httptest.NewRecorder()
+			a.GetTopBlobUsers(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", w.Code)
+			}
+			if !strings.Contains(w.Body.String(), tc.wantMeta) {
+				t.Fatalf("expected meta echo %s, got %s", tc.wantMeta, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestGetTopBlobUsers_GroupEntityWindowed(t *testing.T) {
+	var gotQuery string
+	var gotArgs []interface{}
+	db := &mockDB{
+		selectFn: func(_ context.Context, dest interface{}, query string, args ...interface{}) error {
+			gotQuery = query
+			gotArgs = append([]interface{}{}, args...)
+			groups := dest.(*[]models.BlobUserGroupStats)
+			*groups = []models.BlobUserGroupStats{}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42&limit=5&offset=2&sort=spend&range=24h&group=entity", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if gotQuery != queryTopBlobUserGroupsWithOptions {
+		t.Fatal("expected windowed grouped query to be used")
+	}
+	wantArgs := []interface{}{42, 5, 2, apiWindow24h, "spend"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+}
+
+func TestGetTopBlobUsers_GroupAddressKeepsPerAddressQuery(t *testing.T) {
+	var gotQuery string
+	db := &mockDB{
+		selectFn: func(_ context.Context, dest interface{}, query string, _ ...interface{}) error {
+			gotQuery = query
+			users := dest.(*[]models.BlobUserStats)
+			*users = []models.BlobUserStats{{Address: "0xabc", BlobCount: 1, TotalCostWei: "1"}}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	req := httptest.NewRequest(http.MethodGet, "/?network=42&group=address", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if gotQuery != queryTopBlobUsersAllByCount {
+		t.Fatal("expected per-address rollup query for group=address")
+	}
+	// Per-address rows must not grow the grouped-only fields.
+	body := w.Body.String()
+	if strings.Contains(body, `"key"`) || strings.Contains(body, `"addresses"`) {
+		t.Fatalf("expected no grouped fields on per-address rows, got %s", body)
+	}
+}
+
+func TestGetTopBlobUsers_InvalidGroup(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?group=rollup", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "invalid group parameter") {
+		t.Fatalf("expected group-specific error, got %s", w.Body.String())
+	}
+}
+
+func TestGetTopUnattributedBlobUsers_GroupEntityRejected(t *testing.T) {
+	a := newTestAPI()
+	req := httptest.NewRequest(http.MethodGet, "/?group=entity", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopUnattributedBlobUsers(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "not supported for unattributed users") {
+		t.Fatalf("expected unattributed rejection, got %s", w.Body.String())
+	}
+}
+
+func TestGetTopBlobUsers_GroupEntityCacheHit(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(_ context.Context, _ interface{}, _ string, _ ...interface{}) error {
+			t.Fatal("DB should not be called on cache hit")
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	cacheKey := fmt.Sprintf("entity:%d:%d:%d:%s:%s", 42, 10, 0, userSortCount, userWindowAll)
+	a.topUsersCache[cacheKey] = topUsersCacheEntry{
+		response:  []UserResponse{{Address: "0xcached", Key: "cached", Addresses: []string{"0xcached"}}},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/?group=entity", http.NoBody)
+	w := httptest.NewRecorder()
+	a.GetTopBlobUsers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"key":"cached"`) {
+		t.Fatalf("expected cached grouped row, got %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"meta":{"group":"entity"}`) {
+		t.Fatalf("expected meta group echo on cache hit, got %s", w.Body.String())
 	}
 }
 

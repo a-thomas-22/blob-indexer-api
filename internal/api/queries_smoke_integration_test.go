@@ -531,6 +531,218 @@ func TestUserWindowQueriesAgainstRealPostgres(t *testing.T) {
 	})
 }
 
+// TestUserGroupQueriesAgainstRealPostgres validates the entity-grouped /users
+// query text against a real schema: attributed addresses merging into one row
+// per entity slug (including case-insensitive attribution variants),
+// unattributed addresses surviving as individual rows, exact aggregate sums,
+// shares computed over the same denominators as the per-address queries, and
+// — the point of the grouped mode — ordering and LIMIT applied after
+// grouping. The non-UTC session mirrors TestUserWindowQueriesAgainstRealPostgres
+// so the grouped windowed query's own UTC window bound is validated too.
+func TestUserGroupQueriesAgainstRealPostgres(t *testing.T) {
+	url := testdb.URL(t, "api")
+	sqlxDB, err := sqlx.Connect("postgres", url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer sqlxDB.Close()
+
+	for _, stmt := range []string{
+		"DROP SCHEMA IF EXISTS public CASCADE",
+		"CREATE SCHEMA public",
+		"GRANT ALL ON SCHEMA public TO PUBLIC",
+	} {
+		if _, err := sqlxDB.Exec(stmt); err != nil {
+			t.Fatalf("reset schema (%s): %v", stmt, err)
+		}
+	}
+	if err := db.RunMigrations(url); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	sqlxDB.SetMaxOpenConns(1)
+	if _, err := sqlxDB.Exec("SET TIME ZONE 'Asia/Tokyo'"); err != nil {
+		t.Fatalf("set session time zone: %v", err)
+	}
+
+	ctx := context.Background()
+	recent := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
+	recentLater := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+
+	// Scroll posts from two addresses (attribution differing only in case, so
+	// the slug must merge them): 0xaaa and 0xccc with 2 blobs / 200 wei each.
+	// 0xbbb is unattributed with 3 blobs / 600 wei — more blobs than any
+	// single Scroll address but fewer than the merged entity, which is what
+	// separates per-address from post-grouping ordering.
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES
+			(1, 200, 0, '0xa1', '0xaaa', 'Scroll', 131072, 10, 2, 100, $1, 12, 131072),
+			(1, 200, 1, '0xa2', '0xaaa', 'Scroll', 131072, 10, 2, 100, $1, 12, 131072),
+			(1, 201, 0, '0xc1', '0xccc', 'scroll', 131072, 10, 2, 100, $1, 12, 131072),
+			(1, 201, 1, '0xc2', '0xccc', 'scroll', 131072, 10, 2, 100, $2, 12, 131072),
+			(1, 202, 0, '0xb1', '0xbbb', '', 131072, 10, 2, 200, $1, 12, 131072),
+			(1, 202, 1, '0xb2', '0xbbb', '', 131072, 10, 2, 200, $1, 12, 131072),
+			(1, 202, 2, '0xb3', '0xbbb', '', 131072, 10, 2, 200, $1, 12, 131072)
+	`, recent, recentLater); err != nil {
+		t.Fatalf("seed blobs: %v", err)
+	}
+	// Category source for the Scroll entity: only one member has a known-user
+	// row, so the grouped category must still resolve to 'rollup'.
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO blob_users (chain_id, address, name, description, category, first_seen, last_seen)
+		VALUES (1, '0xaaa', 'Scroll', '', 'rollup', $1, $1)
+	`, recent); err != nil {
+		t.Fatalf("seed blob user: %v", err)
+	}
+	// A pending blob participates in the all-history share denominator
+	// (matching the per-address all-history queries) but not in windowed
+	// shares, which cover confirmed blobs only.
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO mempool_blobs (
+			chain_id, tx_hash, blob_index, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used
+		) VALUES (1, '0xpending', 0, '0xddd', '', 131072, 50, 10, 500, $1, 60, 131072)
+	`, recent); err != nil {
+		t.Fatalf("seed mempool blob: %v", err)
+	}
+
+	for _, window := range []string{"1h", "24h"} {
+		t.Run("queryTopBlobUserGroupsWithOptions "+window, func(t *testing.T) {
+			var groups []models.BlobUserGroupStats
+			if err := sqlxDB.SelectContext(ctx, &groups, queryTopBlobUserGroupsWithOptions, 1, 10, 0, window, "count"); err != nil {
+				t.Fatalf("queryTopBlobUserGroupsWithOptions %s: %v", window, err)
+			}
+			if len(groups) != 2 {
+				t.Fatalf("expected 2 grouped rows, got %+v", groups)
+			}
+			scroll, unattributed := groups[0], groups[1]
+			if scroll.Key != "scroll" || scroll.Name != "Scroll" || scroll.Category != "rollup" {
+				t.Fatalf("unexpected entity identity: %+v", scroll)
+			}
+			// Members tie on count and spend, so the address tie-breaker fixes
+			// busiest-first ordering.
+			if len(scroll.Addresses) != 2 || scroll.Addresses[0] != "0xaaa" || scroll.Addresses[1] != "0xccc" {
+				t.Fatalf("unexpected entity members: %+v", scroll.Addresses)
+			}
+			if scroll.BlobCount != 4 || scroll.TotalCostWei != "400" {
+				t.Fatalf("unexpected entity aggregates: %+v", scroll)
+			}
+			// Shares over the full 7-blob / 1000-wei window: computed from the
+			// grouped sums, equal to the members' per-address shares combined.
+			if scroll.BlobSharePercent != 57.142857 || scroll.SpendSharePercent != 40 {
+				t.Fatalf("unexpected entity shares: %+v", scroll)
+			}
+			if unattributed.Key != "0xbbb" || unattributed.Name != "" || unattributed.Category != "unknown" {
+				t.Fatalf("unexpected unattributed row identity: %+v", unattributed)
+			}
+			if len(unattributed.Addresses) != 1 || unattributed.Addresses[0] != "0xbbb" {
+				t.Fatalf("unexpected unattributed members: %+v", unattributed.Addresses)
+			}
+			if unattributed.BlobCount != 3 || unattributed.TotalCostWei != "600" {
+				t.Fatalf("unexpected unattributed aggregates: %+v", unattributed)
+			}
+			if unattributed.BlobSharePercent != 42.857143 || unattributed.SpendSharePercent != 60 {
+				t.Fatalf("unexpected unattributed shares: %+v", unattributed)
+			}
+			if sum := scroll.BlobSharePercent + unattributed.BlobSharePercent; sum < 99.999999 || sum > 100.000001 {
+				t.Fatalf("grouped blob shares should cover the window, got %v", sum)
+			}
+			if sum := scroll.SpendSharePercent + unattributed.SpendSharePercent; sum < 99.999999 || sum > 100.000001 {
+				t.Fatalf("grouped spend shares should cover the window, got %v", sum)
+			}
+
+			// The entity's last_timestamp is the max across members — compare
+			// against the per-address rows from the same session so timestamp
+			// session/parsing conventions cancel out.
+			var users []models.BlobUserStats
+			if err := sqlxDB.SelectContext(ctx, &users, queryTopBlobUsersWithOptions, 1, 10, 0, window, "count"); err != nil {
+				t.Fatalf("queryTopBlobUsersWithOptions %s: %v", window, err)
+			}
+			var wantLast time.Time
+			for _, user := range users {
+				if (user.Address == "0xaaa" || user.Address == "0xccc") && user.LastTimestamp.After(wantLast) {
+					wantLast = user.LastTimestamp
+				}
+			}
+			if !scroll.LastTimestamp.Equal(wantLast) {
+				t.Fatalf("expected entity last_timestamp %v (max across members), got %v", wantLast, scroll.LastTimestamp)
+			}
+		})
+	}
+
+	t.Run("limit applies after grouping", func(t *testing.T) {
+		// Per-address, 0xbbb leads on count (3 vs 2/2) …
+		var users []models.BlobUserStats
+		if err := sqlxDB.SelectContext(ctx, &users, queryTopBlobUsersWithOptions, 1, 1, 0, "1h", "count"); err != nil {
+			t.Fatalf("queryTopBlobUsersWithOptions limit 1: %v", err)
+		}
+		if len(users) != 1 || users[0].Address != "0xbbb" {
+			t.Fatalf("expected per-address leader 0xbbb, got %+v", users)
+		}
+		// … but grouped, the merged Scroll entity (4 blobs) takes the single
+		// slot with its combined totals: the limit ran after grouping.
+		var groups []models.BlobUserGroupStats
+		if err := sqlxDB.SelectContext(ctx, &groups, queryTopBlobUserGroupsWithOptions, 1, 1, 0, "1h", "count"); err != nil {
+			t.Fatalf("queryTopBlobUserGroupsWithOptions limit 1: %v", err)
+		}
+		if len(groups) != 1 || groups[0].Key != "scroll" || groups[0].BlobCount != 4 {
+			t.Fatalf("expected grouped leader scroll with combined count, got %+v", groups)
+		}
+	})
+
+	t.Run("spend sort and offset after grouping", func(t *testing.T) {
+		var groups []models.BlobUserGroupStats
+		if err := sqlxDB.SelectContext(ctx, &groups, queryTopBlobUserGroupsWithOptions, 1, 10, 0, "1h", "spend"); err != nil {
+			t.Fatalf("queryTopBlobUserGroupsWithOptions spend: %v", err)
+		}
+		if len(groups) != 2 || groups[0].Key != "0xbbb" || groups[1].Key != "scroll" {
+			t.Fatalf("expected spend order [0xbbb scroll], got %+v", groups)
+		}
+		groups = nil
+		if err := sqlxDB.SelectContext(ctx, &groups, queryTopBlobUserGroupsWithOptions, 1, 10, 1, "1h", "count"); err != nil {
+			t.Fatalf("queryTopBlobUserGroupsWithOptions offset 1: %v", err)
+		}
+		if len(groups) != 1 || groups[0].Key != "0xbbb" {
+			t.Fatalf("expected offset to skip the grouped leader, got %+v", groups)
+		}
+	})
+
+	t.Run("queryTopBlobUserGroupsAll", func(t *testing.T) {
+		var groups []models.BlobUserGroupStats
+		if err := sqlxDB.SelectContext(ctx, &groups, queryTopBlobUserGroupsAll, 1, 10, 0, "all", "count"); err != nil {
+			t.Fatalf("queryTopBlobUserGroupsAll: %v", err)
+		}
+		if len(groups) != 2 || groups[0].Key != "scroll" || groups[1].Key != "0xbbb" {
+			t.Fatalf("expected all-history order [scroll 0xbbb], got %+v", groups)
+		}
+		scroll, unattributed := groups[0], groups[1]
+		if scroll.BlobCount != 4 || scroll.TotalCostWei != "400" || len(scroll.Addresses) != 2 {
+			t.Fatalf("unexpected all-history entity aggregates: %+v", scroll)
+		}
+		// The all-history denominator folds in the pending set (8 blobs /
+		// 1500 wei), matching the per-address all-history queries.
+		if scroll.BlobSharePercent != 50 || scroll.SpendSharePercent != 26.666667 {
+			t.Fatalf("unexpected all-history entity shares: %+v", scroll)
+		}
+		if unattributed.BlobCount != 3 || unattributed.BlobSharePercent != 37.5 || unattributed.SpendSharePercent != 40 {
+			t.Fatalf("unexpected all-history unattributed row: %+v", unattributed)
+		}
+
+		groups = nil
+		if err := sqlxDB.SelectContext(ctx, &groups, queryTopBlobUserGroupsAll, 1, 10, 0, "all", "spend"); err != nil {
+			t.Fatalf("queryTopBlobUserGroupsAll spend: %v", err)
+		}
+		if len(groups) != 2 || groups[0].Key != "0xbbb" {
+			t.Fatalf("expected all-history spend leader 0xbbb, got %+v", groups)
+		}
+	})
+}
+
 // TestWSPollerQueriesAgainstRealPostgres validates the WebSocket poller's and
 // snapshot builder's query text against a real schema, including type
 // unification of block_number scans into uint64 slices. The /block/{number}
