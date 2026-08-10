@@ -1238,8 +1238,12 @@ const (
 	// blob_attribution_claims: blob_users alone is only the currently-active
 	// registry projection (the blob-list sync deletes retired senders from
 	// it), while claims retain every address whose validity range attributed
-	// historical blobs — the same addresses /users reports — so a rollup
-	// match must list retired senders too. Disputed claims never attribute
+	// historical blobs, so a rollup match lists retired senders too. The
+	// result is a superset of the addresses /users can report: registry
+	// addresses with no indexed blobs yet are listed, and if the registry
+	// carried conflicting overlapping claims for one address, each
+	// non-disputed name would list it even though per-block resolution
+	// awards the blobs to a single winner. Disputed claims never attribute
 	// blobs and stay excluded. Both tables hold one row per attributed
 	// address/claim, so the scan is bounded by the (small) known-user set
 	// rather than any per-blob table.

@@ -417,6 +417,37 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		// its blobs still carry the attribution, and /users reports it, so
 		// /search must list it too. Disputed claims never attribute and stay
 		// out. The active sender appears in both tables and must not repeat.
+		//
+		// Temp row scoped to this subtest: a historical blob from the retired
+		// sender, attributed inside its claim's validity range, so the
+		// /users-side assertion below exercises the exact prod state (blobs
+		// carry the name, blob_users does not). Removed on exit; the delete
+		// also rolls the trigger-maintained blob_user_stats row back.
+		if _, err := sqlxDB.Exec(`
+			INSERT INTO blobs (
+				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash
+			) VALUES (1, 40, 0, '0xretiredtx', '0xbaseretired', 'Base', 131072, 10, 2, 100, $1, 12, 131072, '0xvhretired')
+		`, now); err != nil {
+			t.Fatalf("seed retired-sender blob: %v", err)
+		}
+		defer func() {
+			if _, err := sqlxDB.Exec(`DELETE FROM blobs WHERE chain_id = 1 AND tx_hash = '0xretiredtx'`); err != nil {
+				t.Fatalf("clean up retired-sender blob: %v", err)
+			}
+		}()
+
+		// /users side of the contract: the retired sender's historical blob
+		// attributes it to the entity even though blob_users has no row.
+		var retired models.BlobUserStats
+		if err := sqlxDB.GetContext(ctx, &retired, queryUserByAddress, 1, "0xbaseretired"); err != nil {
+			t.Fatalf("queryUserByAddress retired sender: %v", err)
+		}
+		if retired.Name != "Base" || retired.BlobCount != 1 {
+			t.Fatalf("expected retired sender attributed to Base, got %+v", retired)
+		}
+
 		var rollups []searchRollupRow
 		if err := sqlxDB.SelectContext(ctx, &rollups, querySearchRollupsByName, 1, escapeLikePattern("ba")+"%", maxSearchRollupMatches); err != nil {
 			t.Fatalf("querySearchRollupsByName: %v", err)
@@ -424,6 +455,8 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 		if len(rollups) != 1 || rollups[0].Name != "Base" {
 			t.Fatalf("unexpected rollup matches: %+v", rollups)
 		}
+		// /search side: the same retired sender /users just attributed must
+		// appear in the rollup match's address set.
 		if got, want := []string(rollups[0].Addresses), []string{"0xbase", "0xbaseretired"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 			t.Fatalf("rollup addresses = %v, want %v", got, want)
 		}
