@@ -45,6 +45,8 @@ type API struct {
 	pricingCache      map[string]pricingCacheEntry
 	recordsCache      map[string]recordsCacheEntry
 	blobScheduleCache map[int]blobScheduleCacheEntry
+	entityCache       map[string]entityCacheEntry
+	entityAddrCache   map[string]entityAddrCacheEntry
 	hub               *Hub
 	poller            *Poller
 }
@@ -86,6 +88,16 @@ type blobListCacheEntry struct {
 
 type pricingCacheEntry struct {
 	response  PricingResponse
+	expiresAt time.Time
+}
+
+type entityCacheEntry struct {
+	response  EntityResponse
+	expiresAt time.Time
+}
+
+type entityAddrCacheEntry struct {
+	addresses []string
 	expiresAt time.Time
 }
 
@@ -184,6 +196,8 @@ func newAPI(ctx context.Context, db DBProvider, cfg *config.Config) *API {
 		pricingCache:      make(map[string]pricingCacheEntry),
 		recordsCache:      make(map[string]recordsCacheEntry),
 		blobScheduleCache: make(map[int]blobScheduleCacheEntry),
+		entityCache:       make(map[string]entityCacheEntry),
+		entityAddrCache:   make(map[string]entityAddrCacheEntry),
 		hub:               hub,
 		poller:            poller,
 	}
@@ -366,6 +380,11 @@ func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) 
 			r.With(aggregateLimit).Get("/breakdown", a.GetUserBreakdown)
 			r.With(aggregateLimit).Get("/{address}", a.GetUserByAddress)
 		})
+
+		// Entity endpoint: attributed-entity detail for the entity-first
+		// frontend view. A leaderboard-class aggregation like /users, so it
+		// takes the same aggregate rate limit.
+		r.With(aggregateLimit).Get("/entities/{key}", a.GetEntityByKey)
 
 		// Records endpoint: historical leaderboards. Every list is a top-N
 		// read over incrementally maintained summaries, but it is four of them

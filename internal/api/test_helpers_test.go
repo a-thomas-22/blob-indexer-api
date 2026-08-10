@@ -84,6 +84,8 @@ func newTestAPIWithDB(db DBProvider) *API {
 		mempoolBlobsCache: make(map[string]blobListCacheEntry),
 		pricingCache:      make(map[string]pricingCacheEntry),
 		recordsCache:      make(map[string]recordsCacheEntry),
+		entityCache:       make(map[string]entityCacheEntry),
+		entityAddrCache:   make(map[string]entityAddrCacheEntry),
 	}
 }
 

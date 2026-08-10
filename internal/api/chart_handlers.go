@@ -1593,7 +1593,7 @@ func attributionEntityBaseSQL(limitPlaceholder string) string {
 			src.blob_gas_used,
 			CASE
 				WHEN src.raw_name = '' THEN 'unknown'
-				ELSE COALESCE(NULLIF(TRIM(BOTH '_' FROM regexp_replace(lower(src.raw_name), '[^a-z0-9]+', '_', 'g')), ''), 'unknown')
+				ELSE COALESCE(NULLIF(` + entityKeySQL("src.raw_name") + `, ''), 'unknown')
 			END AS entity_key,
 			CASE WHEN src.raw_name = '' THEN 'Unknown' ELSE src.raw_name END AS entity_name,
 			CASE
