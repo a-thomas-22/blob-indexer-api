@@ -83,6 +83,23 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 	`, now); err != nil {
 		t.Fatalf("seed blob user: %v", err)
 	}
+	// Attribution claims mirroring the state the blob-list sync leaves after a
+	// sender rotation: the active sender also has a blob_users row, the
+	// retired sender (closed validity range) exists only here because the sync
+	// deletes non-current addresses from blob_users, and the disputed claim
+	// never attributes blobs. The /search rollup match must carry the retired
+	// address and exclude the disputed one.
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO blob_attribution_claims (
+			chain_id, source, address, entity_id, name, category, role,
+			confidence, status, valid_from_block, valid_to_block
+		) VALUES
+			(1, 'blob-list', '0xbase', 'base', 'Base', 'rollup', 'batcher', 'confirmed', 'active', 0, NULL),
+			(1, 'blob-list', '0xbaseretired', 'base', 'Base', 'rollup', 'batcher', 'confirmed', 'active', 0, 50),
+			(1, 'blob-list', '0xbasedisputed', 'base', 'Base', 'rollup', 'batcher', 'possible', 'Disputed', 0, NULL)
+	`); err != nil {
+		t.Fatalf("seed attribution claims: %v", err)
+	}
 	// Block 99 is deliberately missing: the coverage bounds are documented as
 	// sparse extremes, so an interior gap (a failed block awaiting retry) must
 	// not shrink the reported range.
@@ -395,12 +412,20 @@ func TestMempoolQueriesAgainstRealPostgres(t *testing.T) {
 	})
 
 	t.Run("querySearchRollupsByName", func(t *testing.T) {
+		// The address set must union the current blob_users projection with
+		// historical claims: the retired sender is absent from blob_users but
+		// its blobs still carry the attribution, and /users reports it, so
+		// /search must list it too. Disputed claims never attribute and stay
+		// out. The active sender appears in both tables and must not repeat.
 		var rollups []searchRollupRow
 		if err := sqlxDB.SelectContext(ctx, &rollups, querySearchRollupsByName, 1, escapeLikePattern("ba")+"%", maxSearchRollupMatches); err != nil {
 			t.Fatalf("querySearchRollupsByName: %v", err)
 		}
-		if len(rollups) != 1 || rollups[0].Name != "Base" || len(rollups[0].Addresses) != 1 || rollups[0].Addresses[0] != "0xbase" {
+		if len(rollups) != 1 || rollups[0].Name != "Base" {
 			t.Fatalf("unexpected rollup matches: %+v", rollups)
+		}
+		if got, want := []string(rollups[0].Addresses), []string{"0xbase", "0xbaseretired"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+			t.Fatalf("rollup addresses = %v, want %v", got, want)
 		}
 		// LIKE metacharacters in user input must match literally, not as
 		// wildcards: "_ase" would otherwise match "Base".

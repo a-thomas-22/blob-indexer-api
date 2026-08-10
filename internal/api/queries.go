@@ -1232,13 +1232,29 @@ const (
 	// internal/attribution) as a case-insensitive prefix. $2 must be a
 	// LIKE-escaped lowercase prefix pattern. The escape literal is an
 	// E-string so its meaning does not depend on the server's
-	// standard_conforming_strings setting. blob_users holds one row per
-	// attributed address, so the scan is bounded by the (small) known-user
-	// set rather than any per-blob table.
+	// standard_conforming_strings setting.
+	//
+	// The address set is blob_users unioned with non-disputed
+	// blob_attribution_claims: blob_users alone is only the currently-active
+	// registry projection (the blob-list sync deletes retired senders from
+	// it), while claims retain every address whose validity range attributed
+	// historical blobs — the same addresses /users reports — so a rollup
+	// match must list retired senders too. Disputed claims never attribute
+	// blobs and stay excluded. Both tables hold one row per attributed
+	// address/claim, so the scan is bounded by the (small) known-user set
+	// rather than any per-blob table.
 	querySearchRollupsByName = `
 		SELECT name, array_agg(address ORDER BY address) AS addresses
-		FROM blob_users
-		WHERE chain_id = $1 AND LOWER(name) LIKE $2 ESCAPE E'\\'
+		FROM (
+			SELECT name, address
+			FROM blob_users
+			WHERE chain_id = $1
+			UNION
+			SELECT name, address
+			FROM blob_attribution_claims
+			WHERE chain_id = $1 AND LOWER(status) <> 'disputed'
+		) AS entity_addresses
+		WHERE LOWER(name) LIKE $2 ESCAPE E'\\'
 		GROUP BY name
 		ORDER BY name ASC
 		LIMIT $3
