@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/go-chi/chi/v5"
+	"github.com/lib/pq"
 	"go.uber.org/zap"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/blobparams"
@@ -464,8 +465,8 @@ func (a *API) cachedBlobList(
 }
 
 // blobList answers a latest/mempool list request: the hot cacheable shape goes
-// through cachedBlobList, everything else (address filter, pagination) queries
-// the database directly.
+// through cachedBlobList, everything else (address filter, entity filter,
+// pagination) queries the database directly.
 func (a *API) blobList(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -473,7 +474,7 @@ func (a *API) blobList(
 	cache map[string]blobListCacheEntry,
 	cachePrefix string,
 	ttl time.Duration,
-	listQuery, byAddressQuery, errorMessage string,
+	listQuery, byAddressQuery, byEntityQuery, errorMessage string,
 ) ([]BlobResponse, bool) {
 	limit, offset, err := a.parsePagination(r, 10)
 	if err != nil {
@@ -482,8 +483,13 @@ func (a *API) blobList(
 	}
 
 	fromAddress := r.URL.Query().Get("from")
+	entityParam := r.URL.Query().Get("entity")
+	if fromAddress != "" && entityParam != "" {
+		a.respondError(w, http.StatusBadRequest, "Use either the from or the entity parameter, not both")
+		return nil, false
+	}
 
-	if fromAddress == "" && offset == 0 {
+	if fromAddress == "" && entityParam == "" && offset == 0 {
 		response, err := a.cachedBlobList(r, cache, cachePrefix, ttl, network, limit, listQuery)
 		if err != nil {
 			logger.Error(errorMessage,
@@ -496,20 +502,48 @@ func (a *API) blobList(
 	}
 
 	var blobs []models.Blob
-	if fromAddress != "" {
+	switch {
+	case entityParam != "":
+		// Same key canonicalization as /entities/{key}, so a display name is
+		// accepted and the reserved chart buckets are rejected.
+		key := slugifyEntityKey(entityParam)
+		if key == "" {
+			a.respondError(w, http.StatusBadRequest, "Invalid entity parameter")
+			return nil, false
+		}
+		if key == entityKeyUnknown || key == entityKeyOther {
+			a.respondError(w, http.StatusNotFound, "Entity not found")
+			return nil, false
+		}
+		addresses, resolveErr := a.resolveEntityAddresses(r, network.ChainID, key)
+		if resolveErr != nil {
+			logger.Error(errorMessage,
+				zap.String("network", network.Name),
+				zap.String("entity", key),
+				zap.Error(resolveErr))
+			a.respondAggregateError(w, resolveErr, errorMessage)
+			return nil, false
+		}
+		if len(addresses) == 0 {
+			a.respondError(w, http.StatusNotFound, "Entity not found")
+			return nil, false
+		}
+		err = a.db.SelectContext(r.Context(), &blobs, byEntityQuery, network.ChainID, pq.Array(addresses), limit, offset)
+	case fromAddress != "":
 		if !common.IsHexAddress(fromAddress) {
 			a.respondError(w, http.StatusBadRequest, "Invalid address format")
 			return nil, false
 		}
 		fromAddress = common.HexToAddress(fromAddress).Hex()
 		err = a.db.SelectContext(r.Context(), &blobs, byAddressQuery, network.ChainID, fromAddress, limit, offset)
-	} else {
+	default:
 		err = a.db.SelectContext(r.Context(), &blobs, listQuery, network.ChainID, limit, offset)
 	}
 	if err != nil {
 		logger.Error(errorMessage,
 			zap.String("network", network.Name),
 			zap.String("from", fromAddress),
+			zap.String("entity", entityParam),
 			zap.Error(err))
 		a.respondError(w, http.StatusInternalServerError, errorMessage)
 		return nil, false
@@ -531,9 +565,11 @@ func (a *API) blobList(
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
 // @Param limit query int false "Number of blobs to return (default: 10, max: 100)"
 // @Param offset query int false "Number of blobs to skip for pagination (default: 0, max: 10000)"
-// @Param from query string false "Filter by sender address"
+// @Param from query string false "Filter by sender address (mutually exclusive with entity)"
+// @Param entity query string false "Filter by attributed entity key (as returned by /charts/attribution-usage and /entities); returns blobs from any of the entity's addresses"
 // @Success 200 {object} Response{data=[]BlobResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
+// @Failure 404 {object} Response "Entity not found"
 // @Failure 500 {object} Response "Internal server error"
 // @Router /blob/latest [get]
 func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
@@ -547,7 +583,7 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 
 	response, ok := a.blobList(w, r, network,
 		a.latestBlobsCache, "latest_blobs", latestBlobsCacheTTL,
-		queryLatestBlobs, queryLatestBlobsByAddress, "Failed to get latest blobs")
+		queryLatestBlobs, queryLatestBlobsByAddress, queryLatestBlobsByAddresses, "Failed to get latest blobs")
 	if !ok {
 		return
 	}
@@ -568,9 +604,11 @@ func (a *API) GetLatestBlobs(w http.ResponseWriter, r *http.Request) {
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
 // @Param limit query int false "Number of blobs to return (default: 10, max: 100)"
 // @Param offset query int false "Number of blobs to skip for pagination (default: 0, max: 10000)"
-// @Param from query string false "Filter by sender address"
+// @Param from query string false "Filter by sender address (mutually exclusive with entity)"
+// @Param entity query string false "Filter by attributed entity key (as returned by /charts/attribution-usage and /entities); returns blobs from any of the entity's addresses"
 // @Success 200 {object} Response{data=[]BlobResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
+// @Failure 404 {object} Response "Entity not found"
 // @Failure 500 {object} Response "Internal server error"
 // @Router /blob/mempool [get]
 func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
@@ -584,7 +622,7 @@ func (a *API) GetMempoolBlobs(w http.ResponseWriter, r *http.Request) {
 
 	response, ok := a.blobList(w, r, network,
 		a.mempoolBlobsCache, "mempool_blobs", mempoolBlobsCacheTTL,
-		queryMempoolBlobs, queryMempoolBlobsByAddress, "Failed to get pending blobs")
+		queryMempoolBlobs, queryMempoolBlobsByAddress, queryMempoolBlobsByAddresses, "Failed to get pending blobs")
 	if !ok {
 		return
 	}

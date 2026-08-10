@@ -58,6 +58,7 @@ Canonical routes are under `/api/v1`. Legacy `/api/*` paths redirect to `/api/v1
 - `/api/v1/blob/latest`, `/api/v1/blob/mempool`, `/api/v1/blob/pricing`, `/api/v1/blob/replacements`, `/api/v1/blob/by-hash/{versionedHash}`, `/api/v1/blob/{txHash}` — blob queries
 - `/api/v1/block/{number}` — single indexed block with its blobs (matches the WebSocket `new_block` payload)
 - `/api/v1/users` — top blob users
+- `/api/v1/entities/{key}` — attributed entity detail (aggregates + per-address breakdown; key shared with `/charts/attribution-usage` shares). `/blob/latest` and `/blob/mempool` accept `entity={key}` to filter across the entity's addresses
 - `/api/v1/records` — historical leaderboards (streaks, base fee peaks, busiest hours)
 - `/api/v1/stats` — historical stats
 - `/api/v1/status` — indexer status
