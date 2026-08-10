@@ -273,6 +273,25 @@ func TestGetEntityByKey_InvalidKey(t *testing.T) {
 	}
 }
 
+func TestGetEntityByKey_MalformedEscape(t *testing.T) {
+	// Malformed percent-encoding must be a 400, not a silent fallback that
+	// slugifies the raw text into an unintended key (%zzsome_entity would
+	// otherwise resolve as zzsome_entity).
+	a := newTestAPIWithDB(&mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			t.Fatal("a malformed key must not reach the database")
+			return nil
+		},
+	})
+	for _, key := range []string{"%zzsome_entity", "trailing%"} {
+		w := httptest.NewRecorder()
+		a.GetEntityByKey(w, entityRequest(t, "/", key))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("key %q: expected 400, got %d", key, w.Code)
+		}
+	}
+}
+
 func TestGetEntityByKey_InvalidRange(t *testing.T) {
 	a := newTestAPI()
 	w := httptest.NewRecorder()

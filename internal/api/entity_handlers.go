@@ -159,9 +159,14 @@ func (a *API) GetEntityByKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rawKey := chi.URLParam(r, "key")
-	if unescaped, unescapeErr := url.PathUnescape(rawKey); unescapeErr == nil {
-		rawKey = unescaped
+	// chi hands back the raw (still-escaped) segment when the path contained
+	// percent-escapes, so decode before slugifying. Malformed encodings are a
+	// 400 rather than a fallback to the raw text: slugifying the undecoded
+	// bytes could silently resolve an unintended key.
+	rawKey, err := url.PathUnescape(chi.URLParam(r, "key"))
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, "Invalid entity key")
+		return
 	}
 	key := slugifyEntityKey(rawKey)
 	if key == "" {
