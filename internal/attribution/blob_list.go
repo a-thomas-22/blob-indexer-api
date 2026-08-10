@@ -24,6 +24,13 @@ const (
 	defaultRequestTimeout  = 10 * time.Second
 	maxBlobListBodyBytes   = 10 << 20
 
+	// blobListUserDescriptionPrefix marks the blob_users rows this sync owns.
+	// Claim.description() always emits "source=<source>; ..." first, so every
+	// row the sync writes for a blob-list claim carries this prefix and rows
+	// added by hand (Service.AddKnownUser) do not — which is what lets the
+	// reconcile below delete only its own rows.
+	blobListUserDescriptionPrefix = "source=" + blobListSource + ";"
+
 	claimStatusActive        = "active"
 	claimStatusDisputed      = "disputed"
 	claimConfidenceConfirmed = "confirmed"
@@ -476,29 +483,48 @@ func (s *Service) syncBlobListClaims(ctx context.Context, claims []Claim) (blobL
 	}
 
 	currentUsers := bestClaimsAtBlock(claims, stats.CurrentBlock)
-	previousCurrentUsers := bestClaimsAtBlock(previous, stats.CurrentBlock)
 	changedAddresses := changedClaimAddresses(previous, claims)
 	changedAddressSet := makeAddressSet(changedAddresses)
 	stats.CurrentUsers = len(currentUsers)
 	stats.ChangedAddresses = len(changedAddresses)
 
-	if len(previousCurrentUsers) > 0 {
-		deletedAddresses := make([]string, 0)
-		for address := range previousCurrentUsers {
-			if _, ok := currentUsers[address]; !ok {
-				deletedAddresses = append(deletedAddresses, address)
-			}
+	// blob_users is the current-only projection of the registry — the full
+	// historical address set lives in blob_attribution_claims — so a row
+	// belongs here only while its claim is current at the tip. Reconcile
+	// against currentUsers directly rather than diffing the previous
+	// projection: both projections are evaluated at the *new* tip, so an
+	// address whose claim expired since the last refresh is absent from both
+	// and its row was never deleted. It then outlived the claim entirely once
+	// the artifact dropped or disputed it, leaving /search and the /users name
+	// fallback reporting a name the registry no longer stands behind.
+	//
+	// The description marker scopes the delete to rows this sync wrote, so
+	// manually added users (Service.AddKnownUser) survive.
+	//
+	// A chain with no indexed blobs has no usable tip: CurrentBlock is -1, and
+	// matchesBlock(-1) only accepts open-ended claims starting at or before
+	// genesis, so currentUsers is empty for a realistic artifact. Reconciling
+	// against that would wipe the whole projection before the first blob is
+	// indexed or during a reindex that truncates blobs. Skip until there is a
+	// real tip to evaluate against — stale rows are recoverable, a wiped
+	// projection mid-reindex is a visible outage.
+	if stats.CurrentBlock >= 0 {
+		currentAddresses := make([]string, 0, len(currentUsers))
+		for address := range currentUsers {
+			currentAddresses = append(currentAddresses, address)
 		}
-		if len(deletedAddresses) > 0 {
-			res, err := tx.ExecContext(ctx, `
-				DELETE FROM blob_users
-				WHERE chain_id = $1 AND address = ANY($2)
-			`, s.networkID, pq.Array(deletedAddresses))
-			if err != nil {
-				return stats, fmt.Errorf("failed to delete stale blob users: %w", err)
-			}
-			stats.BlobUsersDeleted = rowsAffected(res)
+		sort.Strings(currentAddresses)
+
+		staleRes, err := tx.ExecContext(ctx, `
+			DELETE FROM blob_users
+			WHERE chain_id = $1
+				AND starts_with(description, $2)
+				AND NOT (address = ANY($3::text[]))
+		`, s.networkID, blobListUserDescriptionPrefix, pq.Array(currentAddresses))
+		if err != nil {
+			return stats, fmt.Errorf("failed to delete stale blob users: %w", err)
 		}
+		stats.BlobUsersDeleted = rowsAffected(staleRes)
 	}
 
 	for _, claim := range currentUsers {
@@ -627,9 +653,13 @@ func sortClaimsForApplication(claims []Claim) {
 	})
 }
 
+// description renders the blob_users description for a claim. The
+// "source=<source>;" prefix is emitted unconditionally and first: the stale-row
+// reconcile in syncBlobListClaims identifies the rows it owns by matching
+// blobListUserDescriptionPrefix, so the prefix must not depend on which
+// optional fields the claim carries.
 func (claim Claim) description() string {
 	parts := []string{
-		fmt.Sprintf("source=%s", claim.Source),
 		fmt.Sprintf("entity_id=%s", claim.EntityID),
 	}
 	if claim.Role != "" {
@@ -641,7 +671,7 @@ func (claim Claim) description() string {
 	if claim.Status != "" {
 		parts = append(parts, fmt.Sprintf("status=%s", claim.Status))
 	}
-	return strings.Join(parts, "; ")
+	return fmt.Sprintf("source=%s; %s", claim.Source, strings.Join(parts, "; "))
 }
 
 func rowsAffected(res sql.Result) int64 {
