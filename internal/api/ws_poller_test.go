@@ -590,10 +590,12 @@ func TestPoller_UsersThrottle(t *testing.T) {
 	if got := countEvents(events, EventStatsUpdate); got != 2 {
 		t.Fatalf("stats_update should fire per block, got %d", got)
 	}
-	// One throttled users broadcast emits both grouping variants: the
-	// per-address payload and the entity-grouped payload.
-	if got := countEvents(events, EventUsersUpdate); got != 2 {
-		t.Fatalf("users_update should be throttled to one broadcast (2 grouping variants), got %d", got)
+	if got := countEvents(events, EventUsersUpdate); got != 1 {
+		t.Fatalf("users_update should be throttled to 1, got %d", got)
+	}
+	// The entity-grouped companion event rides the same throttle.
+	if got := countEvents(events, EventUsersGroupedUpdate); got != 1 {
+		t.Fatalf("users_grouped_update should be throttled to 1, got %d", got)
 	}
 }
 
@@ -902,25 +904,26 @@ func TestPoller_BroadcastUsersUpdate_Success(t *testing.T) {
 	poller := NewPoller(db, hub, testNetworks(), time.Second, time.Second)
 	poller.broadcastUsersUpdate(context.Background(), sepoliaNetwork())
 
-	// One broadcast, two grouping variants: per-address (no group tag) and
-	// entity-grouped (group tag set), both covering the all-history range.
+	// One broadcast, two events: the per-address users_update (untagged, so
+	// pre-grouping clients keep working unchanged) and the entity-grouped
+	// companion on its own event type.
 	events := drainEvents(client, 50*time.Millisecond)
-	if countEvents(events, EventUsersUpdate) != 2 {
-		t.Fatalf("expected two users_update variants, got %d", countEvents(events, EventUsersUpdate))
+	if countEvents(events, EventUsersUpdate) != 1 {
+		t.Fatalf("expected one users_update, got %d", countEvents(events, EventUsersUpdate))
 	}
-	var sawPerAddress, sawGrouped bool
+	if countEvents(events, EventUsersGroupedUpdate) != 1 {
+		t.Fatalf("expected one users_grouped_update, got %d", countEvents(events, EventUsersGroupedUpdate))
+	}
 	for _, e := range events {
-		if e.Type != EventUsersUpdate {
-			continue
-		}
-		if e.Range != string(userWindowAll) {
-			t.Fatalf("expected users_update range %q, got %q", userWindowAll, e.Range)
-		}
-		switch e.Group {
-		case "":
-			sawPerAddress = true
-		case string(userGroupEntity):
-			sawGrouped = true
+		switch e.Type { //nolint:exhaustive // only the two users events are broadcast here
+		case EventUsersUpdate:
+			if e.Range != string(userWindowAll) || e.Group != "" {
+				t.Fatalf("unexpected users_update envelope: %+v", e)
+			}
+		case EventUsersGroupedUpdate:
+			if e.Range != string(userWindowAll) || e.Group != string(userGroupEntity) {
+				t.Fatalf("unexpected users_grouped_update envelope: %+v", e)
+			}
 			data, _ := json.Marshal(e.Data)
 			var rows []UserResponse
 			if err := json.Unmarshal(data, &rows); err != nil {
@@ -929,12 +932,7 @@ func TestPoller_BroadcastUsersUpdate_Success(t *testing.T) {
 			if len(rows) != 1 || rows[0].Key != "base" || rows[0].Address != "0xdead" || len(rows[0].Addresses) != 2 {
 				t.Fatalf("unexpected grouped users payload: %+v", rows)
 			}
-		default:
-			t.Fatalf("unexpected users_update group tag %q", e.Group)
 		}
-	}
-	if !sawPerAddress || !sawGrouped {
-		t.Fatalf("expected both grouping variants, got per-address=%v grouped=%v", sawPerAddress, sawGrouped)
 	}
 }
 
@@ -961,10 +959,8 @@ func TestPoller_BroadcastUsersUpdate_GroupedQueryError(t *testing.T) {
 	if countEvents(events, EventUsersUpdate) != 1 {
 		t.Fatalf("expected the per-address users_update to survive a grouped query error, got %d", countEvents(events, EventUsersUpdate))
 	}
-	for _, e := range events {
-		if e.Type == EventUsersUpdate && e.Group != "" {
-			t.Fatalf("expected only the per-address variant, got group %q", e.Group)
-		}
+	if countEvents(events, EventUsersGroupedUpdate) != 0 {
+		t.Fatalf("expected no users_grouped_update after a grouped query error")
 	}
 }
 

@@ -477,27 +477,27 @@ const (
 	// grouped sums, which equals summing the per-address shares without their
 	// per-row rounding. Member addresses are ordered busiest first so the
 	// first element serves as the group's primary address; the trailing
-	// group_key sort key keeps ordering and pagination deterministic across
-	// ties. The bare entity_slug joins group_key in GROUP BY both to license
-	// the slug references in the select list (the group-key CASE alone would
-	// not) and to keep an address-keyed row distinct from an equal entity
-	// slug; within a group the slug is constant, so the partitioning is
-	// unchanged. The display name is the busiest member's attribution
-	// spelling — members can differ in case while sharing a slug, and the
-	// busiest-first pick is deterministic where MIN would be
-	// collation-dependent.
+	// group_key + is_entity sort keys keep ordering and pagination
+	// deterministic across ties, including the theoretical case of an
+	// address-keyed row tying an entity whose slug equals that address
+	// (attribution names are curated, so a hex-address-shaped name should
+	// never actually ship). The bare entity_slug joins group_key in GROUP BY
+	// both to license the slug references in the select list (the group-key
+	// CASE alone would not) and to keep that colliding pair as two rows;
+	// within a group the slug is constant, so the partitioning is unchanged.
+	// The display name is always the busiest member's attribution spelling:
+	// members can differ in case while sharing a slug (busiest-first is
+	// deterministic where MIN would be collation-dependent), unattributed
+	// rows yield '' naturally, and a name whose slug is degenerate keeps its
+	// spelling on its address-keyed row instead of being blanked into a fake
+	// unattributed sender.
 	userGroupTailSQL = `,
 		grouped AS (
 			SELECT
 				CASE WHEN k.entity_slug = '' THEN k.from_address ELSE k.entity_slug END AS group_key,
-				CASE
-					WHEN k.entity_slug = '' THEN ''
-					ELSE (array_agg(k.user_attribution ORDER BY k.blob_count DESC, k.total_cost_wei DESC, k.from_address ASC))[1]
-				END AS user_attribution,
-				CASE
-					WHEN k.entity_slug = '' THEN MIN(k.category)
-					ELSE COALESCE(NULLIF(MIN(NULLIF(k.category, 'unknown')), ''), 'unknown')
-				END AS category,
+				(k.entity_slug <> '') AS is_entity,
+				(array_agg(k.user_attribution ORDER BY k.blob_count DESC, k.total_cost_wei DESC, k.from_address ASC))[1] AS user_attribution,
+				COALESCE(NULLIF(MIN(NULLIF(k.category, 'unknown')), ''), 'unknown') AS category,
 				array_agg(k.from_address ORDER BY k.blob_count DESC, k.total_cost_wei DESC, k.from_address ASC) AS addresses,
 				COALESCE(SUM(k.blob_count), 0)::bigint AS blob_count,
 				COALESCE(SUM(k.total_cost_wei), 0) AS total_cost_wei,
@@ -530,15 +530,21 @@ const (
 			CASE WHEN $5 = 'spend' THEN grouped.total_cost_wei END DESC,
 			grouped.blob_count DESC,
 			grouped.total_cost_wei DESC,
-			grouped.group_key ASC
+			grouped.group_key ASC,
+			grouped.is_entity DESC
 		LIMIT $2 OFFSET $3
 	`
 
 	// userGroupSlugExpr normalizes an attribution name into its entity slug,
 	// mirroring the /charts/attribution-usage key scheme
-	// (attributionEntityBaseSQL): lowercase, non-alphanumeric runs collapsed
-	// to '_', outer underscores trimmed. Unattributed rows (and degenerate
-	// names that slug to nothing) yield '' so the tail keys them by address.
+	// (attributionEntityBaseSQL): lowercase, non-ASCII-alphanumeric runs
+	// collapsed to '_', outer underscores trimmed. Unattributed rows and
+	// degenerate names that slug to nothing (e.g. fully non-ASCII) yield ''
+	// so the tail keys them by address — such rows keep their attribution
+	// name but cannot merge across addresses. This deliberately diverges from
+	// the chart, which buckets empty slugs under its aggregate 'unknown'
+	// series: a leaderboard row must stay addressable, and folding distinct
+	// degenerate names into one pseudo-entity would fabricate a merged row.
 	userGroupSlugExpr = `COALESCE(NULLIF(TRIM(BOTH '_' FROM regexp_replace(lower(ut.user_attribution), '[^a-z0-9]+', '_', 'g')), ''), '')`
 
 	// queryTopBlobUserGroupsWithOptions is the entity-grouped variant of

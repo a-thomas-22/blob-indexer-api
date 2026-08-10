@@ -712,6 +712,56 @@ func TestUserGroupQueriesAgainstRealPostgres(t *testing.T) {
 		}
 	})
 
+	t.Run("degenerate slug keeps name and address key", func(t *testing.T) {
+		// Chain 2 keeps this case out of the chain-1 share denominators. A
+		// fully non-ASCII attribution slugs to '', so the two senders must
+		// stay separate address-keyed rows — but with their attribution name
+		// preserved, not blanked into pseudo-unattributed rows.
+		if _, err := sqlxDB.Exec(`
+			INSERT INTO networks (chain_id, name, start_block, is_enabled)
+			VALUES (2, 'groupedtest', '0', true)
+			ON CONFLICT (chain_id) DO NOTHING
+		`); err != nil {
+			t.Fatalf("seed network: %v", err)
+		}
+		if _, err := sqlxDB.Exec(`
+			INSERT INTO blobs (
+				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+				timestamp, max_fee_per_blob_gas, blob_gas_used
+			) VALUES
+				(2, 300, 0, '0xe1', '0xeee', '東京', 131072, 10, 2, 100, $1, 12, 131072),
+				(2, 300, 1, '0xf1', '0xfff', '東京', 131072, 10, 2, 100, $1, 12, 131072)
+		`, recent); err != nil {
+			t.Fatalf("seed degenerate-name blobs: %v", err)
+		}
+
+		for name, query := range map[string]string{
+			"windowed": queryTopBlobUserGroupsWithOptions,
+			"all":      queryTopBlobUserGroupsAll,
+		} {
+			window := "1h"
+			if name == "all" {
+				window = "all"
+			}
+			var groups []models.BlobUserGroupStats
+			if err := sqlxDB.SelectContext(ctx, &groups, query, 2, 10, 0, window, "count"); err != nil {
+				t.Fatalf("%s grouped query on degenerate names: %v", name, err)
+			}
+			if len(groups) != 2 {
+				t.Fatalf("%s: expected 2 address-keyed rows for degenerate slugs, got %+v", name, groups)
+			}
+			for _, row := range groups {
+				if row.Key != row.Addresses[0] || len(row.Addresses) != 1 {
+					t.Fatalf("%s: expected address-keyed single-member row, got %+v", name, row)
+				}
+				if row.Name != "東京" {
+					t.Fatalf("%s: expected preserved attribution name, got %+v", name, row)
+				}
+			}
+		}
+	})
+
 	t.Run("queryTopBlobUserGroupsAll", func(t *testing.T) {
 		var groups []models.BlobUserGroupStats
 		if err := sqlxDB.SelectContext(ctx, &groups, queryTopBlobUserGroupsAll, 1, 10, 0, "all", "count"); err != nil {
