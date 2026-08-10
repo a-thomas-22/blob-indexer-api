@@ -19,6 +19,13 @@ const (
 	EventStatsUpdate WSEventType = "stats_update"
 	// EventUsersUpdate is emitted when user rankings change.
 	EventUsersUpdate WSEventType = "users_update"
+	// EventUsersGroupedUpdate is emitted alongside EventUsersUpdate and
+	// carries the entity-grouped leaderboard (GET /users?group=entity rows).
+	// It is a distinct event type — not a tagged users_update — so clients
+	// deployed before grouping existed never see grouped rows: type-switching
+	// clients ignore the unknown type and filtered clients never subscribed
+	// to it.
+	EventUsersGroupedUpdate WSEventType = "users_grouped_update"
 	// EventPing is a heartbeat sent every 30s.
 	EventPing WSEventType = "ping"
 
@@ -34,6 +41,7 @@ var AllEventTypes = []WSEventType{
 	EventMempoolUpdate,
 	EventStatsUpdate,
 	EventUsersUpdate,
+	EventUsersGroupedUpdate,
 }
 
 // WSEvent is the envelope for all server-to-client WebSocket messages.
@@ -45,7 +53,14 @@ type WSEvent struct {
 	// lives on the envelope because the users_update data payload is a bare
 	// array, which can't grow a field without breaking its shape. Empty for
 	// event types that have no aggregation window.
-	Range string      `json:"range,omitempty"`
+	Range string `json:"range,omitempty"`
+	// Group identifies the row grouping a users_grouped_update payload uses,
+	// matching the REST `group` values on GET /users (currently always
+	// "entity"). The grouping is already implied by the event type — the tag
+	// just keeps the envelope self-describing. Empty on every other event
+	// type, including the per-address users_update. Envelope-level for the
+	// same reason as Range.
+	Group string      `json:"group,omitempty"`
 	Data  interface{} `json:"data,omitempty"`
 }
 

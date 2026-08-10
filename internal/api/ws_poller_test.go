@@ -593,6 +593,10 @@ func TestPoller_UsersThrottle(t *testing.T) {
 	if got := countEvents(events, EventUsersUpdate); got != 1 {
 		t.Fatalf("users_update should be throttled to 1, got %d", got)
 	}
+	// The entity-grouped companion event rides the same throttle.
+	if got := countEvents(events, EventUsersGroupedUpdate); got != 1 {
+		t.Fatalf("users_grouped_update should be throttled to 1, got %d", got)
+	}
 }
 
 // fakeListener is a controllable blockListener for Run-loop tests.
@@ -885,6 +889,14 @@ func TestPoller_BroadcastUsersUpdate_Success(t *testing.T) {
 					{Address: "0xdead", Name: "Base", BlobCount: 5, TotalCostWei: "0"},
 				}
 			}
+			if out, ok := dest.(*[]models.BlobUserGroupStats); ok {
+				if query != queryTopBlobUserGroupsAll {
+					t.Errorf("expected grouped broadcast to use queryTopBlobUserGroupsAll")
+				}
+				*out = []models.BlobUserGroupStats{
+					{Key: "base", Name: "Base", Addresses: pq.StringArray{"0xdead", "0xbeef"}, BlobCount: 7, TotalCostWei: "0"},
+				}
+			}
 			return nil
 		},
 	}
@@ -892,14 +904,63 @@ func TestPoller_BroadcastUsersUpdate_Success(t *testing.T) {
 	poller := NewPoller(db, hub, testNetworks(), time.Second, time.Second)
 	poller.broadcastUsersUpdate(context.Background(), sepoliaNetwork())
 
+	// One broadcast, two events: the per-address users_update (untagged, so
+	// pre-grouping clients keep working unchanged) and the entity-grouped
+	// companion on its own event type.
 	events := drainEvents(client, 50*time.Millisecond)
 	if countEvents(events, EventUsersUpdate) != 1 {
 		t.Fatalf("expected one users_update, got %d", countEvents(events, EventUsersUpdate))
 	}
+	if countEvents(events, EventUsersGroupedUpdate) != 1 {
+		t.Fatalf("expected one users_grouped_update, got %d", countEvents(events, EventUsersGroupedUpdate))
+	}
 	for _, e := range events {
-		if e.Type == EventUsersUpdate && e.Range != string(userWindowAll) {
-			t.Fatalf("expected users_update range %q, got %q", userWindowAll, e.Range)
+		switch e.Type { //nolint:exhaustive // only the two users events are broadcast here
+		case EventUsersUpdate:
+			if e.Range != string(userWindowAll) || e.Group != "" {
+				t.Fatalf("unexpected users_update envelope: %+v", e)
+			}
+		case EventUsersGroupedUpdate:
+			if e.Range != string(userWindowAll) || e.Group != string(userGroupEntity) {
+				t.Fatalf("unexpected users_grouped_update envelope: %+v", e)
+			}
+			data, _ := json.Marshal(e.Data)
+			var rows []UserResponse
+			if err := json.Unmarshal(data, &rows); err != nil {
+				t.Fatalf("failed to decode grouped users payload: %v", err)
+			}
+			if len(rows) != 1 || rows[0].Key != "base" || rows[0].Address != "0xdead" || len(rows[0].Addresses) != 2 {
+				t.Fatalf("unexpected grouped users payload: %+v", rows)
+			}
 		}
+	}
+}
+
+func TestPoller_BroadcastUsersUpdate_GroupedQueryError(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+	client := registerTestClient(t, hub)
+
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if _, ok := dest.(*[]models.BlobUserGroupStats); ok {
+				return fmt.Errorf("grouped users query error")
+			}
+			return nil
+		},
+	}
+
+	poller := NewPoller(db, hub, testNetworks(), time.Second, time.Second)
+	poller.broadcastUsersUpdate(context.Background(), sepoliaNetwork())
+
+	// The grouped variant failing must not cost the per-address broadcast.
+	events := drainEvents(client, 50*time.Millisecond)
+	if countEvents(events, EventUsersUpdate) != 1 {
+		t.Fatalf("expected the per-address users_update to survive a grouped query error, got %d", countEvents(events, EventUsersUpdate))
+	}
+	if countEvents(events, EventUsersGroupedUpdate) != 0 {
+		t.Fatalf("expected no users_grouped_update after a grouped query error")
 	}
 }
 

@@ -17,6 +17,7 @@ func TestWSEventType_Constants(t *testing.T) {
 		{EventMempoolUpdate, "mempool_update"},
 		{EventStatsUpdate, "stats_update"},
 		{EventUsersUpdate, "users_update"},
+		{EventUsersGroupedUpdate, "users_grouped_update"},
 		{EventPing, "ping"},
 	}
 	for _, tt := range tests {
@@ -28,10 +29,11 @@ func TestWSEventType_Constants(t *testing.T) {
 
 func TestAllEventTypes_ContainsSubscribableEvents(t *testing.T) {
 	expected := map[WSEventType]bool{
-		EventNewBlock:      true,
-		EventMempoolUpdate: true,
-		EventStatsUpdate:   true,
-		EventUsersUpdate:   true,
+		EventNewBlock:           true,
+		EventMempoolUpdate:      true,
+		EventStatsUpdate:        true,
+		EventUsersUpdate:        true,
+		EventUsersGroupedUpdate: true,
 	}
 	if len(AllEventTypes) != len(expected) {
 		t.Fatalf("AllEventTypes has %d elements, want %d", len(AllEventTypes), len(expected))

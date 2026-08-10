@@ -34,14 +34,34 @@ const (
 	userWindowAll userWindowOption = "all"
 )
 
+type userGroupOption string
+
+const (
+	// userGroupAddress is the historical one-row-per-sender-address mode.
+	userGroupAddress userGroupOption = "address"
+	// userGroupEntity collapses attributed addresses into one row per
+	// attribution entity; unattributed addresses stay individual rows.
+	userGroupEntity userGroupOption = "entity"
+)
+
 // UserResponse is a response containing user data
 type UserResponse struct {
 	ChainID     int    `json:"chain_id"`
 	NetworkName string `json:"network_name,omitempty"`
-	Address     string `json:"address"`
-	Name        string `json:"name,omitempty"`
-	Category    string `json:"category,omitempty"`
-	BlobCount   int    `json:"blob_count"`
+	// Address is the sender address; in entity-grouped mode (group=entity)
+	// it is the group's primary (busiest) member address.
+	Address  string `json:"address"`
+	Name     string `json:"name,omitempty"`
+	Category string `json:"category,omitempty"`
+	// Key identifies the row in entity-grouped mode: the entity slug for
+	// attributed rows (matching /charts/attribution-usage series keys) or the
+	// sender address for unattributed rows. Omitted in per-address mode.
+	Key string `json:"key,omitempty" example:"scroll"`
+	// Addresses lists the group's member addresses, busiest first, in
+	// entity-grouped mode; Address is its first element. Omitted in
+	// per-address mode.
+	Addresses []string `json:"addresses,omitempty"`
+	BlobCount int      `json:"blob_count"`
 	// Total realized blob base-fee cost in wei, serialized as a decimal string.
 	TotalCostWei      string    `json:"total_cost_wei" example:"4718548746240"`
 	LastTimestamp     time.Time `json:"last_timestamp"`
@@ -82,6 +102,31 @@ func toUserResponse(user models.BlobUserStats, networkID int, networkName string
 	}
 }
 
+// toGroupedUserResponse maps one entity-grouped leaderboard row. Address is
+// the group's primary (busiest) member — the grouped queries order the
+// addresses array busiest first — so frontends can keep linking rows to
+// per-address user pages.
+func toGroupedUserResponse(group models.BlobUserGroupStats, networkID int, networkName string) UserResponse {
+	primary := ""
+	if len(group.Addresses) > 0 {
+		primary = group.Addresses[0]
+	}
+	return UserResponse{
+		ChainID:           networkID,
+		NetworkName:       networkName,
+		Address:           primary,
+		Name:              group.Name,
+		Category:          group.Category,
+		Key:               group.Key,
+		Addresses:         []string(group.Addresses),
+		BlobCount:         group.BlobCount,
+		TotalCostWei:      group.TotalCostWei,
+		LastTimestamp:     group.LastTimestamp,
+		BlobSharePercent:  group.BlobSharePercent,
+		SpendSharePercent: group.SpendSharePercent,
+	}
+}
+
 func parseUserSortOption(r *http.Request) (userSortOption, error) {
 	sort := strings.ToLower(r.URL.Query().Get("sort"))
 	if sort == "" {
@@ -95,10 +140,33 @@ func parseUserSortOption(r *http.Request) (userSortOption, error) {
 	}
 }
 
-// usersRangeMeta echoes the resolved aggregation window on requests that named
-// one, so clients can confirm which window the returned rows describe.
-type usersRangeMeta struct {
-	Range string `json:"range"`
+// usersMeta echoes request-resolved response semantics: the aggregation
+// window on requests that named one (so clients can confirm which window the
+// returned rows describe) and the grouping mode on entity-grouped requests
+// (whose rows carry the grouped shape). Both fields derive only from the URL,
+// so cached copies stay valid for every requester.
+type usersMeta struct {
+	Range string `json:"range,omitempty"`
+	Group string `json:"group,omitempty"`
+}
+
+// parseUserGroupOption resolves the row-grouping mode from the `group` query
+// param. Omitted (or an explicit `address`) keeps the historical per-address
+// rows; `entity` selects the entity-grouped leaderboard. explicit follows the
+// parseUserRangeOption contract: only requests that named a mode get it
+// echoed under meta, so omitted-group responses stay byte-identical to the
+// historical shape.
+func parseUserGroupOption(r *http.Request) (group userGroupOption, explicit bool, err error) {
+	value := strings.ToLower(r.URL.Query().Get("group"))
+	if value == "" {
+		return userGroupAddress, false, nil
+	}
+	switch userGroupOption(value) {
+	case userGroupAddress, userGroupEntity:
+		return userGroupOption(value), true, nil
+	default:
+		return "", false, fmt.Errorf("invalid group parameter")
+	}
 }
 
 // parseUserRangeOption resolves the aggregation window from the canonical
@@ -131,16 +199,17 @@ func parseUserRangeOption(r *http.Request) (window userWindowOption, explicit bo
 
 // GetTopBlobUsers godoc
 // @Summary Get top blob users
-// @Description Retrieve the top users of blob transactions by count or spend, optionally scoped to a recent window
+// @Description Retrieve the top users of blob transactions by count or spend, optionally scoped to a recent window. With group=entity, attributed addresses are merged into one row per attribution entity (unattributed addresses stay individual rows): totals and shares are summed per group, last_timestamp is the group maximum, rows gain key and addresses (busiest first), address is the busiest member, and ordering plus limit/offset apply after grouping.
 // @Tags users
 // @Accept json
 // @Produce json
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
-// @Param limit query int false "Number of users to return (default: 10, max: 100)"
-// @Param offset query int false "Number of users to skip for pagination (default: 0, max: 10000)"
-// @Param sort query string false "Sort users by count or spend (default: count)" Enums(count, spend)
+// @Param limit query int false "Number of rows to return (default: 10, max: 100)"
+// @Param offset query int false "Number of rows to skip for pagination (default: 0, max: 10000)"
+// @Param sort query string false "Sort rows by count or spend (default: count)" Enums(count, spend)
 // @Param range query string false "Time range to aggregate; echoed back in meta.range (default: all)" Enums(1h, 24h, 7d, 30d, all)
 // @Param window query string false "Deprecated alias for range" Enums(1h, 24h, 7d, 30d, all)
+// @Param group query string false "Row grouping; entity merges attributed addresses into one row per attribution entity and is echoed back in meta.group (default: address)" Enums(address, entity)
 // @Success 200 {object} Response{data=[]UserResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 500 {object} Response "Internal server error"
@@ -211,12 +280,34 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 		return
 	}
 
-	// Echo the resolved window only when the client named one: omitted-range
-	// responses stay byte-identical to the historical shape, and the meta is
-	// constant per URL so every cache layer stays coherent.
+	group, explicitGroup, err := parseUserGroupOption(r)
+	if err != nil {
+		a.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// /users/unattributed rows are unattributed by definition, so entity
+	// grouping cannot merge anything there; reject rather than silently
+	// serving per-address rows under a grouped label.
+	if unattributedOnly && group == userGroupEntity {
+		a.respondError(w, http.StatusBadRequest, "group=entity is not supported for unattributed users")
+		return
+	}
+	grouped := group == userGroupEntity
+
+	// Echo the resolved window and grouping mode only when the client named
+	// them: omitted-param responses stay byte-identical to the historical
+	// shape, and the meta is constant per URL so every cache layer stays
+	// coherent.
 	var meta interface{}
-	if explicitWindow {
-		meta = usersRangeMeta{Range: string(window)}
+	if explicitWindow || explicitGroup {
+		m := usersMeta{}
+		if explicitWindow {
+			m.Range = string(window)
+		}
+		if explicitGroup {
+			m.Group = string(group)
+		}
+		meta = m
 	}
 
 	logMessage := "Getting top blob users"
@@ -237,12 +328,22 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 		}
 		cacheKey = fmt.Sprintf("unattributed:%d:%d:%d:%s:%s", network.ChainID, limit, offset, sort, window)
 	}
+	if grouped {
+		logMessage = "Getting top blob user groups"
+		errMessage = "Failed to get top blob user groups"
+		returnMessage = "Returning top blob user groups"
+		query = queryTopBlobUserGroupsWithOptions
+		if window == userWindowAll {
+			query = queryTopBlobUserGroupsAll
+		}
+		cacheKey = fmt.Sprintf("entity:%d:%d:%d:%s:%s", network.ChainID, limit, offset, sort, window)
+	}
 
-	// The windowed queries take the sort as a parameter; the all-history
-	// variants encode it statically in the query text (see queries.go) and so
-	// take one fewer argument.
+	// The windowed and grouped queries take the sort as a parameter; the
+	// all-history per-address variants encode it statically in the query text
+	// (see queries.go) and so take one fewer argument.
 	queryArgs := []interface{}{network.ChainID, limit, offset, string(window), string(sort)}
-	if window == userWindowAll {
+	if window == userWindowAll && !grouped {
 		queryArgs = []interface{}{network.ChainID, limit, offset, string(window)}
 	}
 
@@ -274,16 +375,28 @@ func (a *API) getTopBlobUsers(w http.ResponseWriter, r *http.Request, unattribut
 		}
 		a.cacheMu.RUnlock()
 
-		var users []models.BlobUserStats
 		queryCtx, cancel := context.WithTimeout(aggregateWorkContext(r), aggregateQueryTimeout)
 		defer cancel()
-		if err := a.db.SelectContext(queryCtx, &users, query, queryArgs...); err != nil {
-			return nil, err
-		}
 
-		response := make([]UserResponse, 0, len(users))
-		for _, user := range users {
-			response = append(response, toUserResponse(user, network.ChainID, network.Name))
+		var response []UserResponse
+		if grouped {
+			var groups []models.BlobUserGroupStats
+			if err := a.db.SelectContext(queryCtx, &groups, query, queryArgs...); err != nil {
+				return nil, err
+			}
+			response = make([]UserResponse, 0, len(groups))
+			for _, userGroup := range groups {
+				response = append(response, toGroupedUserResponse(userGroup, network.ChainID, network.Name))
+			}
+		} else {
+			var users []models.BlobUserStats
+			if err := a.db.SelectContext(queryCtx, &users, query, queryArgs...); err != nil {
+				return nil, err
+			}
+			response = make([]UserResponse, 0, len(users))
+			for _, user := range users {
+				response = append(response, toUserResponse(user, network.ChainID, network.Name))
+			}
 		}
 
 		a.cacheMu.Lock()
@@ -353,7 +466,7 @@ func (a *API) GetUserBreakdown(w http.ResponseWriter, r *http.Request) {
 	// is uniform across the /users endpoints.
 	var meta interface{}
 	if explicitWindow {
-		meta = usersRangeMeta{Range: string(window)}
+		meta = usersMeta{Range: string(window)}
 	}
 
 	logger.Debug("Getting blob user breakdown",

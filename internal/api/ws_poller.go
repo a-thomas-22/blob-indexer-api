@@ -444,7 +444,14 @@ func (p *Poller) broadcastStatsUpdate(ctx context.Context, network config.Networ
 	})
 }
 
-// broadcastUsersUpdate queries top blob users and broadcasts a users_update event.
+// broadcastUsersUpdate queries top blob users and broadcasts the per-address
+// users_update event, then the entity-grouped users_grouped_update event
+// mirroring GET /users?group=entity, so live tables in either mode can show
+// the same rows as the REST endpoint. The grouped rows ride a distinct event
+// type rather than a tagged users_update: clients deployed before grouping
+// existed would apply a second users_update payload to their per-address
+// table (they ignore unknown envelope fields), but they never act on an
+// unknown event type.
 func (p *Poller) broadcastUsersUpdate(ctx context.Context, network config.NetworkConfig) {
 	queryCtx, cancel := context.WithTimeout(ctx, pollerQueryTimeout)
 	defer cancel()
@@ -466,6 +473,32 @@ func (p *Poller) broadcastUsersUpdate(ctx context.Context, network config.Networ
 		Type:  EventUsersUpdate,
 		Range: string(userWindowAll),
 		Data:  response,
+	})
+
+	// The grouped query gets its own full timeout instead of the first
+	// query's leftover deadline, and its failure only costs the grouped
+	// variant this tick — the per-address broadcast above already went out.
+	groupedCtx, cancelGrouped := context.WithTimeout(ctx, pollerQueryTimeout)
+	defer cancelGrouped()
+
+	var groups []models.BlobUserGroupStats
+	if err := p.db.SelectContext(groupedCtx, &groups, queryTopBlobUserGroupsAll, network.ChainID, 10, 0, string(userWindowAll), string(userSortCount)); err != nil {
+		logger.Error("Poller: failed to query top user groups",
+			zap.String("network", network.Name),
+			zap.Error(err))
+		return
+	}
+
+	groupedResponse := make([]UserResponse, 0, len(groups))
+	for _, userGroup := range groups {
+		groupedResponse = append(groupedResponse, toGroupedUserResponse(userGroup, network.ChainID, network.Name))
+	}
+
+	p.hub.BroadcastEvent(network.Name, WSEvent{
+		Type:  EventUsersGroupedUpdate,
+		Range: string(userWindowAll),
+		Group: string(userGroupEntity),
+		Data:  groupedResponse,
 	})
 }
 

@@ -64,6 +64,7 @@ channels:
           - $ref: '#/components/messages/MempoolUpdateEvent'
           - $ref: '#/components/messages/StatsUpdateEvent'
           - $ref: '#/components/messages/UsersUpdateEvent'
+          - $ref: '#/components/messages/UsersGroupedUpdateEvent'
           - $ref: '#/components/messages/PingEvent'
     subscribe:
       operationId: sendSubscriptionFilter
@@ -104,6 +105,13 @@ components:
       summary: Top blob user rankings changed.
       payload:
         $ref: '#/components/schemas/UsersUpdateEvent'
+    UsersGroupedUpdateEvent:
+      messageId: usersGroupedUpdateEvent
+      name: users_grouped_update
+      title: Users Grouped Update Event
+      summary: Entity-grouped top blob user rankings changed.
+      payload:
+        $ref: '#/components/schemas/UsersGroupedUpdateEvent'
     PingEvent:
       messageId: pingEvent
       name: ping
@@ -126,6 +134,7 @@ components:
         - mempool_update
         - stats_update
         - users_update
+        - users_grouped_update
     DecimalString:
       type: string
       description: Decimal-encoded numeric value serialized as a string. Aggregate values may include fractional decimal precision.
@@ -284,7 +293,43 @@ components:
             - all
         data:
           type: array
-          description: Top 10 users for all time, sorted by blob count.
+          description: Top 10 users for all time, sorted by blob count — one row per sender address.
+          items:
+            $ref: '#/components/schemas/UserResponse'
+    UsersGroupedUpdateEvent:
+      type: object
+      description: |
+        Entity-grouped companion to `users_update`, broadcast on the same
+        throttle and mirroring GET /users?group=entity: attributed addresses
+        merge into one row per attribution entity while unattributed addresses
+        stay individual rows. Sent as a distinct event type so clients unaware
+        of grouping never mistake grouped rows for per-address rows.
+      required:
+        - type
+        - range
+        - group
+        - data
+      properties:
+        type:
+          type: string
+          enum:
+            - users_grouped_update
+        range:
+          type: string
+          description: Aggregation window the payload covers, matching the REST `range` values on GET /users. Currently always `all`.
+          enum:
+            - all
+        group:
+          type: string
+          description: Row grouping of the payload, matching the REST `group` values on GET /users. Always `entity` on this event type.
+          enum:
+            - entity
+        data:
+          type: array
+          description: |
+            Top 10 grouped rows for all time, sorted by blob count. Rows carry
+            `key` and `addresses` (busiest first), and `address` is the
+            group's busiest member.
           items:
             $ref: '#/components/schemas/UserResponse'
     PingEvent:
@@ -472,10 +517,20 @@ components:
           type: string
         address:
           type: string
+          description: Sender address; in entity-grouped payloads, the group's primary (busiest) member address.
         name:
           type: string
         category:
           type: string
+        key:
+          type: string
+          description: Present only in entity-grouped payloads — the entity slug for attributed rows (matching /charts/attribution-usage series keys) or the sender address for unattributed rows.
+          example: scroll
+        addresses:
+          type: array
+          items:
+            type: string
+          description: Present only in entity-grouped payloads — the group's member addresses, busiest first; `address` is the first element.
         blob_count:
           type: integer
         total_cost_wei:
