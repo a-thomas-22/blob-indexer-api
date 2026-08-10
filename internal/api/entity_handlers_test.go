@@ -550,17 +550,45 @@ func TestResolveEntityAddresses_CachesNonEmpty(t *testing.T) {
 	}
 }
 
+func TestResolveEntityAddresses_CachesNegative(t *testing.T) {
+	queries := 0
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			if _, ok := dest.(*[]string); ok {
+				queries++
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/?entity=no_such_entity", http.NoBody)
+		w := httptest.NewRecorder()
+		a.GetLatestBlobs(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("request %d: expected 404, got %d", i, w.Code)
+		}
+	}
+	// The listings take only the standard rate limit, so empty resolutions
+	// must be cached too — repeated unknown keys cannot re-run the scan.
+	if queries != 1 {
+		t.Errorf("expected the empty resolution to be cached, got %d resolutions", queries)
+	}
+}
+
 func TestEntityQueriesShareKeyDerivation(t *testing.T) {
 	// The entity queries and the attribution chart must derive keys with the
 	// byte-identical SQL expression, or the identifiers stop joining across
 	// endpoints.
-	expr := entityKeySQL("display_name")
-	for name, query := range map[string]string{
-		"detail_all":      queryEntityDetailAll,
-		"detail_windowed": queryEntityDetailWindowed,
-		"addresses":       queryEntityAddresses,
+	for name, tc := range map[string]struct {
+		query string
+		expr  string
+	}{
+		"detail_all":      {queryEntityDetailAll, entityKeySQL("display_name")},
+		"detail_windowed": {queryEntityDetailWindowed, entityKeySQL("a.display_name")},
+		"addresses":       {queryEntityAddresses, entityKeySQL("display_name")},
 	} {
-		if !strings.Contains(query, expr) {
+		if !strings.Contains(tc.query, tc.expr) {
 			t.Errorf("%s query does not embed the shared entity key expression", name)
 		}
 	}

@@ -28,8 +28,9 @@ const (
 )
 
 // errEntityNotFound signals that an entity key matched no attributed or
-// registry-listed address; it is deliberately not cached so a brand-new
-// entity resolves as soon as its first attribution lands.
+// registry-listed address. The detail endpoint deliberately does not cache
+// this outcome — it sits behind the aggregate rate limit, so a brand-new
+// entity can resolve as soon as its first attribution lands.
 var errEntityNotFound = errors.New("entity not found")
 
 var entityKeyNonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
@@ -250,9 +251,17 @@ func (a *API) GetEntityByKey(w http.ResponseWriter, r *http.Request) {
 
 // resolveEntityAddresses resolves an entity key to its stored-form sender
 // addresses for the entity-filtered blob listings, through a short in-process
-// TTL cache plus singleflight (the listings poll on block cadence). An empty
-// result is not cached — see errEntityNotFound — so a brand-new entity's
-// listings work immediately.
+// TTL cache plus singleflight (the listings poll on block cadence). Unlike
+// the detail endpoint's 404s, empty results ARE cached: the listings take
+// only the standard per-IP rate limit, so repeated unknown-key requests must
+// not re-run the resolution scan each time. The trade is that a brand-new
+// entity's listings can 404 for up to one TTL after its first attribution.
+//
+// Known staleness edge: a registry-listed address with no confirmed activity
+// resolves in its lowercase registry form, which the confirmed-blob union
+// matches case-sensitively against the stored EIP-55 form. Its first
+// confirmed blobs therefore appear in entity listings only once the cached
+// entry expires and resolution returns the stats-stored form (≤ one TTL).
 func (a *API) resolveEntityAddresses(r *http.Request, chainID int, key string) ([]string, error) {
 	cacheKey := fmt.Sprintf("entity_addrs:%d:%s", chainID, key)
 
@@ -277,14 +286,12 @@ func (a *API) resolveEntityAddresses(r *http.Request, chainID int, key string) (
 		if err := a.db.SelectContext(queryCtx, &addresses, queryEntityAddresses, chainID, key); err != nil {
 			return nil, err
 		}
-		if len(addresses) > 0 {
-			a.cacheMu.Lock()
-			a.entityAddrCache[cacheKey] = entityAddrCacheEntry{
-				addresses: addresses,
-				expiresAt: time.Now().Add(aggregateCacheTTL),
-			}
-			a.cacheMu.Unlock()
+		a.cacheMu.Lock()
+		a.entityAddrCache[cacheKey] = entityAddrCacheEntry{
+			addresses: addresses,
+			expiresAt: time.Now().Add(aggregateCacheTTL),
 		}
+		a.cacheMu.Unlock()
 		return addresses, nil
 	})
 	if err != nil {

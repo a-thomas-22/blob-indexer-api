@@ -1403,17 +1403,54 @@ const (
 	// verbatim from blobs.from_address), so each LATERAL arm is its own
 	// idx_blobs_chain_from_timestamp top-K scan and the outer sort merges at
 	// most (limit+offset) rows per address instead of every address's full
-	// history. Ordering matches queryLatestBlobsByAddress.
+	// history. The candidate rows carry only raw columns; the computed
+	// projection (the versioned_hashes sibling-row probe and the confirmed
+	// literal) is applied to the final page only, so the per-request probe
+	// count stays bounded by limit rather than by
+	// address_count x (limit+offset). Ordering matches
+	// queryLatestBlobsByAddress.
 	queryLatestBlobsByAddresses = `
-		SELECT b.* FROM unnest($2::text[]) AS addr(from_address)
-		CROSS JOIN LATERAL (
-			SELECT ` + blobSelectColumns + ` FROM blobs
-			WHERE chain_id = $1 AND from_address = addr.from_address
-			ORDER BY timestamp DESC, blob_index ASC
-			LIMIT $3::bigint + $4::bigint
-		) b
-		ORDER BY b.timestamp DESC, b.blob_index ASC
-		LIMIT $3 OFFSET $4
+		SELECT
+			page.id,
+			page.chain_id,
+			page.block_number,
+			page.blob_index,
+			page.tx_hash,
+			page.from_address,
+			page.user_attribution,
+			page.blob_size_bytes,
+			page.base_fee_per_blob_gas,
+			page.tip_per_blob_gas,
+			page.total_cost_wei,
+			page.timestamp,
+			true AS confirmed,
+			page.max_fee_per_blob_gas,
+			page.blob_gas_used,
+			page.versioned_hash,
+			page.slot,
+			ARRAY(
+				SELECT b2.versioned_hash FROM blobs b2
+				WHERE b2.chain_id = page.chain_id AND b2.tx_hash = page.tx_hash
+					AND b2.versioned_hash IS NOT NULL
+				ORDER BY b2.blob_index
+			) AS versioned_hashes
+		FROM (
+			SELECT b.* FROM unnest($2::text[]) AS addr(from_address)
+			CROSS JOIN LATERAL (
+				SELECT
+					id, chain_id, block_number, blob_index, tx_hash, from_address,
+					user_attribution, blob_size_bytes, base_fee_per_blob_gas,
+					tip_per_blob_gas, total_cost_wei, timestamp,
+					max_fee_per_blob_gas, blob_gas_used, versioned_hash, slot
+				FROM blobs
+				WHERE chain_id = $1 AND from_address = addr.from_address
+				ORDER BY timestamp DESC, blob_index ASC
+				LIMIT $3::bigint + $4::bigint
+			) b
+			ORDER BY b.timestamp DESC, b.blob_index ASC
+			LIMIT $3 OFFSET $4
+		) page
+		ORDER BY page.timestamp DESC, page.blob_index ASC
 	`
 
 	// queryMempoolBlobsByAddresses retrieves pending blobs for any of a set of
@@ -1474,6 +1511,14 @@ func entityKeySQL(nameExpr string) string {
 // lists (s-only rows); the chain filter must COALESCE across both sides
 // because a plain predicate on either would drop the other side's unmatched
 // rows.
+//
+// Attribution is address-level, matching /users: an address belongs to
+// exactly one entity — its current effective attribution — even though the
+// blob-list claim model permits different entities across block ranges. An
+// address that switched entities mid-history counts its whole history toward
+// its current entity here, while the per-blob attribution chart splits it;
+// this is the same divergence /users already has, accepted so entity totals
+// stay the sum of the addresses' /users rows.
 const entityAttributedAddressesSQL = `
 		SELECT
 			COALESCE(s.from_address, bu.address) AS address,
@@ -1575,11 +1620,15 @@ var queryEntityDetailAll = `
 // ($3 is '1h', '24h', '7d', or '30d'), aggregating the same rollup-backed
 // windows as queryTopBlobUsersWithOptions — identical bucket selection,
 // aligned lower bound, and share denominators, so an entity's windowed totals
-// are exactly the sum of its addresses' /users rows. Registry addresses with
-// no activity inside the window still appear (blob_count 0) so the address
-// list stays the complete registry mapping; last_timestamp stays the exact
-// all-history last-seen from blob_user_stats when available, mirroring
-// /users.
+// are exactly the sum of its addresses' /users rows.
+//
+// The address universe (and therefore entity membership) is the same
+// attributed base the all-history query filters, with the window totals
+// joined on afterwards: every range of an existing entity answers 200 with
+// the identical address list, and addresses with no activity inside the
+// window — registry-listed or purely historical — appear with zero counts
+// rather than making narrow ranges 404. last_timestamp stays the exact
+// all-history last-seen from blob_user_stats, mirroring /users.
 var queryEntityDetailWindowed = `
 	WITH window_params AS (
 		SELECT
@@ -1597,16 +1646,10 @@ var queryEntityDetailWindowed = `
 	window_totals AS (
 		SELECT
 			r.from_address,
-			COALESCE(NULLIF(MAX(BTRIM(r.user_attribution)), ''), NULLIF(MAX(BTRIM(bu.name)), ''), '') AS display_name,
-			COALESCE(NULLIF(MAX(BTRIM(bu.category)), ''), 'unknown') AS category,
 			COALESCE(SUM(r.blob_count), 0)::bigint AS blob_count,
-			COALESCE(SUM(r.total_cost_wei), 0) AS total_cost_wei,
-			MAX(r.bucket_start) AS last_bucket_start
+			COALESCE(SUM(r.total_cost_wei), 0) AS total_cost_wei
 		FROM blob_chart_rollups r
 		CROSS JOIN window_params wp
-		LEFT JOIN blob_users bu
-			ON bu.chain_id = r.chain_id
-			AND LOWER(bu.address) = LOWER(r.from_address)
 		WHERE r.chain_id = $1
 			AND r.bucket_seconds = wp.bucket_seconds
 			AND r.bucket_start >= wp.start_time
@@ -1619,26 +1662,21 @@ var queryEntityDetailWindowed = `
 		FROM window_totals
 	),
 	attributed AS (
-		SELECT
-			COALESCE(w.from_address, bu.address) AS address,
-			COALESCE(NULLIF(w.display_name, ''), NULLIF(BTRIM(bu.name), ''), '') AS display_name,
-			COALESCE(NULLIF(w.category, 'unknown'), NULLIF(BTRIM(bu.category), ''), 'unknown') AS category,
-			COALESCE(w.blob_count, 0)::bigint AS blob_count,
-			COALESCE(w.total_cost_wei, 0) AS total_cost_wei,
-			COALESCE(s.last_timestamp, w.last_bucket_start) AS last_timestamp,
-			(bu.address IS NOT NULL) AS in_registry
-		FROM window_totals w
-		FULL OUTER JOIN (
-			SELECT address, name, category FROM blob_users WHERE chain_id = $1
-		) bu ON LOWER(bu.address) = LOWER(w.from_address)
-		LEFT JOIN blob_user_stats s
-			ON s.chain_id = $1
-			AND LOWER(s.from_address) = LOWER(COALESCE(w.from_address, bu.address))
+` + entityAttributedAddressesSQL + `
 	),
 	entity_addresses AS (
-		SELECT * FROM attributed
-		WHERE display_name <> ''
-			AND ` + entityKeySQL("display_name") + ` = $2
+		SELECT
+			a.address,
+			a.display_name,
+			a.category,
+			COALESCE(w.blob_count, 0)::bigint AS blob_count,
+			COALESCE(w.total_cost_wei, 0) AS total_cost_wei,
+			a.last_timestamp,
+			a.in_registry
+		FROM attributed a
+		LEFT JOIN window_totals w ON LOWER(w.from_address) = LOWER(a.address)
+		WHERE a.display_name <> ''
+			AND ` + entityKeySQL("a.display_name") + ` = $2
 	)
 	SELECT ` + entityDetailProjectionSQL + `
 	FROM entity_addresses ea

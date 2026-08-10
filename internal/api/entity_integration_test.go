@@ -32,12 +32,13 @@ import (
 // Stored-form sender addresses: the indexer writes go-ethereum's EIP-55
 // checksummed rendering, which the from= filter also normalizes input to.
 var (
-	entAddrA     = common.HexToAddress("0xaaaa000000000000000000000000000000000001").Hex() // Fancy Rollup, registry + activity
-	entAddrB     = common.HexToAddress("0xbbbb000000000000000000000000000000000002").Hex() // Fancy Rollup, registry + activity
-	entAddrCReg  = common.HexToAddress("0xcccc000000000000000000000000000000000003").Hex() // Fancy Rollup, registry only (no activity)
-	entAddrGhost = common.HexToAddress("0xdddd000000000000000000000000000000000004").Hex() // Fancy Rollup in indexed history, not in registry
-	entAddrOther = common.HexToAddress("0xeeee000000000000000000000000000000000005").Hex() // Other Rollup
-	entAddrNone  = common.HexToAddress("0xffff000000000000000000000000000000000006").Hex() // unattributed
+	entAddrA       = common.HexToAddress("0xaaaa000000000000000000000000000000000001").Hex() // Fancy Rollup, registry + activity
+	entAddrB       = common.HexToAddress("0xbbbb000000000000000000000000000000000002").Hex() // Fancy Rollup, registry + activity
+	entAddrCReg    = common.HexToAddress("0xcccc000000000000000000000000000000000003").Hex() // Fancy Rollup, registry only (no activity)
+	entAddrGhost   = common.HexToAddress("0xdddd000000000000000000000000000000000004").Hex() // Fancy Rollup in indexed history, not in registry
+	entAddrOther   = common.HexToAddress("0xeeee000000000000000000000000000000000005").Hex() // Other Rollup
+	entAddrNone    = common.HexToAddress("0xffff000000000000000000000000000000000006").Hex() // unattributed
+	entAddrRetired = common.HexToAddress("0x1111000000000000000000000000000000000007").Hex() // Retired Rollup: historical attribution only, no registry row
 )
 
 type entitySeedBlob struct {
@@ -58,6 +59,7 @@ func seedEntityFixtures(t *testing.T, sqlxDB *sqlx.DB, base time.Time) []entityS
 		{entAddrGhost, "Fancy Rollup", 5 * time.Hour, "9"},
 		{entAddrOther, "Other Rollup", 50 * time.Minute, "5"},
 		{entAddrNone, "", 40 * time.Minute, "7"},
+		{entAddrRetired, "Retired Rollup", 10 * 24 * time.Hour, "17"},
 	}
 	for i, b := range blobs {
 		if _, err := sqlxDB.Exec(`
@@ -206,7 +208,8 @@ func TestEntityEndpointsAgainstRealPostgres(t *testing.T) {
 
 	fancyAllCost := sumEntityCosts(t, seeded[0].cost, seeded[1].cost, seeded[2].cost, seeded[3].cost, seeded[4].cost)
 	confirmedTotalCost := sumEntityCosts(t,
-		seeded[0].cost, seeded[1].cost, seeded[2].cost, seeded[3].cost, seeded[4].cost, seeded[5].cost, seeded[6].cost)
+		seeded[0].cost, seeded[1].cost, seeded[2].cost, seeded[3].cost,
+		seeded[4].cost, seeded[5].cost, seeded[6].cost, seeded[7].cost)
 	allSpendDenominator := sumEntityCosts(t, confirmedTotalCost, "11", "13")
 
 	t.Run("AllHistoryAggregation", func(t *testing.T) {
@@ -227,8 +230,8 @@ func TestEntityEndpointsAgainstRealPostgres(t *testing.T) {
 		if data.LastTimestamp == nil || !data.LastTimestamp.Equal(base.Add(-30*time.Minute)) {
 			t.Errorf("last_timestamp = %v, want the newest blob at %v", data.LastTimestamp, base.Add(-30*time.Minute))
 		}
-		// 5 entity blobs of 7 confirmed + 2 pending, matching /users' share denominators.
-		if want := expectedSharePercent(t, "5", "9"); data.BlobSharePercent != want {
+		// 5 entity blobs of 8 confirmed + 2 pending, matching /users' share denominators.
+		if want := expectedSharePercent(t, "5", "10"); data.BlobSharePercent != want {
 			t.Errorf("blob_share_percent = %v, want %v", data.BlobSharePercent, want)
 		}
 		if want := expectedSharePercent(t, fancyAllCost, allSpendDenominator); data.SpendSharePercent != want {
@@ -303,6 +306,33 @@ func TestEntityEndpointsAgainstRealPostgres(t *testing.T) {
 		}
 		if addrB.LastTimestamp == nil || !addrB.LastTimestamp.Equal(base.Add(-2*time.Hour)) {
 			t.Errorf("addrB last_timestamp = %v, want its all-history last-seen", addrB.LastTimestamp)
+		}
+	})
+
+	t.Run("RetiredEntityStaysResolvableInEveryRange", func(t *testing.T) {
+		// The entity's only address is neither in the registry nor active
+		// inside narrow windows; every range must still answer 200 with the
+		// same address list, zero-counted, instead of a spurious 404.
+		code, all := getEntity(t, a, "retired_rollup", "")
+		if code != http.StatusOK || all.BlobCount != 1 || all.TotalCostWei != seeded[7].cost {
+			t.Fatalf("all-history: got %d %+v, want the one retired blob", code, all)
+		}
+		code, hour := getEntity(t, a, "retired_rollup", "?range=1h")
+		if code != http.StatusOK {
+			t.Fatalf("range=1h: expected 200 for an existing entity with no window activity, got %d", code)
+		}
+		if hour.BlobCount != 0 || hour.TotalCostWei != "0" {
+			t.Errorf("range=1h aggregates should be zero: %+v", hour)
+		}
+		if len(hour.Addresses) != 1 || hour.Addresses[0].Address != entAddrRetired {
+			t.Fatalf("range=1h should list the same address set as all-history: %+v", hour.Addresses)
+		}
+		addr := hour.Addresses[0]
+		if addr.BlobCount != 0 || addr.InRegistry {
+			t.Errorf("unexpected retired address row: %+v", addr)
+		}
+		if addr.LastTimestamp == nil || !addr.LastTimestamp.Equal(base.Add(-10*24*time.Hour)) {
+			t.Errorf("retired address should keep its all-history last-seen: %v", addr.LastTimestamp)
 		}
 	})
 
