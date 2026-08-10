@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.16.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.15.0...blob-indexer-api-v0.16.0) (2026-08-10)
+
+
+### Features
+
+* **api:** add entity-grouped mode to /users via group=entity ([#319](https://github.com/a-thomas-22/blob-indexer-api/issues/319)) ([c44ce2f](https://github.com/a-thomas-22/blob-indexer-api/commit/c44ce2fa49af4cecb12ed44293cf719ba221e96e))
+* **api:** add GET /entities/{key} and entity-filtered blob listings ([#321](https://github.com/a-thomas-22/blob-indexer-api/issues/321)) ([7aa2455](https://github.com/a-thomas-22/blob-indexer-api/commit/7aa2455ec57f7b6c691cd9a3c2a020aa18d7cd01))
+
+
+### Bug Fixes
+
+* **api:** include retired senders in /search rollup match addresses ([#320](https://github.com/a-thomas-22/blob-indexer-api/issues/320)) ([4d1df60](https://github.com/a-thomas-22/blob-indexer-api/commit/4d1df60fd6e85e57b3f5ff02466889db0c52f53c))
+* **attribution:** reconcile blob_users when a blob-list claim expires ([#323](https://github.com/a-thomas-22/blob-indexer-api/issues/323)) ([13fb4ed](https://github.com/a-thomas-22/blob-indexer-api/commit/13fb4ed1c74f024f7783825fdcb93f2b39e3cb28))
+
 ## [0.15.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.14.0...blob-indexer-api-v0.15.0) (2026-08-03)
 
 
