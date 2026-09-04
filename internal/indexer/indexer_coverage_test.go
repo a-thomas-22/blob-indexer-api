@@ -1449,7 +1449,7 @@ func TestInsertPendingBlobs(t *testing.T) {
 		mock.ExpectExec("INSERT INTO mempool_blobs").
 			WithArgs(blob.ChainID, blob.TxHash, 0, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, int64(blob.Nonce), blob.Timestamp).
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, int64(blob.Nonce), blob.Timestamp, blob.MaxPriorityFeePerGas, blob.MaxFeePerGas, blob.PriorityFeePerGas).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
@@ -1485,7 +1485,8 @@ func TestInsertPendingBlobs(t *testing.T) {
 			upsertArgs = append(upsertArgs,
 				blob.ChainID, blob.TxHash, offset, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, int64(blob.Nonce), blob.Timestamp)
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, int64(blob.Nonce), blob.Timestamp,
+				blob.MaxPriorityFeePerGas, blob.MaxFeePerGas, blob.PriorityFeePerGas)
 		}
 		mock.ExpectExec("INSERT INTO mempool_blobs").
 			WithArgs(upsertArgs...).
@@ -1625,7 +1626,7 @@ func TestInsertBlockData(t *testing.T) {
 		mock.ExpectExec("INSERT INTO blobs").
 			WithArgs(blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, blob.Slot).
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, blob.Slot, blob.MaxPriorityFeePerGas, blob.MaxFeePerGas, blob.PriorityFeePerGas).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectExec("INSERT INTO indexed_blocks").
 			WithArgs(indexedBlock.ChainID, indexedBlock.BlockNumber, indexedBlock.BlockHash, indexedBlock.ParentHash).
@@ -1862,6 +1863,9 @@ func TestProcessBlock_WithBlobTransaction(t *testing.T) {
 			sqlmock.AnyArg(),             // blob_gas_used
 			blobTx.BlobHashes()[0].Hex(), // versioned_hash
 			sqlmock.AnyArg(),             // slot (nil — the test network's chain has no known beacon genesis)
+			sqlmock.AnyArg(),             // max_priority_fee_per_gas
+			sqlmock.AnyArg(),             // max_fee_per_gas
+			sqlmock.AnyArg(),             // priority_fee_per_gas
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO block_metrics").
@@ -3335,7 +3339,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			WithArgs(idx.network.ChainID, txHash, 0, sqlmock.AnyArg(), "",
 				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-				ethSvc.txByHash.BlobHashes()[0].Hex(), int64(1), sqlmock.AnyArg()).
+				ethSvc.txByHash.BlobHashes()[0].Hex(), int64(1), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
@@ -3392,7 +3396,7 @@ func TestMempoolProcessingAndLoop(t *testing.T) {
 			WithArgs(idx.network.ChainID, txHash, 0, sqlmock.AnyArg(), "",
 				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-				blobTx.BlobHashes()[0].Hex(), int64(2), sqlmock.AnyArg()).
+				blobTx.BlobHashes()[0].Hex(), int64(2), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 

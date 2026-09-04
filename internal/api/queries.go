@@ -30,6 +30,9 @@ const blobSelectColumns = `
 	blob_gas_used,
 	versioned_hash,
 	slot,
+	max_priority_fee_per_gas,
+	max_fee_per_gas,
+	priority_fee_per_gas,
 	ARRAY(
 		SELECT b2.versioned_hash FROM blobs b2
 		WHERE b2.chain_id = blobs.chain_id AND b2.tx_hash = blobs.tx_hash
@@ -63,6 +66,9 @@ const mempoolBlobSelectColumns = `
 	blob_gas_used,
 	versioned_hash,
 	NULL::bigint AS slot,
+	max_priority_fee_per_gas,
+	max_fee_per_gas,
+	priority_fee_per_gas,
 	ARRAY(
 		SELECT m2.versioned_hash FROM mempool_blobs m2
 		WHERE m2.chain_id = mempool_blobs.chain_id AND m2.tx_hash = mempool_blobs.tx_hash
@@ -1643,6 +1649,9 @@ const (
 			page.blob_gas_used,
 			page.versioned_hash,
 			page.slot,
+			page.max_priority_fee_per_gas,
+			page.max_fee_per_gas,
+			page.priority_fee_per_gas,
 			ARRAY(
 				SELECT b2.versioned_hash FROM blobs b2
 				WHERE b2.chain_id = page.chain_id AND b2.tx_hash = page.tx_hash
@@ -1656,7 +1665,8 @@ const (
 					id, chain_id, block_number, blob_index, tx_hash, from_address,
 					user_attribution, blob_size_bytes, base_fee_per_blob_gas,
 					tip_per_blob_gas, total_cost_wei, timestamp,
-					max_fee_per_blob_gas, blob_gas_used, versioned_hash, slot
+					max_fee_per_blob_gas, blob_gas_used, versioned_hash, slot,
+					max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas
 				FROM blobs
 				WHERE chain_id = $1 AND from_address = addr.from_address
 				ORDER BY timestamp DESC, blob_index ASC

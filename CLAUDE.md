@@ -60,6 +60,7 @@ Canonical routes are under `/api/v1`. Legacy `/api/*` paths redirect to `/api/v1
 - `/api/v1/users` — top blob users
 - `/api/v1/entities/{key}` — attributed entity detail (aggregates + per-address breakdown; key shared with `/charts/attribution-usage` shares). `/blob/latest` and `/blob/mempool` accept `entity={key}` to filter across the entity's addresses
 - `/api/v1/records` — historical leaderboards (streaks, base fee peaks, busiest hours)
+- `/api/v1/charts/blob-market`, `/api/v1/charts/attribution-usage`, `/api/v1/charts/cost-comparison`, `/api/v1/charts/blob-tips`, `/api/v1/charts/rolling-stats` — bucketed chart series. `blob-tips` reads `blobs.priority_fee_per_gas` directly (no rollup carries it), so it rejects `range=all`
 - `/api/v1/stats` — historical stats
 - `/api/v1/status` — indexer status
 - `/api/v1/dev/*` — development/debug endpoints (metrics, dashboard, logs, queries), gated by `server.dev_mode` and optional `server.dev_api_key`
