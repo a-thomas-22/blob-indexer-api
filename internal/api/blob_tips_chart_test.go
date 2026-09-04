@@ -106,8 +106,8 @@ func TestGetBlobTipsChart_SuccessAndZeroFill(t *testing.T) {
 			if !strings.Contains(query, "bucketed_series") || !strings.Contains(query, "LIMIT $5") {
 				t.Fatalf("unexpected blob tips query: %s", query)
 			}
-			if !strings.Contains(query, "WHERE src.priority_fee IS NOT NULL") || !strings.Contains(query, "COUNT(priority_fee)::int AS priced_blobs") {
-				t.Fatalf("expected fee statistics to cover only priced blobs: %s", query)
+			if !strings.Contains(query, "AND bl.priority_fee_per_gas IS NOT NULL") || !strings.Contains(query, "FROM range_blocks rb") {
+				t.Fatalf("expected the blob scan to cover only priced rows and the total to come from block_metrics: %s", query)
 			}
 			if !strings.Contains(query, "generate_series") || strings.Contains(query, "FROM block_metrics") {
 				t.Fatalf("expected the time-bucketed query: %s", query)

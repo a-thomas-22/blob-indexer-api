@@ -15,6 +15,20 @@
 -- indexed before this migration stay NULL until their blocks are reindexed;
 -- readers treat NULL as "not recorded" rather than zero.
 --
+-- The partial covering index serves /charts/blob-tips, which aggregates
+-- priced rows over a time range directly from blobs (no rollup carries the
+-- fee). Restricting it to priced rows keeps it EMPTY at creation, since the
+-- column was just added and every row is NULL, and it only grows as new
+-- blocks and reindexed history land; the INCLUDE list is exactly what the
+-- query reads, so the scan is index-only once the visibility map catches up.
+--
+-- Locking: CREATE INDEX still scans the whole blobs heap under a SHARE lock
+-- even though the result is empty, blocking indexer writes for the scan
+-- (roughly a minute or two at ~22M rows). If that pause is unacceptable at
+-- deploy time, pre-run the ALTER TABLE statements and then CREATE INDEX
+-- CONCURRENTLY IF NOT EXISTS with the same name and definition out-of-band;
+-- this migration then no-ops.
+--
 -- Nullable adds without defaults are metadata-only (no table rewrite). DDL
 -- only, idempotent, no explicit transaction control; see README.md.
 
@@ -25,3 +39,8 @@ ALTER TABLE blobs ADD COLUMN IF NOT EXISTS priority_fee_per_gas NUMERIC;
 ALTER TABLE mempool_blobs ADD COLUMN IF NOT EXISTS max_priority_fee_per_gas NUMERIC;
 ALTER TABLE mempool_blobs ADD COLUMN IF NOT EXISTS max_fee_per_gas NUMERIC;
 ALTER TABLE mempool_blobs ADD COLUMN IF NOT EXISTS priority_fee_per_gas NUMERIC;
+
+CREATE INDEX IF NOT EXISTS idx_blobs_chain_timestamp_priced_cover
+    ON blobs(chain_id, timestamp DESC)
+    INCLUDE (from_address, user_attribution, priority_fee_per_gas)
+    WHERE priority_fee_per_gas IS NOT NULL;

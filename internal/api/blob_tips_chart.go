@@ -134,7 +134,8 @@ func (a *API) GetBlobTipsChart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Tips are read from the blobs table directly (no rollup carries them),
-	// so the scan is bounded by the range like blob-market's.
+	// through the partial covering index on priced rows; the scan is bounded
+	// by the range like blob-market's.
 	if chart.Range == chartRangeAll {
 		a.respondError(w, http.StatusBadRequest, "range=all is not supported for blob-tips; use range=30d or narrower")
 		return
@@ -357,9 +358,11 @@ func gweiOrZero(wei string) string {
 
 // blobTipsSeriesSQL builds the CTE chain shared by the tip chart queries. It
 // expects a tip_source CTE with (bucket_start, from_address, priority_fee,
-// raw_name, raw_category) rows, one per blob in range, where priority_fee is
-// NULL for blobs indexed before the fee was stored. Fee statistics count only
-// priced rows; the summary counts every row so callers can report coverage.
+// raw_name, raw_category) rows, one per priced blob in range (rows indexed
+// before the fee was stored never enter it, which is what lets the scan use
+// the partial covering index), and a range_blocks CTE whose total_blobs
+// counts every blob in the range from block_metrics so callers can report
+// coverage without touching the unpriced blob rows.
 func blobTipsSeriesSQL(limitPlaceholder string) string {
 	return `
 	entity_rows AS MATERIALIZED (
@@ -377,7 +380,6 @@ func blobTipsSeriesSQL(limitPlaceholder string) string {
 				ELSE COALESCE(NULLIF(src.raw_category, ''), 'unknown')
 			END AS entity_category
 		FROM tip_source src
-		WHERE src.priority_fee IS NOT NULL
 	),
 	entity_totals AS (
 		SELECT
@@ -439,7 +441,7 @@ func blobTipsSeriesSQL(limitPlaceholder string) string {
 	bucket_stats AS (
 		SELECT
 			bucket_start,
-			COUNT(priority_fee)::int AS blob_count,
+			COUNT(*)::int AS blob_count,
 			COALESCE(AVG(priority_fee), 0)::text AS average_priority_fee_wei,
 			COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY priority_fee), 0)::text AS median_priority_fee_wei,
 			COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY priority_fee), 0)::text AS p95_priority_fee_wei,
@@ -449,13 +451,15 @@ func blobTipsSeriesSQL(limitPlaceholder string) string {
 	),
 	summary AS (
 		SELECT
-			COUNT(*)::int AS total_blobs,
-			COUNT(priority_fee)::int AS priced_blobs,
-			COALESCE(AVG(priority_fee), 0)::text AS average_priority_fee_wei,
-			COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY priority_fee), 0)::text AS median_priority_fee_wei,
-			COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY priority_fee), 0)::text AS p95_priority_fee_wei,
-			COALESCE(MAX(priority_fee), 0)::text AS max_priority_fee_wei
-		FROM tip_source
+			rb.total_blobs,
+			COUNT(ts.priority_fee)::int AS priced_blobs,
+			COALESCE(AVG(ts.priority_fee), 0)::text AS average_priority_fee_wei,
+			COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY ts.priority_fee), 0)::text AS median_priority_fee_wei,
+			COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY ts.priority_fee), 0)::text AS p95_priority_fee_wei,
+			COALESCE(MAX(ts.priority_fee), 0)::text AS max_priority_fee_wei
+		FROM range_blocks rb
+		LEFT JOIN tip_source ts ON TRUE
+		GROUP BY rb.total_blobs
 	)
 `
 }
@@ -493,6 +497,11 @@ const blobTipsSelectSQL = `
 
 // queryBlobTipsTimeChart buckets blob priority fees by wall-clock interval.
 // Args: chain id, range start, range end, bucket seconds, series limit.
+//
+// The blob scan is restricted to priced rows so it can be served by the
+// partial covering index (idx_blobs_chain_timestamp_priced_cover); the
+// unpriced remainder is only ever counted, and that count comes from
+// block_metrics, one row per block rather than one per blob.
 var queryBlobTipsTimeChart = `
 	WITH bounds AS (
 		SELECT
@@ -512,6 +521,14 @@ var queryBlobTipsTimeChart = `
 		) AS g(bucket_start)
 		WHERE b.range_end > b.range_start
 	),
+	range_blocks AS (
+		SELECT COALESCE(SUM(bm.blob_count), 0)::int AS total_blobs
+		FROM bounds b
+		LEFT JOIN block_metrics bm
+			ON bm.chain_id = $1
+			AND bm.block_timestamp >= b.range_start
+			AND bm.block_timestamp < b.range_end
+	),
 	tip_source AS MATERIALIZED (
 		SELECT
 			TIMESTAMP 'epoch' + (
@@ -528,6 +545,7 @@ var queryBlobTipsTimeChart = `
 			ON bl.chain_id = $1
 			AND bl.timestamp >= b.range_start
 			AND bl.timestamp < b.range_end
+			AND bl.priority_fee_per_gas IS NOT NULL
 		LEFT JOIN blob_users known
 			ON known.chain_id = bl.chain_id
 			AND LOWER(known.address) = LOWER(bl.from_address)
@@ -552,6 +570,11 @@ var queryBlobTipsBlockChart = `
 			AND bm.block_timestamp >= b.range_start
 			AND bm.block_timestamp < b.range_end
 	),
+	range_blocks AS (
+		SELECT COALESCE(SUM(bm.blob_count), 0)::int AS total_blobs
+		FROM buckets bu
+		JOIN block_metrics bm ON bm.chain_id = $1 AND bm.block_number = bu.block_number
+	),
 	tip_source AS MATERIALIZED (
 		SELECT
 			bu.bucket_start,
@@ -563,6 +586,7 @@ var queryBlobTipsBlockChart = `
 		JOIN blobs bl
 			ON bl.chain_id = $1
 			AND bl.block_number = bu.block_number
+			AND bl.priority_fee_per_gas IS NOT NULL
 		LEFT JOIN blob_users known
 			ON known.chain_id = bl.chain_id
 			AND LOWER(known.address) = LOWER(bl.from_address)
