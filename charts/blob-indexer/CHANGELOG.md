@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.14...blob-indexer-chart-v0.7.0) (2026-09-05)
+
+
+### Features
+
+* **api:** record blob transaction priority fees and add blob-tips chart ([#327](https://github.com/a-thomas-22/blob-indexer-api/issues/327)) ([d9b737f](https://github.com/a-thomas-22/blob-indexer-api/commit/d9b737fdc466f3bb1913c41b25ae0b158559e000))
+
+
+### Bug Fixes
+
+* **helm:** update chart app version to 0.17.0 ([e122521](https://github.com/a-thomas-22/blob-indexer-api/commit/e1225211e9e6e243464f01a34c3d9efab520ff21))
+
 ## [0.6.14](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.13...blob-indexer-chart-v0.6.14) (2026-08-10)
 
 
