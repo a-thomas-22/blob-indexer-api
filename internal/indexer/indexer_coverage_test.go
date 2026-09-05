@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,6 +40,13 @@ type testEthRPC struct {
 	blockTxs       []*types.Transaction
 	blobBaseFeeHex string
 	blobBaseFeeErr error
+	// baseFee, when set, is reported as the execution base fee of every block.
+	baseFee *big.Int
+	// failBlocks lists block numbers whose fetch fails; failBlock fails all.
+	failBlocks map[uint64]int
+	// fetched counts fetches per block number.
+	fetched   map[uint64]int
+	fetchedMu sync.Mutex
 }
 
 func (e *testEthRPC) GetBlockByNumber(_ context.Context, blockNum string, _ bool) (interface{}, error) {
@@ -52,6 +60,19 @@ func (e *testEthRPC) GetBlockByNumber(_ context.Context, blockNum string, _ bool
 		if err == nil {
 			number = parsed
 		}
+	}
+	e.fetchedMu.Lock()
+	if e.fetched == nil {
+		e.fetched = make(map[uint64]int)
+	}
+	e.fetched[number]++
+	remaining := e.failBlocks[number]
+	if remaining > 0 {
+		e.failBlocks[number]--
+	}
+	e.fetchedMu.Unlock()
+	if remaining > 0 {
+		return nil, errors.New("rpc failure")
 	}
 
 	excessBlobGas := uint64(0)
@@ -70,6 +91,7 @@ func (e *testEthRPC) GetBlockByNumber(_ context.Context, blockNum string, _ bool
 		Extra:         []byte{},
 		ExcessBlobGas: &excessBlobGas,
 		BlobGasUsed:   &blobGasUsed,
+		BaseFee:       e.baseFee,
 	}
 	if len(e.blockTxs) > 0 {
 		header.TxHash = common.BigToHash(big.NewInt(999))

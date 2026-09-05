@@ -250,6 +250,11 @@ const (
 	// checkpoint automatically instead of needing a hand-written DELETE in
 	// whichever migration introduced it.
 	MetadataStreakBackfillKinds = "records_streak_backfill_kinds"
+	// MetadataPriorityFeeBackfillBlock is the highest block the priority fee
+	// backfill has walked. Rows indexed before migration 000015 hold no
+	// execution-layer fees; the backfill refetches their blocks and fills the
+	// fees in place, and this checkpoint lets a restart resume the walk.
+	MetadataPriorityFeeBackfillBlock = "priority_fee_backfill_block"
 )
 
 // FormatMetadataTimestamp serializes metadata timestamps consistently.

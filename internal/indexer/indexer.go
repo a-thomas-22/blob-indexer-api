@@ -247,22 +247,26 @@ type Indexer struct {
 	// field so tests can shrink it. Defaults to
 	// defaultStreakBackfillRetryBackoff.
 	streakBackfillRetryBackoff time.Duration
-	ctx                        context.Context
-	cancel                     context.CancelFunc
-	wg                         sync.WaitGroup
-	lastIndexedBlock           uint64 // accessed with sync/atomic
-	indexerVersion             string
-	mu                         sync.Mutex // protects DB metadata writes
-	dbWriteMu                  sync.Mutex // serializes same-network writes that fire summary rollup triggers
-	blockTaskCh                chan BlockTask
-	useWebsocket               bool
-	blockSub                   *ethereum.BlockSubscription
-	pendingTxSub               *ethereum.PendingTxSubscription
-	mempoolPollingStarted      uint32
-	failedBlocks               map[uint64]int // block number -> cumulative failure count
-	failedBlockNextRetry       map[uint64]time.Time
-	failedBlocksMu             sync.Mutex
-	reorgDetected              uint32 // atomic flag: 1 = reorg detected, main loop should reset
+	// priorityFeeBackfill tunes the startup walk that fills execution fees
+	// onto rows indexed before they were stored; fields so tests can shrink
+	// windows and waits. See priorityFeeBackfillSettings.
+	priorityFeeBackfill   priorityFeeBackfillSettings
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	wg                    sync.WaitGroup
+	lastIndexedBlock      uint64 // accessed with sync/atomic
+	indexerVersion        string
+	mu                    sync.Mutex // protects DB metadata writes
+	dbWriteMu             sync.Mutex // serializes same-network writes that fire summary rollup triggers
+	blockTaskCh           chan BlockTask
+	useWebsocket          bool
+	blockSub              *ethereum.BlockSubscription
+	pendingTxSub          *ethereum.PendingTxSubscription
+	mempoolPollingStarted uint32
+	failedBlocks          map[uint64]int // block number -> cumulative failure count
+	failedBlockNextRetry  map[uint64]time.Time
+	failedBlocksMu        sync.Mutex
+	reorgDetected         uint32 // atomic flag: 1 = reorg detected, main loop should reset
 	// reorgRangeMu guards reorgRewindFrom/reorgInvalidatedThrough, which are
 	// only meaningful while reorgDetected == 1. Reorgs signaled before the main
 	// loop consumes the flag merge into the widest invalidated range.
@@ -335,6 +339,7 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		fineRollupPruneInterval:    defaultFineRollupPruneInterval,
 		streakBackfillEnabled:      true,
 		streakBackfillRetryBackoff: defaultStreakBackfillRetryBackoff,
+		priorityFeeBackfill:        newPriorityFeeBackfillSettings(cfg.Indexer),
 		ctx:                        indexerCtx,
 		cancel:                     cancel,
 		indexerVersion:             cfg.Indexer.Version,
@@ -595,6 +600,17 @@ func (i *Indexer) Start() error {
 		go func() {
 			defer i.wg.Done()
 			i.runStreakBackfill()
+		}()
+	}
+
+	// Fill execution-layer fees onto blob rows indexed before they were
+	// stored, in place and throttled, so the tip charts cover full history
+	// without deleting and re-inserting it.
+	if i.db != nil && i.priorityFeeBackfill.enabled {
+		i.wg.Add(1)
+		go func() {
+			defer i.wg.Done()
+			i.runPriorityFeeBackfill()
 		}()
 	}
 

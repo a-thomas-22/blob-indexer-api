@@ -126,6 +126,15 @@ type IndexerConfig struct {
 	// Zero or negative disables the scan.
 	StartupGapScanBlocks int     `mapstructure:"startup_gap_scan_blocks" yaml:"startup_gap_scan_blocks"`
 	RPCRateLimit         float64 `mapstructure:"rpc_rate_limit" yaml:"rpc_rate_limit"` // requests per second; 0 = no proactive limiting
+	// PriorityFeeBackfillEnabled gates the startup walk that fills execution
+	// fees (max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas)
+	// onto blob rows indexed before those columns existed. The walk refetches
+	// each such block from the RPC and updates rows in place, so it is
+	// resumable and never removes data; it only costs RPC calls.
+	PriorityFeeBackfillEnabled bool `mapstructure:"priority_fee_backfill_enabled" yaml:"priority_fee_backfill_enabled"`
+	// PriorityFeeBackfillPause is the wait between backfill windows, which
+	// throttles the RPC load the walk adds alongside live indexing.
+	PriorityFeeBackfillPause time.Duration `mapstructure:"priority_fee_backfill_pause" yaml:"priority_fee_backfill_pause"`
 }
 
 // AttributionConfig holds dynamic attribution registry configuration.
@@ -227,6 +236,8 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("indexer.max_reorg_depth", 64)
 	v.SetDefault("indexer.startup_gap_scan_blocks", 10000)
 	v.SetDefault("indexer.rpc_rate_limit", 0)
+	v.SetDefault("indexer.priority_fee_backfill_enabled", true)
+	v.SetDefault("indexer.priority_fee_backfill_pause", "250ms")
 	v.SetDefault("attribution.blob_list_enabled", true)
 	v.SetDefault("attribution.blob_list_base_url", "https://github.com/tirante-dev/blob-list/releases/latest/download")
 	v.SetDefault("attribution.blob_list_refresh_interval", "1h")
@@ -454,6 +465,9 @@ func loadConfig() (*Config, error) {
 		return nil, err
 	}
 	if cfg.Indexer.GapScanInterval, err = parseDuration(v, "indexer.gap_scan_interval", "gap_scan_interval"); err != nil {
+		return nil, err
+	}
+	if cfg.Indexer.PriorityFeeBackfillPause, err = parseDuration(v, "indexer.priority_fee_backfill_pause", "priority_fee_backfill_pause"); err != nil {
 		return nil, err
 	}
 	if cfg.Attribution.BlobListRefreshInterval, err = parseDuration(v, "attribution.blob_list_refresh_interval", "blob_list_refresh_interval"); err != nil {

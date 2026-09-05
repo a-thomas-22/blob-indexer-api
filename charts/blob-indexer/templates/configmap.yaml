@@ -53,6 +53,8 @@ data:
       max_reorg_depth: {{ .Values.appConfig.indexer.max_reorg_depth }}
       startup_gap_scan_blocks: {{ .Values.appConfig.indexer.startup_gap_scan_blocks }}
       rpc_rate_limit: {{ .Values.appConfig.indexer.rpc_rate_limit }}
+      priority_fee_backfill_enabled: {{ .Values.appConfig.indexer.priority_fee_backfill_enabled }}
+      priority_fee_backfill_pause: {{ .Values.appConfig.indexer.priority_fee_backfill_pause | quote }}
     attribution:
       blob_list_enabled: {{ .Values.appConfig.attribution.blob_list_enabled }}
       blob_list_base_url: {{ .Values.appConfig.attribution.blob_list_base_url | quote }}

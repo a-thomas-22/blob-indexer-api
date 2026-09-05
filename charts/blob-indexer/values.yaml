@@ -222,6 +222,14 @@ appConfig:
     # Proactive RPC requests-per-second cap per network; 0 = no client-side
     # limiting.
     rpc_rate_limit: 0
+    # Startup walk that fills execution-layer fees (priority_fee_per_gas and
+    # its caps) onto blob rows indexed before those columns existed, by
+    # refetching each such block and updating rows in place. Resumable and
+    # non-destructive; disable to stop spending RPC calls on history.
+    priority_fee_backfill_enabled: true
+    # Pause between backfill windows (2000 blocks each), which throttles the
+    # RPC load the walk adds next to live indexing.
+    priority_fee_backfill_pause: "250ms"
   attribution:
     blob_list_enabled: true
     blob_list_base_url: "https://github.com/tirante-dev/blob-list/releases/latest/download"
