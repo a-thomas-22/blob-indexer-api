@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.17.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.16.0...blob-indexer-api-v0.17.0) (2026-09-05)
+
+
+### Features
+
+* **api:** record blob transaction priority fees and add blob-tips chart ([#327](https://github.com/a-thomas-22/blob-indexer-api/issues/327)) ([d9b737f](https://github.com/a-thomas-22/blob-indexer-api/commit/d9b737fdc466f3bb1913c41b25ae0b158559e000))
+
+
+### Dependencies
+
+* bump github.com/go-chi/chi/v5 from 5.3.1 to 5.3.2 ([#325](https://github.com/a-thomas-22/blob-indexer-api/issues/325)) ([bd9748a](https://github.com/a-thomas-22/blob-indexer-api/commit/bd9748a83b5f3f356f719a735962620747bbc040))
+* bump golang from 1.26-alpine to 1.27-alpine ([#326](https://github.com/a-thomas-22/blob-indexer-api/issues/326)) ([456c2bc](https://github.com/a-thomas-22/blob-indexer-api/commit/456c2bc991c97ade811b77b53998086918a0f256))
+
 ## [0.16.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.15.0...blob-indexer-api-v0.16.0) (2026-08-10)
 
 
