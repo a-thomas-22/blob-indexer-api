@@ -35,22 +35,29 @@ type rateLimitedTransport struct {
 	initialBackoff time.Duration
 }
 
+// newProactiveLimiter builds the token bucket for cfg.RequestsPerSecond, or
+// nil when proactive limiting is disabled. The burst equals one second of
+// requests (at least one), so a rate below 1/s still admits a single call.
+func newProactiveLimiter(cfg RateLimitConfig) *rate.Limiter {
+	if cfg.RequestsPerSecond <= 0 {
+		return nil
+	}
+	burst := int(cfg.RequestsPerSecond)
+	if burst < 1 {
+		burst = 1
+	}
+	return rate.NewLimiter(rate.Limit(cfg.RequestsPerSecond), burst)
+}
+
 // newRateLimitedTransport creates a rate-limited transport wrapping base.
 // If cfg.RequestsPerSecond <= 0, the proactive limiter is not created.
 func newRateLimitedTransport(base http.RoundTripper, cfg RateLimitConfig) *rateLimitedTransport {
-	t := &rateLimitedTransport{
+	return &rateLimitedTransport{
 		base:           base,
 		maxRetries:     cfg.MaxRetries,
 		initialBackoff: cfg.InitialBackoff,
+		limiter:        newProactiveLimiter(cfg),
 	}
-	if cfg.RequestsPerSecond > 0 {
-		burst := int(cfg.RequestsPerSecond)
-		if burst < 1 {
-			burst = 1
-		}
-		t.limiter = rate.NewLimiter(rate.Limit(cfg.RequestsPerSecond), burst)
-	}
-	return t
 }
 
 // RoundTrip implements http.RoundTripper with 429 detection, retry, and rate limiting.

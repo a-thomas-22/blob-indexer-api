@@ -219,7 +219,8 @@ appConfig:
     # unindexed blocks below the watermark). Zero or negative disables the
     # scan.
     startup_gap_scan_blocks: 10000
-    # Proactive RPC requests-per-second cap per network; 0 = no client-side
+    # Proactive RPC requests-per-second cap per network, applied to every
+    # call over both HTTP and WebSocket connections; 0 = no client-side
     # limiting.
     rpc_rate_limit: 0
     # Startup walk that fills execution-layer fees (priority_fee_per_gas and

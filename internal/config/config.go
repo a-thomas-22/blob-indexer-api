@@ -125,7 +125,7 @@ type IndexerConfig struct {
 	// watermark above blocks that never committed; the scan re-queues them.
 	// Zero or negative disables the scan.
 	StartupGapScanBlocks int     `mapstructure:"startup_gap_scan_blocks" yaml:"startup_gap_scan_blocks"`
-	RPCRateLimit         float64 `mapstructure:"rpc_rate_limit" yaml:"rpc_rate_limit"` // requests per second; 0 = no proactive limiting
+	RPCRateLimit         float64 `mapstructure:"rpc_rate_limit" yaml:"rpc_rate_limit"` // requests per second over HTTP or WebSocket; 0 = no proactive limiting
 	// PriorityFeeBackfillEnabled gates the startup walk that fills execution
 	// fees (max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas)
 	// onto blob rows indexed before those columns existed. The walk refetches
