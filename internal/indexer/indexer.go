@@ -143,19 +143,28 @@ type blockReindexRequest struct {
 }
 
 type blobMetrics struct {
-	blobSizeBytes     int64
-	baseFeePerBlobGas string
-	tipPerBlobGas     string
-	totalCostETH      string
-	maxFeePerBlobGas  *string
-	blobGasUsed       *int64
+	blobSizeBytes        int64
+	baseFeePerBlobGas    string
+	tipPerBlobGas        string
+	totalCostETH         string
+	maxFeePerBlobGas     *string
+	blobGasUsed          *int64
+	maxPriorityFeePerGas *string
+	maxFeePerGas         *string
+	priorityFeePerGas    *string
 }
 
 // calculateBlobMetrics returns per-blob metric values for any blob carried by
 // tx, evaluated against blobBaseFee. Every blob in an EIP-4844 transaction
 // consumes the same blob gas and is charged the same blob base fee, so callers
 // emit one Blob row per BlobHashes() entry using these identical values.
-func calculateBlobMetrics(tx *types.Transaction, blobBaseFee *big.Int) blobMetrics {
+//
+// executionBaseFee is the including block's EIP-1559 base fee, which fixes
+// the priority fee the transaction actually pays per execution gas: the tip
+// cap, or whatever is left of the fee cap above the base fee if that is
+// less. It is nil for pending transactions, whose priority fee is unknown
+// until inclusion; only the two caps are recorded then.
+func calculateBlobMetrics(tx *types.Transaction, blobBaseFee, executionBaseFee *big.Int) blobMetrics {
 	maxFeePerBlobGas := tx.BlobGasFeeCap()
 	tipPerBlobGas := new(big.Int).Sub(maxFeePerBlobGas, blobBaseFee)
 	if tipPerBlobGas.Sign() < 0 {
@@ -166,15 +175,41 @@ func calculateBlobMetrics(tx *types.Transaction, blobBaseFee *big.Int) blobMetri
 
 	maxFeeStr := maxFeePerBlobGas.String()
 	blobGasUsedInt := int64(params.BlobTxBlobGasPerBlob)
+	maxPriorityFeePerGas := tx.GasTipCap().String()
+	maxFeePerGas := tx.GasFeeCap().String()
+
+	var priorityFeePerGas *string
+	if executionBaseFee != nil {
+		fee := effectivePriorityFeePerGas(tx, executionBaseFee).String()
+		priorityFeePerGas = &fee
+	}
 
 	return blobMetrics{
-		blobSizeBytes:     int64(bytesPerBlob),
-		baseFeePerBlobGas: blobBaseFee.String(),
-		tipPerBlobGas:     tipPerBlobGas.String(),
-		totalCostETH:      totalCost.String(),
-		maxFeePerBlobGas:  &maxFeeStr,
-		blobGasUsed:       &blobGasUsedInt,
+		blobSizeBytes:        int64(bytesPerBlob),
+		baseFeePerBlobGas:    blobBaseFee.String(),
+		tipPerBlobGas:        tipPerBlobGas.String(),
+		totalCostETH:         totalCost.String(),
+		maxFeePerBlobGas:     &maxFeeStr,
+		blobGasUsed:          &blobGasUsedInt,
+		maxPriorityFeePerGas: &maxPriorityFeePerGas,
+		maxFeePerGas:         &maxFeePerGas,
+		priorityFeePerGas:    priorityFeePerGas,
 	}
+}
+
+// effectivePriorityFeePerGas is min(tip cap, fee cap - base fee), floored at
+// zero: a transaction whose fee cap sits below the base fee cannot be
+// included, so any such row (which only a reorg replay could produce) pays
+// nothing rather than a negative amount.
+func effectivePriorityFeePerGas(tx *types.Transaction, executionBaseFee *big.Int) *big.Int {
+	fee := new(big.Int).Sub(tx.GasFeeCap(), executionBaseFee)
+	if tipCap := tx.GasTipCap(); fee.Cmp(tipCap) > 0 {
+		fee = new(big.Int).Set(tipCap)
+	}
+	if fee.Sign() < 0 {
+		return big.NewInt(0)
+	}
+	return fee
 }
 
 // Indexer is responsible for indexing blob transactions
@@ -212,22 +247,26 @@ type Indexer struct {
 	// field so tests can shrink it. Defaults to
 	// defaultStreakBackfillRetryBackoff.
 	streakBackfillRetryBackoff time.Duration
-	ctx                        context.Context
-	cancel                     context.CancelFunc
-	wg                         sync.WaitGroup
-	lastIndexedBlock           uint64 // accessed with sync/atomic
-	indexerVersion             string
-	mu                         sync.Mutex // protects DB metadata writes
-	dbWriteMu                  sync.Mutex // serializes same-network writes that fire summary rollup triggers
-	blockTaskCh                chan BlockTask
-	useWebsocket               bool
-	blockSub                   *ethereum.BlockSubscription
-	pendingTxSub               *ethereum.PendingTxSubscription
-	mempoolPollingStarted      uint32
-	failedBlocks               map[uint64]int // block number -> cumulative failure count
-	failedBlockNextRetry       map[uint64]time.Time
-	failedBlocksMu             sync.Mutex
-	reorgDetected              uint32 // atomic flag: 1 = reorg detected, main loop should reset
+	// priorityFeeBackfill tunes the startup walk that fills execution fees
+	// onto rows indexed before they were stored; fields so tests can shrink
+	// windows and waits. See priorityFeeBackfillSettings.
+	priorityFeeBackfill   priorityFeeBackfillSettings
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	wg                    sync.WaitGroup
+	lastIndexedBlock      uint64 // accessed with sync/atomic
+	indexerVersion        string
+	mu                    sync.Mutex // protects DB metadata writes
+	dbWriteMu             sync.Mutex // serializes same-network writes that fire summary rollup triggers
+	blockTaskCh           chan BlockTask
+	useWebsocket          bool
+	blockSub              *ethereum.BlockSubscription
+	pendingTxSub          *ethereum.PendingTxSubscription
+	mempoolPollingStarted uint32
+	failedBlocks          map[uint64]int // block number -> cumulative failure count
+	failedBlockNextRetry  map[uint64]time.Time
+	failedBlocksMu        sync.Mutex
+	reorgDetected         uint32 // atomic flag: 1 = reorg detected, main loop should reset
 	// reorgRangeMu guards reorgRewindFrom/reorgInvalidatedThrough, which are
 	// only meaningful while reorgDetected == 1. Reorgs signaled before the main
 	// loop consumes the flag merge into the widest invalidated range.
@@ -300,6 +339,7 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		fineRollupPruneInterval:    defaultFineRollupPruneInterval,
 		streakBackfillEnabled:      true,
 		streakBackfillRetryBackoff: defaultStreakBackfillRetryBackoff,
+		priorityFeeBackfill:        newPriorityFeeBackfillSettings(cfg.Indexer),
 		ctx:                        indexerCtx,
 		cancel:                     cancel,
 		indexerVersion:             cfg.Indexer.Version,
@@ -560,6 +600,17 @@ func (i *Indexer) Start() error {
 		go func() {
 			defer i.wg.Done()
 			i.runStreakBackfill()
+		}()
+	}
+
+	// Fill execution-layer fees onto blob rows indexed before they were
+	// stored, in place and throttled, so the tip charts cover full history
+	// without deleting and re-inserting it.
+	if i.db != nil && i.priorityFeeBackfill.enabled {
+		i.wg.Add(1)
+		go func() {
+			defer i.wg.Done()
+			i.runPriorityFeeBackfill()
 		}()
 	}
 
@@ -1488,7 +1539,7 @@ func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID in
 	if len(blobHashes) == 0 {
 		return nil
 	}
-	metrics := calculateBlobMetrics(tx, blobBaseFee)
+	metrics := calculateBlobMetrics(tx, blobBaseFee, nil)
 	// UTC: this instant lands in timezone-less TIMESTAMP columns
 	// (mempool_blobs.timestamp/last_seen, blob_replacements.replaced_at) and
 	// feeds pending-age math against UTC-based DB expressions; lib/pq encodes
@@ -1514,6 +1565,9 @@ func buildPendingBlobs(tx *types.Transaction, blobBaseFee *big.Int, networkID in
 			BlobGasUsed:       metrics.blobGasUsed,
 			VersionedHash:     &versionedHash,
 			Nonce:             tx.Nonce(),
+
+			MaxPriorityFeePerGas: metrics.maxPriorityFeePerGas,
+			MaxFeePerGas:         metrics.maxFeePerGas,
 		})
 	}
 	return rows
@@ -1616,7 +1670,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		// Get the user attribution for this block's validity window.
 		userAttribution := i.attribution.GetUserAttributionForBlock(from, int64(blockNumber))
 
-		metrics := calculateBlobMetrics(tx, blobBaseFee)
+		metrics := calculateBlobMetrics(tx, blobBaseFee, header.BaseFee)
 
 		for _, blobHash := range blobHashes {
 			versionedHash := blobHash.Hex()
@@ -1638,6 +1692,10 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 				VersionedHash:     &versionedHash,
 				Slot:              slot,
 				Nonce:             tx.Nonce(),
+
+				MaxPriorityFeePerGas: metrics.maxPriorityFeePerGas,
+				MaxFeePerGas:         metrics.maxFeePerGas,
+				PriorityFeePerGas:    metrics.priorityFeePerGas,
 			})
 			blobIndex++
 		}
@@ -2140,11 +2198,11 @@ func (i *Indexer) completeReorgRecoveryIfCovered(fetchEpoch uint64) {
 
 // blobInsertColumns is the number of columns written per row when inserting
 // into blobs.
-const blobInsertColumns = 15
+const blobInsertColumns = 18
 
 // mempoolBlobInsertColumns is the number of columns written per row when
 // upserting into mempool_blobs.
-const mempoolBlobInsertColumns = 15
+const mempoolBlobInsertColumns = 18
 
 // valuesPlaceholders builds a multi-row VALUES clause "($1,$2,...),($n,...),..."
 // for rows rows of width columns. casts, when non-nil, must have width entries
@@ -2289,7 +2347,8 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			INSERT INTO blobs (
 				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash, slot
+				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash, slot,
+				max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas
 			) VALUES ` + valuesPlaceholders(len(blobs), blobInsertColumns, nil) + `
 			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
 				tx_hash = EXCLUDED.tx_hash,
@@ -2303,14 +2362,18 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				max_fee_per_blob_gas = EXCLUDED.max_fee_per_blob_gas,
 				blob_gas_used = EXCLUDED.blob_gas_used,
 				versioned_hash = EXCLUDED.versioned_hash,
-				slot = EXCLUDED.slot
+				slot = EXCLUDED.slot,
+				max_priority_fee_per_gas = EXCLUDED.max_priority_fee_per_gas,
+				max_fee_per_gas = EXCLUDED.max_fee_per_gas,
+				priority_fee_per_gas = EXCLUDED.priority_fee_per_gas
 		`
 		insertArgs := make([]interface{}, 0, len(blobs)*blobInsertColumns)
 		for _, blob := range blobs {
 			insertArgs = append(insertArgs,
 				blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
-				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, blob.Slot)
+				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, blob.Slot,
+				blob.MaxPriorityFeePerGas, blob.MaxFeePerGas, blob.PriorityFeePerGas)
 		}
 		if _, err := tx.ExecContext(i.ctx, insertQuery, insertArgs...); err != nil {
 			return fmt.Errorf("failed to insert blobs (block: %d): %w", indexedBlock.BlockNumber, err)
@@ -2746,7 +2809,8 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 		INSERT INTO mempool_blobs (
 			chain_id, tx_hash, blob_index, from_address, user_attribution,
 			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash, nonce, last_seen
+			timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash, nonce, last_seen,
+			max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas
 		) VALUES ` + valuesPlaceholders(len(blobs), mempoolBlobInsertColumns, nil) + `
 		ON CONFLICT (chain_id, tx_hash, blob_index) DO UPDATE SET
 			from_address = EXCLUDED.from_address,
@@ -2759,14 +2823,18 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 			blob_gas_used = EXCLUDED.blob_gas_used,
 			versioned_hash = EXCLUDED.versioned_hash,
 			nonce = EXCLUDED.nonce,
-			last_seen = EXCLUDED.last_seen
+			last_seen = EXCLUDED.last_seen,
+			max_priority_fee_per_gas = EXCLUDED.max_priority_fee_per_gas,
+			max_fee_per_gas = EXCLUDED.max_fee_per_gas,
+			priority_fee_per_gas = EXCLUDED.priority_fee_per_gas
 	`
 	upsertArgs := make([]interface{}, 0, len(blobs)*mempoolBlobInsertColumns)
 	for offset, b := range blobs {
 		upsertArgs = append(upsertArgs,
 			b.ChainID, b.TxHash, offset, b.FromAddress, b.UserAttribution,
 			b.BlobSizeBytes, b.BaseFeePerBlobGas, b.TipPerBlobGas, b.TotalCostWei,
-			b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed, b.VersionedHash, int64(b.Nonce), b.Timestamp)
+			b.Timestamp, b.MaxFeePerBlobGas, b.BlobGasUsed, b.VersionedHash, int64(b.Nonce), b.Timestamp,
+			b.MaxPriorityFeePerGas, b.MaxFeePerGas, b.PriorityFeePerGas)
 	}
 	if _, err := tx.ExecContext(i.ctx, upsertQuery, upsertArgs...); err != nil {
 		return fmt.Errorf("failed to insert pending blobs (tx: %s): %w", txHash, err)

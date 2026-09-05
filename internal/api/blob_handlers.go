@@ -44,8 +44,29 @@ type BlobResponse struct {
 	BlobSizeBytes         int64  `json:"blob_size_bytes"`
 	BaseFeePerBlobGas     string `json:"base_fee_per_blob_gas"`
 	BaseFeePerBlobGasGwei string `json:"base_fee_per_blob_gas_gwei,omitempty"`
-	TipPerBlobGas         string `json:"tip_per_blob_gas"`
-	TipPerBlobGasGwei     string `json:"tip_per_blob_gas_gwei,omitempty"`
+	// TipPerBlobGas is max_fee_per_blob_gas minus the blob base fee: the
+	// transaction's blob fee-cap headroom, which is never paid. It is not a
+	// priority fee; for what the sender paid to win a blob slot, see
+	// priority_fee_per_gas.
+	TipPerBlobGas     string `json:"tip_per_blob_gas"`
+	TipPerBlobGasGwei string `json:"tip_per_blob_gas_gwei,omitempty"`
+	// MaxPriorityFeePerGas is the transaction's EIP-1559 priority fee cap in
+	// wei. Builders order competing blob transactions by the priority fee
+	// they pay on execution gas, so this is the bid for a blob slot. Omitted
+	// for rows indexed before it was stored.
+	MaxPriorityFeePerGas     *string `json:"max_priority_fee_per_gas,omitempty" example:"2000000000"`
+	MaxPriorityFeePerGasGwei string  `json:"max_priority_fee_per_gas_gwei,omitempty" example:"2"`
+	// MaxFeePerGas is the transaction's EIP-1559 total fee cap in wei.
+	// Omitted for rows indexed before it was stored.
+	MaxFeePerGas     *string `json:"max_fee_per_gas,omitempty" example:"30000000000"`
+	MaxFeePerGasGwei string  `json:"max_fee_per_gas_gwei,omitempty" example:"30"`
+	// PriorityFeePerGas is the priority fee the transaction actually paid
+	// per execution gas, in wei: min(max_priority_fee_per_gas,
+	// max_fee_per_gas minus the including block's base fee). Omitted for
+	// pending blobs, whose fee is unknown until inclusion, and for rows
+	// indexed before it was stored.
+	PriorityFeePerGas     *string `json:"priority_fee_per_gas,omitempty" example:"2000000000"`
+	PriorityFeePerGasGwei string  `json:"priority_fee_per_gas_gwei,omitempty" example:"2"`
 	// Realized blob base-fee cost in wei, serialized as a decimal string.
 	TotalCostWei         string    `json:"total_cost_wei" example:"4718548746240"`
 	Timestamp            time.Time `json:"timestamp"`
@@ -256,6 +277,13 @@ func toBlobResponse(blob models.Blob, network config.NetworkConfig) BlobResponse
 		VersionedHash:         blob.VersionedHash,
 		VersionedHashes:       []string(blob.VersionedHashes),
 		Slot:                  blobSlot(blob, network),
+
+		MaxPriorityFeePerGas:     blob.MaxPriorityFeePerGas,
+		MaxPriorityFeePerGasGwei: formatOptionalWeiAsGwei(blob.MaxPriorityFeePerGas),
+		MaxFeePerGas:             blob.MaxFeePerGas,
+		MaxFeePerGasGwei:         formatOptionalWeiAsGwei(blob.MaxFeePerGas),
+		PriorityFeePerGas:        blob.PriorityFeePerGas,
+		PriorityFeePerGasGwei:    formatOptionalWeiAsGwei(blob.PriorityFeePerGas),
 	}
 	response.RealizedCostWei, response.MaxCostWei, response.HeadroomWei, response.HeadroomPercent = deriveBlobCostFields(blob)
 	return response

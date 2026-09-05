@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
+	"golang.org/x/time/rate"
 )
 
 // ClientOption configures the Ethereum client.
@@ -26,7 +27,11 @@ type clientOptions struct {
 
 const pendingTxSubscriptionBuffer = 16384
 
-// WithRateLimit configures RPC rate limiting and 429 handling.
+// WithRateLimit configures RPC rate limiting and 429 handling. The proactive
+// requests-per-second limit applies to every RPC call regardless of
+// transport: over HTTP it lives in the transport alongside the 429 retry
+// handling, and over WebSocket, where there is no HTTP status to react to,
+// each call waits on the same kind of token bucket before it is sent.
 func WithRateLimit(cfg RateLimitConfig) ClientOption {
 	return func(o *clientOptions) {
 		o.rateLimitConfig = &cfg
@@ -47,9 +52,13 @@ type PendingTxSubscription struct {
 
 // Client is a wrapper around the Ethereum client
 type Client struct {
-	ethClient        *ethclient.Client
-	rpcClient        *rpc.Client
-	isWebsocket      bool
+	ethClient   *ethclient.Client
+	rpcClient   *rpc.Client
+	isWebsocket bool
+	// limiter throttles calls on WebSocket connections, which bypass the
+	// HTTP transport that throttles HTTP ones. Nil when unlimited or when
+	// the transport already applies the limit.
+	limiter          *rate.Limiter
 	blockSubs        map[string]*BlockSubscription
 	pendingTxSubs    map[string]*PendingTxSubscription
 	blobBaseFeeCache *big.Int
@@ -70,13 +79,18 @@ func NewClient(rpcURL string, opts ...ClientOption) (*Client, error) {
 	}
 
 	var rpcClient *rpc.Client
+	var limiter *rate.Limiter
 	var err error
 
-	if !isWebsocket && options.rateLimitConfig != nil {
+	switch {
+	case !isWebsocket && options.rateLimitConfig != nil:
 		transport := newRateLimitedTransport(http.DefaultTransport, *options.rateLimitConfig)
 		httpClient := &http.Client{Transport: transport}
 		rpcClient, err = rpc.DialOptions(context.Background(), rpcURL, rpc.WithHTTPClient(httpClient))
-	} else {
+	case isWebsocket && options.rateLimitConfig != nil:
+		limiter = newProactiveLimiter(*options.rateLimitConfig)
+		rpcClient, err = rpc.Dial(rpcURL)
+	default:
 		rpcClient, err = rpc.Dial(rpcURL)
 	}
 	if err != nil {
@@ -88,9 +102,23 @@ func NewClient(rpcURL string, opts ...ClientOption) (*Client, error) {
 		ethClient:     ethClient,
 		rpcClient:     rpcClient,
 		isWebsocket:   isWebsocket,
+		limiter:       limiter,
 		blockSubs:     make(map[string]*BlockSubscription),
 		pendingTxSubs: make(map[string]*PendingTxSubscription),
 	}, nil
+}
+
+// throttle waits for a token before an RPC call on a rate-limited WebSocket
+// connection. It returns ctx's error if the wait is cut short, so a caller
+// shutting down never blocks on the bucket.
+func (c *Client) throttle(ctx context.Context) error {
+	if c.limiter == nil {
+		return nil
+	}
+	if err := c.limiter.Wait(ctx); err != nil {
+		return fmt.Errorf("rate limit wait: %w", err)
+	}
+	return nil
 }
 
 // IsWebsocket returns true if the client is connected via WebSocket
@@ -100,6 +128,9 @@ func (c *Client) IsWebsocket() bool {
 
 // GetChainID retrieves the chain ID reported by the connected RPC node.
 func (c *Client) GetChainID(ctx context.Context) (*big.Int, error) {
+	if err := c.throttle(ctx); err != nil {
+		return nil, err
+	}
 	chainID, err := c.ethClient.ChainID(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get chain ID: %w", err)
@@ -212,6 +243,9 @@ func (c *Client) UnsubscribeFromPendingTransactions(id string) {
 
 // GetLatestBlockNumber gets the latest block number
 func (c *Client) GetLatestBlockNumber(ctx context.Context) (uint64, error) {
+	if err := c.throttle(ctx); err != nil {
+		return 0, err
+	}
 	header, err := c.ethClient.HeaderByNumber(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get latest block header: %w", err)
@@ -227,6 +261,9 @@ func (c *Client) GetLatestBlockNumber(ctx context.Context) (uint64, error) {
 
 // GetBlockByNumber gets a block by its number
 func (c *Client) GetBlockByNumber(ctx context.Context, number uint64) (*types.Block, error) {
+	if err := c.throttle(ctx); err != nil {
+		return nil, err
+	}
 	block, err := c.ethClient.BlockByNumber(ctx, big.NewInt(int64(number)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block %d: %w", number, err)
@@ -238,6 +275,9 @@ func (c *Client) GetBlockByNumber(ctx context.Context, number uint64) (*types.Bl
 func (c *Client) GetPendingTransactions(ctx context.Context) (map[string]*types.Transaction, error) {
 	// Prefer eth_getBlockByNumber("pending", true) over txpool_content.
 	// txpool_content can return unbounded payloads on untrusted nodes.
+	if err := c.throttle(ctx); err != nil {
+		return nil, err
+	}
 	pendingBlock, err := c.ethClient.BlockByNumber(ctx, big.NewInt(int64(rpc.PendingBlockNumber)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pending block: %w", err)
@@ -273,6 +313,9 @@ func (c *Client) GetBlobBaseFee(ctx context.Context, blockNumber uint64) (*big.I
 	var result string
 	// The eth_blobBaseFee method doesn't take any arguments, it returns the current blob base fee
 	// We ignore the blockNumber parameter and just get the current blob base fee
+	if err := c.throttle(ctx); err != nil {
+		return nil, err
+	}
 	err := c.rpcClient.CallContext(ctx, &result, "eth_blobBaseFee")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blob base fee for block %d: %w", blockNumber, err)
@@ -322,6 +365,9 @@ type EthConfig struct {
 // RPC error, which the caller treats as "no dynamic schedule available" and
 // falls back to the compiled chain config.
 func (c *Client) FetchEthConfig(ctx context.Context) (*EthConfig, error) {
+	if err := c.throttle(ctx); err != nil {
+		return nil, err
+	}
 	var result EthConfig
 	if err := c.rpcClient.CallContext(ctx, &result, "eth_config"); err != nil {
 		return nil, fmt.Errorf("eth_config call failed: %w", err)
@@ -341,6 +387,9 @@ func (c *Client) GetBlockTimestamp(block *types.Block) time.Time {
 
 // GetTransactionByHash gets a transaction by its hash
 func (c *Client) GetTransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, bool, error) {
+	if err := c.throttle(ctx); err != nil {
+		return nil, false, err
+	}
 	return c.ethClient.TransactionByHash(ctx, hash)
 }
 

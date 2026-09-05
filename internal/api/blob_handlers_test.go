@@ -1379,6 +1379,60 @@ func firstBlobRawBlockNumber(t *testing.T, body []byte) json.RawMessage {
 	return raw
 }
 
+func TestToBlobResponse_PriorityFees(t *testing.T) {
+	network := config.NetworkConfig{Name: "testnet", ChainID: 42}
+	tipCap := "2000000000"
+	feeCap := "30000000000"
+	paid := "1500000000"
+
+	resp := toBlobResponse(models.Blob{
+		ChainID:              42,
+		BlockNumber:          100,
+		TxHash:               "0xconfirmed",
+		FromAddress:          "0xsender",
+		BaseFeePerBlobGas:    "1000000",
+		TipPerBlobGas:        "500",
+		TotalCostWei:         "0",
+		Timestamp:            time.Now(),
+		Confirmed:            true,
+		MaxPriorityFeePerGas: &tipCap,
+		MaxFeePerGas:         &feeCap,
+		PriorityFeePerGas:    &paid,
+	}, network)
+
+	if resp.MaxPriorityFeePerGas == nil || *resp.MaxPriorityFeePerGas != tipCap || resp.MaxPriorityFeePerGasGwei != "2" {
+		t.Fatalf("unexpected priority fee cap: %v / %q", resp.MaxPriorityFeePerGas, resp.MaxPriorityFeePerGasGwei)
+	}
+	if resp.MaxFeePerGas == nil || *resp.MaxFeePerGas != feeCap || resp.MaxFeePerGasGwei != "30" {
+		t.Fatalf("unexpected fee cap: %v / %q", resp.MaxFeePerGas, resp.MaxFeePerGasGwei)
+	}
+	if resp.PriorityFeePerGas == nil || *resp.PriorityFeePerGas != paid || resp.PriorityFeePerGasGwei != "1.5" {
+		t.Fatalf("unexpected paid priority fee: %v / %q", resp.PriorityFeePerGas, resp.PriorityFeePerGasGwei)
+	}
+
+	// Legacy rows omit every execution-fee field rather than reporting zero.
+	legacy := toBlobResponse(models.Blob{
+		ChainID:           42,
+		BlockNumber:       99,
+		TxHash:            "0xlegacy",
+		FromAddress:       "0xsender",
+		BaseFeePerBlobGas: "1000000",
+		TipPerBlobGas:     "500",
+		TotalCostWei:      "0",
+		Timestamp:         time.Now(),
+		Confirmed:         true,
+	}, network)
+	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, field := range []string{"max_priority_fee_per_gas", "max_fee_per_gas", "priority_fee_per_gas"} {
+		if strings.Contains(string(encoded), `"`+field+`"`) {
+			t.Fatalf("expected %s to be omitted for a legacy row: %s", field, encoded)
+		}
+	}
+}
+
 func TestToBlobResponse_PendingBlockNumberSerializesNull(t *testing.T) {
 	resp := toBlobResponse(models.Blob{
 		ChainID:           42,
