@@ -55,9 +55,13 @@ type priorityFeeBackfillSettings struct {
 }
 
 func newPriorityFeeBackfillSettings(cfg config.IndexerConfig) priorityFeeBackfillSettings {
+	pause := cfg.PriorityFeeBackfillPause
+	if pause < 0 {
+		pause = 0
+	}
 	return priorityFeeBackfillSettings{
 		enabled:      cfg.PriorityFeeBackfillEnabled,
-		pause:        cfg.PriorityFeeBackfillPause,
+		pause:        pause,
 		windowBlocks: defaultPriorityFeeBackfillWindowBlocks,
 		updateBatch:  defaultPriorityFeeBackfillUpdateBatch,
 		fetchWorkers: defaultPriorityFeeBackfillFetchWorkers,
@@ -72,13 +76,21 @@ func newPriorityFeeBackfillSettings(cfg config.IndexerConfig) priorityFeeBackfil
 // blocks with their transactions, and updates the rows in place.
 //
 // Unlike a reindex, nothing is deleted: charts and block pages keep serving
-// the range while it is being filled, and the stats and rollup triggers see
-// an UPDATE that changes only the fee columns. The walk pauses between
-// windows so the extra RPC load stays modest next to live indexing, and it
-// checkpoints each completed window in indexer_metadata so a restart resumes
-// rather than rewalking. A block whose blobs were reorged or reindexed
-// between the listing and the update already carries fees and is skipped by
-// the update's own guard.
+// the range while it is being filled, and the fee-only UPDATE is a no-op
+// for the aggregate triggers (migration 000016 makes them return before any
+// work when no column they read changed). The walk pauses after every
+// update batch and every window so the
+// extra RPC load stays modest next to live indexing.
+//
+// Progress checkpoints in indexer_metadata. The checkpoint only advances
+// over a contiguous prefix of windows proven complete: after a window is
+// processed it is listed again, and any block still unpriced (a fetch that
+// failed every attempt, or a row whose transaction the fetched block did not
+// carry) leaves the window incomplete. The walk carries on through later
+// windows so one bad block cannot wedge the rest of history, but the
+// checkpoint stays at the incomplete window so the next start retries it.
+// A block whose blobs were reorged or reindexed between the listing and the
+// update already carries fees and is skipped by the update's own guard.
 func (i *Indexer) runPriorityFeeBackfill() {
 	bounds, err := i.db.IndexedBlockBounds(i.ctx, i.network.ChainID)
 	if err != nil {
@@ -114,63 +126,128 @@ func (i *Indexer) runPriorityFeeBackfill() {
 		zap.Duration("pause", i.priorityFeeBackfill.pause))
 
 	began := time.Now()
-	var windows, blocksFilled, rowsUpdated int64
+	var windows, blocksFilled, rowsUpdated, incompleteWindows int64
+	checkpoint := from - 1
+	checkpointStalled := false
 	for windowStart := from; windowStart <= bounds.Max; windowStart += i.priorityFeeBackfill.windowBlocks {
 		windowEnd := windowStart + i.priorityFeeBackfill.windowBlocks - 1
 		if windowEnd > bounds.Max {
 			windowEnd = bounds.Max
 		}
 
-		blocks, err := i.blocksMissingPriorityFees(windowStart, windowEnd)
-		if err == nil && len(blocks) > 0 {
-			var updated int64
-			updated, err = i.backfillPriorityFeeBlocks(blocks)
-			blocksFilled += int64(len(blocks))
-			rowsUpdated += updated
-		}
+		complete, filled, updated, err := i.backfillPriorityFeeWindow(windowStart, windowEnd)
+		blocksFilled += filled
+		rowsUpdated += updated
 		if err != nil {
 			if i.ctx.Err() == nil {
 				logger.Error("Blob priority fee backfill aborted; tip history stays partial until the next start",
 					zap.String("network", i.network.Name),
 					zap.Int64("window_start", windowStart),
-					zap.Int64("through_block", windowStart-1),
+					zap.Int64("checkpoint", checkpoint),
 					zap.Error(err))
 			}
 			return
 		}
+		if !complete {
+			incompleteWindows++
+			if !checkpointStalled {
+				checkpointStalled = true
+				logger.Warn("Blob priority fee backfill window left unpriced rows; checkpoint holds here while the walk continues",
+					zap.String("network", i.network.Name),
+					zap.Int64("window_start", windowStart),
+					zap.Int64("window_end", windowEnd))
+			}
+		}
+		if !checkpointStalled {
+			checkpoint = windowEnd
+			i.setPriorityFeeBackfillWatermark(windowEnd)
+		}
 
-		i.setPriorityFeeBackfillWatermark(windowEnd)
 		windows++
 		if windows%priorityFeeBackfillProgressEvery == 0 {
 			logger.Info("Blob priority fee backfill progress",
 				zap.String("network", i.network.Name),
 				zap.Int64("through_block", windowEnd),
+				zap.Int64("checkpoint", checkpoint),
 				zap.Int64("to_block", bounds.Max),
 				zap.Int64("blocks_filled", blocksFilled),
 				zap.Int64("rows_updated", rowsUpdated),
+				zap.Int64("incomplete_windows", incompleteWindows),
 				zap.Duration("elapsed", time.Since(began)))
 		}
 
-		if windowEnd < bounds.Max && i.priorityFeeBackfill.pause > 0 {
-			select {
-			case <-i.ctx.Done():
-				return
-			case <-time.After(i.priorityFeeBackfill.pause):
-			}
-		}
-		select {
-		case <-i.ctx.Done():
+		if windowEnd < bounds.Max && !i.pausePriorityFeeBackfill() {
 			return
-		default:
 		}
 	}
 
+	if incompleteWindows > 0 {
+		logger.Warn("Blob priority fee backfill walked all indexed history but left unpriced rows; the next start retries from the checkpoint",
+			zap.String("network", i.network.Name),
+			zap.Int64("checkpoint", checkpoint),
+			zap.Int64("to_block", bounds.Max),
+			zap.Int64("incomplete_windows", incompleteWindows),
+			zap.Int64("blocks_filled", blocksFilled),
+			zap.Int64("rows_updated", rowsUpdated),
+			zap.Duration("took", time.Since(began)))
+		return
+	}
 	logger.Info("Blob priority fee backfill complete",
 		zap.String("network", i.network.Name),
 		zap.Int64("through_block", bounds.Max),
 		zap.Int64("blocks_filled", blocksFilled),
 		zap.Int64("rows_updated", rowsUpdated),
 		zap.Duration("took", time.Since(began)))
+}
+
+// backfillPriorityFeeWindow fills one window and reports whether it is now
+// fully priced. A window that had nothing to fill is complete by
+// construction; one that had work is listed again afterwards, so a block
+// that could not be fetched or a row the fetched block did not account for
+// is detected rather than assumed filled. The error return is reserved for
+// database failures, which abort the walk; RPC failures only leave the
+// window incomplete.
+func (i *Indexer) backfillPriorityFeeWindow(windowStart, windowEnd int64) (complete bool, filled, updated int64, err error) {
+	blocks, err := i.blocksMissingPriorityFees(windowStart, windowEnd)
+	if err != nil {
+		return false, 0, 0, err
+	}
+	if len(blocks) == 0 {
+		return true, 0, 0, nil
+	}
+
+	updated, err = i.backfillPriorityFeeBlocks(blocks)
+	if err != nil {
+		return false, int64(len(blocks)), updated, err
+	}
+
+	remaining, err := i.blocksMissingPriorityFees(windowStart, windowEnd)
+	if err != nil {
+		return false, int64(len(blocks)), updated, err
+	}
+	filled = int64(len(blocks) - len(remaining))
+	if len(remaining) > 0 {
+		logger.Warn("Blob priority fee backfill left blocks unpriced",
+			zap.String("network", i.network.Name),
+			zap.Int64("window_start", windowStart),
+			zap.Int64("window_end", windowEnd),
+			zap.Int64s("blocks", remaining))
+	}
+	return len(remaining) == 0, filled, updated, nil
+}
+
+// pausePriorityFeeBackfill waits the configured pause, returning false when
+// the indexer stopped meanwhile.
+func (i *Indexer) pausePriorityFeeBackfill() bool {
+	if i.priorityFeeBackfill.pause <= 0 {
+		return i.ctx.Err() == nil
+	}
+	select {
+	case <-i.ctx.Done():
+		return false
+	case <-time.After(i.priorityFeeBackfill.pause):
+		return true
+	}
 }
 
 // blocksMissingPriorityFees lists the window's unpriced blocks, retrying a
@@ -193,7 +270,9 @@ func (i *Indexer) blocksMissingPriorityFees(windowStart, windowEnd int64) ([]int
 }
 
 // backfillPriorityFeeBlocks refetches the given blocks in batches and writes
-// their blob transactions' fees. It returns the number of rows updated.
+// their blob transactions' fees, pausing between batches. It returns the
+// number of rows updated. A block whose fetch fails every attempt is skipped
+// (the window's recheck reports it); a database failure is returned.
 func (i *Indexer) backfillPriorityFeeBlocks(blocks []int64) (int64, error) {
 	var total int64
 	batchSize := i.priorityFeeBackfill.updateBatch
@@ -205,24 +284,28 @@ func (i *Indexer) backfillPriorityFeeBlocks(blocks []int64) (int64, error) {
 		if end > len(blocks) {
 			end = len(blocks)
 		}
-		updates, err := i.fetchPriorityFeeUpdates(blocks[start:end])
-		if err != nil {
-			return total, err
+		updates := i.fetchPriorityFeeUpdates(blocks[start:end])
+		if i.ctx.Err() != nil {
+			return total, i.ctx.Err()
 		}
 		updated, err := i.writePriorityFeeUpdates(updates)
 		if err != nil {
 			return total, err
 		}
 		total += updated
+		if end < len(blocks) && !i.pausePriorityFeeBackfill() {
+			return total, i.ctx.Err()
+		}
 	}
 	return total, nil
 }
 
 // fetchPriorityFeeUpdates fetches a batch of blocks concurrently and derives
-// the fee columns for every blob transaction they carry. One block failing
-// all its attempts fails the batch: a partial write would leave the block's
-// rows unpriced behind an advanced checkpoint, and the walk never returns.
-func (i *Indexer) fetchPriorityFeeUpdates(blocks []int64) ([]db.BlobPriorityFeeUpdate, error) {
+// the fee columns for every blob transaction they carry, in block order. A
+// block that fails every fetch attempt contributes nothing; its rows stay
+// unpriced and the window recheck holds the checkpoint on it, so the batch
+// still lands for the blocks that did fetch rather than losing them all.
+func (i *Indexer) fetchPriorityFeeUpdates(blocks []int64) []db.BlobPriorityFeeUpdate {
 	workers := i.priorityFeeBackfill.fetchWorkers
 	if workers <= 0 {
 		workers = 1
@@ -231,62 +314,42 @@ func (i *Indexer) fetchPriorityFeeUpdates(blocks []int64) ([]db.BlobPriorityFeeU
 		workers = len(blocks)
 	}
 
-	ctx, cancel := context.WithCancel(i.ctx)
-	defer cancel()
-
-	type result struct {
-		index   int
-		updates []db.BlobPriorityFeeUpdate
-		err     error
-	}
+	ordered := make([][]db.BlobPriorityFeeUpdate, len(blocks))
 	tasks := make(chan int)
-	results := make(chan result, len(blocks))
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for index := range tasks {
-				updates, err := i.fetchBlockPriorityFees(ctx, uint64(blocks[index]))
-				results <- result{index: index, updates: updates, err: err}
+				updates, err := i.fetchBlockPriorityFees(i.ctx, uint64(blocks[index]))
 				if err != nil {
-					cancel()
+					if i.ctx.Err() == nil {
+						logger.Warn("Skipping block in priority fee backfill after repeated fetch failures",
+							zap.String("network", i.network.Name),
+							zap.Int64("block", blocks[index]),
+							zap.Error(err))
+					}
+					continue
 				}
+				ordered[index] = updates
 			}
 		}()
 	}
 	for index := range blocks {
 		select {
 		case tasks <- index:
-		case <-ctx.Done():
+		case <-i.ctx.Done():
 		}
 	}
 	close(tasks)
 	wg.Wait()
-	close(results)
 
-	ordered := make([][]db.BlobPriorityFeeUpdate, len(blocks))
-	var firstErr error
-	for r := range results {
-		if r.err != nil {
-			if firstErr == nil || i.ctx.Err() != nil {
-				firstErr = r.err
-			}
-			continue
-		}
-		ordered[r.index] = r.updates
-	}
-	if firstErr != nil {
-		return nil, firstErr
-	}
-	if i.ctx.Err() != nil {
-		return nil, i.ctx.Err()
-	}
 	var updates []db.BlobPriorityFeeUpdate
 	for _, blockUpdates := range ordered {
 		updates = append(updates, blockUpdates...)
 	}
-	return updates, nil
+	return updates
 }
 
 // fetchBlockPriorityFees fetches one block, retrying transient failures, and
@@ -319,7 +382,8 @@ func (i *Indexer) fetchBlockPriorityFees(ctx context.Context, blockNumber uint64
 
 // blockPriorityFeeUpdates derives one update per blob transaction in block.
 // A block without an execution base fee cannot carry blobs (blobs postdate
-// London), but is handled by recording only the caps, matching what the
+// London), but is handled by recording only the caps and leaving the paid
+// fee empty, which UpdateBlobPriorityFees stores as NULL, matching what the
 // live path stores for such a transaction.
 func blockPriorityFeeUpdates(block *types.Block, isBlobTx func(*types.Transaction) bool) []db.BlobPriorityFeeUpdate {
 	header := block.Header()

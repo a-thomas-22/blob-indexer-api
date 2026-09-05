@@ -20,8 +20,9 @@ type BlobPriorityFeeUpdate struct {
 
 // BlocksMissingPriorityFees lists, in ascending order, the blocks in the
 // closed range [fromBlock, toBlock] that still hold a blob row without a
-// recorded priority fee. The walk is keyed on idx_blobs_chain_block, so the
-// cost is bounded by the range width rather than the table.
+// recorded priority fee. The walk is keyed on the (chain_id, block_number,
+// blob_index) unique index, so the cost is bounded by the range width rather
+// than the table.
 func (db *DB) BlocksMissingPriorityFees(ctx context.Context, networkID int, fromBlock, toBlock int64) ([]int64, error) {
 	if toBlock < fromBlock {
 		return nil, fmt.Errorf("priority fee backfill window for network %d has inverted bounds [%d, %d]", networkID, fromBlock, toBlock)
@@ -39,7 +40,12 @@ func (db *DB) BlocksMissingPriorityFees(ctx context.Context, networkID int, from
 // are touched: a reorg replay or operator reindex that lands between the
 // backfill's block fetch and this write already carries the canonical
 // block's fees, and those must win over values derived from a fetch that
-// may predate the replacement. Returns the number of rows updated.
+// may predate the replacement. An empty PriorityFeePerGas stores NULL (the
+// caps are still recorded), matching what the live path writes for a block
+// without an execution base fee. The statement sets only the three fee
+// columns, which the guarded UPDATE trigger functions from migration 000016
+// recognize as a no-op for every aggregate, so nothing is recomputed.
+// Returns the number of rows updated.
 func (db *DB) UpdateBlobPriorityFees(ctx context.Context, networkID int, updates []BlobPriorityFeeUpdate) (int64, error) {
 	if len(updates) == 0 {
 		return 0, nil
@@ -85,7 +91,7 @@ const updateBlobPriorityFees = `
 	SET
 		max_priority_fee_per_gas = u.tip_cap::numeric,
 		max_fee_per_gas = u.fee_cap::numeric,
-		priority_fee_per_gas = u.paid::numeric
+		priority_fee_per_gas = NULLIF(u.paid, '')::numeric
 	FROM unnest($2::bigint[], $3::text[], $4::text[], $5::text[], $6::text[])
 		AS u(block_number, tx_hash, tip_cap, fee_cap, paid)
 	WHERE b.chain_id = $1

@@ -109,3 +109,77 @@ func TestPriorityFeeBackfillQueriesAgainstRealPostgres(t *testing.T) {
 		t.Fatalf("remaining = %v, want [100 103] (0xb in block 100 was not in the update)", remaining)
 	}
 }
+
+// A fee-only update must not recompute any aggregate: migration 000016
+// guards the blobs UPDATE trigger functions to return before any work when
+// no aggregate-relevant column changed. The test drives the observable
+// effect (network_blob_stats and blob_user_stats unchanged) and then proves
+// the triggers still fire for a cost change, so a dropped trigger cannot
+// pass as a guarded one.
+func TestFeeOnlyBlobUpdatesSkipAggregateTriggers(t *testing.T) {
+	sqlxDB := newRecordsTestDB(t)
+	database := &DB{DB: sqlxDB}
+	ctx := context.Background()
+	ts := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei, timestamp
+		) VALUES (1, 100, 0, '0xa', '0xop', 'Optimism', 131072, 10, 2, 1000, $1)
+	`, ts); err != nil {
+		t.Fatalf("seed blob: %v", err)
+	}
+
+	type snapshot struct {
+		NetworkCost string `db:"network_cost"`
+		UserCost    string `db:"user_cost"`
+		Rollups     int    `db:"rollups"`
+	}
+	read := func() snapshot {
+		t.Helper()
+		var s snapshot
+		if err := sqlxDB.GetContext(ctx, &s, `
+			SELECT
+				(SELECT sum_total_cost::text FROM network_blob_stats WHERE chain_id = $1) AS network_cost,
+				(SELECT total_cost_wei::text FROM blob_user_stats WHERE chain_id = $1 AND from_address = '0xop') AS user_cost,
+				(SELECT COUNT(*) FROM blob_chart_rollups WHERE chain_id = $1) AS rollups
+		`, recordsTestChainID); err != nil {
+			t.Fatalf("read aggregates: %v", err)
+		}
+		return s
+	}
+	before := read()
+	if before.NetworkCost != "1000" || before.UserCost != "1000" || before.Rollups == 0 {
+		t.Fatalf("unexpected seeded aggregates: %+v", before)
+	}
+
+	// A fee-only update, with an empty paid fee stored as NULL.
+	if _, err := database.UpdateBlobPriorityFees(ctx, recordsTestChainID, []BlobPriorityFeeUpdate{
+		{BlockNumber: 100, TxHash: "0xa", MaxPriorityFeePerGas: "3", MaxFeePerGas: "30", PriorityFeePerGas: ""},
+	}); err != nil {
+		t.Fatalf("UpdateBlobPriorityFees: %v", err)
+	}
+	var paid *string
+	var feeCap *string
+	if err := sqlxDB.QueryRowContext(ctx,
+		"SELECT priority_fee_per_gas::text, max_fee_per_gas::text FROM blobs WHERE chain_id = $1 AND block_number = 100", recordsTestChainID).
+		Scan(&paid, &feeCap); err != nil {
+		t.Fatalf("read fee: %v", err)
+	}
+	if paid != nil || feeCap == nil || *feeCap != "30" {
+		t.Fatalf("expected NULL paid fee with caps recorded, got paid=%v fee_cap=%v", paid, feeCap)
+	}
+	if after := read(); after != before {
+		t.Fatalf("fee-only update changed aggregates: before %+v, after %+v", before, after)
+	}
+
+	// The same triggers still fire for a column they read.
+	if _, err := sqlxDB.ExecContext(ctx,
+		"UPDATE blobs SET total_cost_wei = 5000 WHERE chain_id = $1 AND block_number = 100", recordsTestChainID); err != nil {
+		t.Fatalf("cost update: %v", err)
+	}
+	if after := read(); after.NetworkCost != "5000" || after.UserCost != "5000" {
+		t.Fatalf("cost update did not reach the aggregates: %+v", after)
+	}
+}

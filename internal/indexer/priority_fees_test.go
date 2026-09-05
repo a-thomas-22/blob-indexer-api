@@ -63,7 +63,8 @@ func TestPriorityFeeBackfill_FillsUnpricedBlocksAndCheckpoints(t *testing.T) {
 
 	expectBounds(mock, 1, 4)
 	expectPriorityFeeWatermarkRead(mock, nil)
-	// Window [1,2]: only block 2 is unpriced.
+	// Window [1,2]: only block 2 is unpriced; after the write it is rechecked
+	// and found complete.
 	expectMissingBlocks(mock, 1, 2, 2)
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE blobs b")).
 		WithArgs(testIndexerChainID,
@@ -73,8 +74,9 @@ func TestPriorityFeeBackfill_FillsUnpricedBlocksAndCheckpoints(t *testing.T) {
 			// the base fee, so the paid tip floors at zero.
 			pq.Array([]string{"1"}), pq.Array([]string{"2"}), pq.Array([]string{"0"})).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMissingBlocks(mock, 1, 2)
 	expectPriorityFeeWatermarkWrite(mock, 2)
-	// Window [3,4]: nothing to do, but the checkpoint still advances.
+	// Window [3,4]: nothing to do, so no recheck, but the checkpoint advances.
 	expectMissingBlocks(mock, 3, 4)
 	expectPriorityFeeWatermarkWrite(mock, 4)
 
@@ -85,6 +87,40 @@ func TestPriorityFeeBackfill_FillsUnpricedBlocksAndCheckpoints(t *testing.T) {
 	}
 	if rpcSvc.fetched[2] != 1 || rpcSvc.fetched[1] != 0 || rpcSvc.fetched[3] != 0 {
 		t.Fatalf("expected only the unpriced block to be fetched, got %v", rpcSvc.fetched)
+	}
+}
+
+func TestPriorityFeeBackfill_FetchesBatchesConcurrentlyInBlockOrder(t *testing.T) {
+	idx, mock, rpcSvc := newPriorityFeeTestIndexer(t, 8)
+	idx.priorityFeeBackfill.windowBlocks = 8
+	idx.priorityFeeBackfill.updateBatch = 3
+	idx.priorityFeeBackfill.fetchWorkers = 2
+	blobTx := newSignedBlobTx(t, int64(idx.network.ChainID), 7)
+	rpcSvc.blockTxs = []*types.Transaction{blobTx}
+
+	expectBounds(mock, 1, 8)
+	expectPriorityFeeWatermarkRead(mock, nil)
+	expectMissingBlocks(mock, 1, 8, 1, 2, 3, 5, 8)
+	// Five blocks in batches of three: [1,2,3] then [5,8], each written in
+	// ascending block order regardless of which worker fetched what.
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE blobs b")).
+		WithArgs(testIndexerChainID, pq.Array([]int64{1, 2, 3}), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE blobs b")).
+		WithArgs(testIndexerChainID, pq.Array([]int64{5, 8}), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	expectMissingBlocks(mock, 1, 8)
+	expectPriorityFeeWatermarkWrite(mock, 8)
+
+	idx.runPriorityFeeBackfill()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+	for _, block := range []uint64{1, 2, 3, 5, 8} {
+		if rpcSvc.fetched[block] != 1 {
+			t.Fatalf("expected block %d fetched once, got %v", block, rpcSvc.fetched)
+		}
 	}
 }
 
@@ -153,7 +189,7 @@ func TestPriorityFeeBackfill_SkipsWhenCaughtUpOrEmpty(t *testing.T) {
 	})
 }
 
-func TestPriorityFeeBackfill_RetriesFetchThenAbortsWithoutCheckpoint(t *testing.T) {
+func TestPriorityFeeBackfill_SkipsFailingBlockAndHoldsCheckpoint(t *testing.T) {
 	idx, mock, rpcSvc := newPriorityFeeTestIndexer(t, 4)
 	rpcSvc.blockTxs = []*types.Transaction{newSignedBlobTx(t, int64(idx.network.ChainID), 7)}
 	// Block 1 fails once then succeeds; block 2 fails every attempt.
@@ -162,9 +198,14 @@ func TestPriorityFeeBackfill_RetriesFetchThenAbortsWithoutCheckpoint(t *testing.
 	expectBounds(mock, 1, 4)
 	expectPriorityFeeWatermarkRead(mock, nil)
 	expectMissingBlocks(mock, 1, 2, 1, 2)
-	// Block 1's batch lands before block 2's batch fails.
+	// Block 1 lands; block 2's batch has nothing to write. The recheck still
+	// finds block 2, so the window is incomplete and no checkpoint is written.
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE blobs b")).
+		WithArgs(testIndexerChainID, pq.Array([]int64{1}), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMissingBlocks(mock, 1, 2, 2)
+	// The walk continues into the next window, but the checkpoint stays put.
+	expectMissingBlocks(mock, 3, 4)
 
 	idx.runPriorityFeeBackfill()
 
@@ -176,6 +217,26 @@ func TestPriorityFeeBackfill_RetriesFetchThenAbortsWithoutCheckpoint(t *testing.
 	}
 	if rpcSvc.fetched[2] != priorityFeeBackfillFetchAttempts {
 		t.Fatalf("expected block 2 to exhaust %d attempts, got %d", priorityFeeBackfillFetchAttempts, rpcSvc.fetched[2])
+	}
+}
+
+func TestPriorityFeeBackfill_HoldsCheckpointWhenRowsStayUnpriced(t *testing.T) {
+	idx, mock, rpcSvc := newPriorityFeeTestIndexer(t, 4)
+	// The fetched block carries no blob transaction for the unpriced row (a
+	// transaction the canonical block does not hold), so the update matches
+	// nothing and the recheck still lists the block.
+	rpcSvc.blockTxs = nil
+
+	expectBounds(mock, 1, 4)
+	expectPriorityFeeWatermarkRead(mock, nil)
+	expectMissingBlocks(mock, 1, 2, 2)
+	expectMissingBlocks(mock, 1, 2, 2)
+	expectMissingBlocks(mock, 3, 4)
+
+	idx.runPriorityFeeBackfill()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
 	}
 }
 
@@ -281,6 +342,9 @@ func TestNewPriorityFeeBackfillSettings(t *testing.T) {
 	}
 	if newPriorityFeeBackfillSettings(configIndexerFor(false, 0)).enabled {
 		t.Fatal("expected the backfill to be disabled")
+	}
+	if pause := newPriorityFeeBackfillSettings(configIndexerFor(true, -time.Second)).pause; pause != 0 {
+		t.Fatalf("expected a negative pause to clamp to zero, got %s", pause)
 	}
 }
 
