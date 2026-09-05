@@ -71,7 +71,9 @@ assert "$defaults" '{
   "gap_scan_interval": "5m",
   "max_reorg_depth": 64,
   "startup_gap_scan_blocks": 10000,
-  "rpc_rate_limit": 0
+  "rpc_rate_limit": 0,
+  "priority_fee_backfill_enabled": true,
+  "priority_fee_backfill_pause": "250ms"
 }'
 
 # 2. Operator overrides: every key set under appConfig.indexer must land in the
@@ -91,6 +93,8 @@ helm template "$RELEASE" "$CHART_DIR" \
   --set appConfig.indexer.max_reorg_depth=128 \
   --set appConfig.indexer.startup_gap_scan_blocks=0 \
   --set appConfig.indexer.rpc_rate_limit=12.5 \
+  --set appConfig.indexer.priority_fee_backfill_enabled=false \
+  --set-string appConfig.indexer.priority_fee_backfill_pause=2s \
   > "$overrides"
 assert "$overrides" '{
   "version": "v9.9.9",
@@ -104,7 +108,9 @@ assert "$overrides" '{
   "gap_scan_interval": "10m",
   "max_reorg_depth": 128,
   "startup_gap_scan_blocks": 0,
-  "rpc_rate_limit": 12.5
+  "rpc_rate_limit": 12.5,
+  "priority_fee_backfill_enabled": false,
+  "priority_fee_backfill_pause": "2s"
 }'
 
 echo "Indexer ConfigMap template tests passed."

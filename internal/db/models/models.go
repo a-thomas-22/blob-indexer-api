@@ -39,6 +39,17 @@ type Blob struct {
 	MaxFeePerBlobGas  *string   `db:"max_fee_per_blob_gas"` // Nullable for pre-migration rows
 	BlobGasUsed       *int64    `db:"blob_gas_used"`        // Nullable for pre-migration rows
 	VersionedHash     *string   `db:"versioned_hash"`       // Nullable for pre-migration rows
+	// Execution-layer (EIP-1559) fees of the carrying transaction, in wei.
+	// Builders order competing blob transactions by the priority fee they
+	// pay on execution gas, so these, not TipPerBlobGas (which is blob
+	// fee-cap headroom), show who outbid whom for a block's blob slots.
+	// PriorityFeePerGas is the fee actually paid, min(tip cap, fee cap minus
+	// the block's base fee); it is unknown until inclusion, so pending rows
+	// carry only the two caps. All three are NULL for rows indexed before
+	// the columns existed.
+	MaxPriorityFeePerGas *string `db:"max_priority_fee_per_gas"`
+	MaxFeePerGas         *string `db:"max_fee_per_gas"`
+	PriorityFeePerGas    *string `db:"priority_fee_per_gas"`
 	// Slot is the beacon slot of the including block, derived at index time
 	// from the block timestamp and the network's beacon genesis time. NULL for
 	// pending rows (no slot until inclusion, and mempool_blobs has no column —
@@ -239,6 +250,11 @@ const (
 	// checkpoint automatically instead of needing a hand-written DELETE in
 	// whichever migration introduced it.
 	MetadataStreakBackfillKinds = "records_streak_backfill_kinds"
+	// MetadataPriorityFeeBackfillBlock is the highest block the priority fee
+	// backfill has walked. Rows indexed before migration 000015 hold no
+	// execution-layer fees; the backfill refetches their blocks and fills the
+	// fees in place, and this checkpoint lets a restart resume the walk.
+	MetadataPriorityFeeBackfillBlock = "priority_fee_backfill_block"
 )
 
 // FormatMetadataTimestamp serializes metadata timestamps consistently.

@@ -52,6 +52,10 @@ indexer:
   batch_size: 50 # Smaller batch size for more frequent updates
   polling_interval: 5s # Faster polling when not using websockets
   mempool_polling_interval: 15s # Faster mempool polling
+  # Fill execution-layer fees onto blob rows indexed before they were stored,
+  # refetching each block and updating in place. Resumable; pause throttles RPC use.
+  priority_fee_backfill_enabled: true
+  priority_fee_backfill_pause: 250ms
 
 attribution:
   blob_list_enabled: true

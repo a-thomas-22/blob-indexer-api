@@ -420,6 +420,24 @@ components:
         blob_gas_used:
           type: integer
           format: int64
+        max_priority_fee_per_gas:
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          description: The transaction's EIP-1559 priority fee cap, the bid builders order competing blob transactions by. Omitted for rows indexed before it was stored.
+        max_priority_fee_per_gas_gwei:
+          $ref: '#/components/schemas/DecimalString'
+        max_fee_per_gas:
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          description: The transaction's EIP-1559 total fee cap. Omitted for rows indexed before it was stored.
+        max_fee_per_gas_gwei:
+          $ref: '#/components/schemas/DecimalString'
+        priority_fee_per_gas:
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          description: Priority fee actually paid per execution gas, min(max_priority_fee_per_gas, max_fee_per_gas minus the block base fee). Omitted for pending blobs and rows indexed before it was stored.
+        priority_fee_per_gas_gwei:
+          $ref: '#/components/schemas/DecimalString'
         realized_cost_wei:
           $ref: '#/components/schemas/WeiString'
         max_cost_wei:

@@ -733,3 +733,68 @@ func TestIntegrationReorgRecoveryMarkerLifecycle(t *testing.T) {
 		t.Fatalf("expected marker cleared after full re-index, got %d rows", markerRows)
 	}
 }
+
+// A reorg replay or reindex re-upserts a block's rows under the same conflict
+// key, and the replacement block's fees must win: a stale fork's priority fee
+// left in place would misattribute who outbid whom in the canonical block.
+func TestIntegrationInsertBlockDataReplacesPriorityFees(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+	indexedBlock := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 300, BlockHash: "0xfork", ParentHash: "0xparent"}
+
+	// First pass: a row indexed before fees were stored (all NULL) and one
+	// carrying a stale fork's fees.
+	legacy := integrationBlob(300, 0, "0xtxlegacy", "0xaaa", true)
+	stale := integrationBlob(300, 1, "0xtxstale", "0xbbb", true)
+	staleTipCap, staleFeeCap, stalePaid := "9000000000", "40000000000", "9000000000"
+	stale.MaxPriorityFeePerGas, stale.MaxFeePerGas, stale.PriorityFeePerGas = &staleTipCap, &staleFeeCap, &stalePaid
+	if err := idx.insertBlockData([]models.Blob{legacy, stale}, indexedBlock, nil, 0); err != nil {
+		t.Fatalf("insertBlockData() first pass error = %v", err)
+	}
+
+	type feeRow struct {
+		BlobIndex            int     `db:"blob_index"`
+		MaxPriorityFeePerGas *string `db:"max_priority_fee_per_gas"`
+		MaxFeePerGas         *string `db:"max_fee_per_gas"`
+		PriorityFeePerGas    *string `db:"priority_fee_per_gas"`
+	}
+	readFees := func() []feeRow {
+		t.Helper()
+		var rows []feeRow
+		if err := database.SelectContext(ctx, &rows,
+			"SELECT blob_index, max_priority_fee_per_gas::text, max_fee_per_gas::text, priority_fee_per_gas::text FROM blobs WHERE chain_id = $1 AND block_number = 300 ORDER BY blob_index",
+			integrationChainID); err != nil {
+			t.Fatalf("read fees: %v", err)
+		}
+		return rows
+	}
+	first := readFees()
+	if len(first) != 2 || first[0].PriorityFeePerGas != nil || first[1].PriorityFeePerGas == nil || *first[1].PriorityFeePerGas != stalePaid {
+		t.Fatalf("unexpected fees after first pass: %+v", first)
+	}
+
+	// Replay with the canonical block: the legacy row gains fees and the stale
+	// row's fees are replaced, under a different base fee than the fork's.
+	canonicalLegacy := integrationBlob(300, 0, "0xtxlegacy", "0xaaa", true)
+	tipCap, feeCap, paid := "2000000000", "30000000000", "1500000000"
+	canonicalLegacy.MaxPriorityFeePerGas, canonicalLegacy.MaxFeePerGas, canonicalLegacy.PriorityFeePerGas = &tipCap, &feeCap, &paid
+	canonicalStale := integrationBlob(300, 1, "0xtxstale", "0xbbb", true)
+	stalePaidNow := "500000000"
+	canonicalStale.MaxPriorityFeePerGas, canonicalStale.MaxFeePerGas, canonicalStale.PriorityFeePerGas = &staleTipCap, &staleFeeCap, &stalePaidNow
+	if err := idx.insertBlockData([]models.Blob{canonicalLegacy, canonicalStale}, indexedBlock, nil, 0); err != nil {
+		t.Fatalf("insertBlockData() replay error = %v", err)
+	}
+
+	second := readFees()
+	if len(second) != 2 {
+		t.Fatalf("expected 2 rows after replay, got %+v", second)
+	}
+	if second[0].MaxPriorityFeePerGas == nil || *second[0].MaxPriorityFeePerGas != tipCap ||
+		second[0].MaxFeePerGas == nil || *second[0].MaxFeePerGas != feeCap ||
+		second[0].PriorityFeePerGas == nil || *second[0].PriorityFeePerGas != paid {
+		t.Fatalf("legacy row was not backfilled: %+v", second[0])
+	}
+	if second[1].PriorityFeePerGas == nil || *second[1].PriorityFeePerGas != stalePaidNow {
+		t.Fatalf("stale fork fee survived the replay: %+v", second[1])
+	}
+}

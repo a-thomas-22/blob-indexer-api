@@ -163,7 +163,7 @@ func TestCalculateBlobMetrics_UsesRealizedBlobBaseFeeCost(t *testing.T) {
 	blobBaseFee := big.NewInt(2)
 	const gasPerBlob int64 = 131072
 
-	metrics := calculateBlobMetrics(tx, blobBaseFee)
+	metrics := calculateBlobMetrics(tx, blobBaseFee, nil)
 
 	wantCost := new(big.Int).Mul(blobBaseFee, big.NewInt(gasPerBlob)).String()
 	if metrics.totalCostETH != wantCost {
@@ -181,6 +181,73 @@ func TestCalculateBlobMetrics_UsesRealizedBlobBaseFeeCost(t *testing.T) {
 	}
 	if metrics.blobSizeBytes != gasPerBlob {
 		t.Fatalf("expected per-blob size %d bytes, got %d", gasPerBlob, metrics.blobSizeBytes)
+	}
+}
+
+func TestCalculateBlobMetrics_PriorityFee(t *testing.T) {
+	tx := types.NewTx(&types.BlobTx{
+		GasTipCap:  uint256.NewInt(2_000_000_000),
+		GasFeeCap:  uint256.NewInt(30_000_000_000),
+		BlobFeeCap: uint256.NewInt(5),
+		BlobHashes: []common.Hash{{1}},
+	})
+
+	t.Run("pending records only the caps", func(t *testing.T) {
+		metrics := calculateBlobMetrics(tx, big.NewInt(2), nil)
+		if metrics.maxPriorityFeePerGas == nil || *metrics.maxPriorityFeePerGas != "2000000000" {
+			t.Fatalf("maxPriorityFeePerGas = %v, want 2000000000", metrics.maxPriorityFeePerGas)
+		}
+		if metrics.maxFeePerGas == nil || *metrics.maxFeePerGas != "30000000000" {
+			t.Fatalf("maxFeePerGas = %v, want 30000000000", metrics.maxFeePerGas)
+		}
+		if metrics.priorityFeePerGas != nil {
+			t.Fatalf("expected no effective priority fee before inclusion, got %q", *metrics.priorityFeePerGas)
+		}
+	})
+
+	t.Run("tip cap binds when the fee cap leaves room", func(t *testing.T) {
+		metrics := calculateBlobMetrics(tx, big.NewInt(2), big.NewInt(10_000_000_000))
+		if metrics.priorityFeePerGas == nil || *metrics.priorityFeePerGas != "2000000000" {
+			t.Fatalf("priorityFeePerGas = %v, want 2000000000", metrics.priorityFeePerGas)
+		}
+	})
+
+	t.Run("fee cap headroom binds when it is below the tip cap", func(t *testing.T) {
+		metrics := calculateBlobMetrics(tx, big.NewInt(2), big.NewInt(29_500_000_000))
+		if metrics.priorityFeePerGas == nil || *metrics.priorityFeePerGas != "500000000" {
+			t.Fatalf("priorityFeePerGas = %v, want 500000000", metrics.priorityFeePerGas)
+		}
+	})
+
+	t.Run("base fee above the fee cap floors at zero", func(t *testing.T) {
+		metrics := calculateBlobMetrics(tx, big.NewInt(2), big.NewInt(31_000_000_000))
+		if metrics.priorityFeePerGas == nil || *metrics.priorityFeePerGas != "0" {
+			t.Fatalf("priorityFeePerGas = %v, want 0", metrics.priorityFeePerGas)
+		}
+	})
+}
+
+func TestBuildPendingBlobs_RecordsFeeCaps(t *testing.T) {
+	tx := types.NewTx(&types.BlobTx{
+		GasTipCap:  uint256.NewInt(7),
+		GasFeeCap:  uint256.NewInt(70),
+		BlobFeeCap: uint256.NewInt(5),
+		BlobHashes: []common.Hash{{0x01, 0xaa}},
+	})
+
+	rows := buildPendingBlobs(tx, big.NewInt(2), 42, "0xfrom", "alice")
+
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 pending row, got %d", len(rows))
+	}
+	if rows[0].MaxPriorityFeePerGas == nil || *rows[0].MaxPriorityFeePerGas != "7" {
+		t.Fatalf("MaxPriorityFeePerGas = %v, want 7", rows[0].MaxPriorityFeePerGas)
+	}
+	if rows[0].MaxFeePerGas == nil || *rows[0].MaxFeePerGas != "70" {
+		t.Fatalf("MaxFeePerGas = %v, want 70", rows[0].MaxFeePerGas)
+	}
+	if rows[0].PriorityFeePerGas != nil {
+		t.Fatalf("expected pending row without an effective priority fee, got %q", *rows[0].PriorityFeePerGas)
 	}
 }
 
