@@ -20,6 +20,11 @@ func versionedHashPtr(hash string) *string {
 	return &hash
 }
 
+func weiPtr(wei uint64) *string {
+	s := new(big.Int).SetUint64(wei).String()
+	return &s
+}
+
 // Known rollups and their addresses
 var knownRollups = []struct {
 	Address     string
@@ -159,6 +164,15 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 			Confirmed:         true,
 			VersionedHash:     versionedHashPtr(fmt.Sprintf("0x01%062x", i)),
 		}
+		// Each rollup bids a different priority fee, with one of them
+		// spiking every so often, so the tip charts show a contested market.
+		priorityFee := uint64(rollupIndex+1) * 500_000_000
+		if i%9 == 0 {
+			priorityFee = 20_000_000_000
+		}
+		blob.MaxPriorityFeePerGas = weiPtr(priorityFee)
+		blob.MaxFeePerGas = weiPtr(priorityFee + 30_000_000_000)
+		blob.PriorityFeePerGas = weiPtr(priorityFee)
 		// Derive the beacon slot from the timestamp the same way the indexer
 		// does, so seeded rows look like freshly indexed ones.
 		if clock, ok := beacon.ResolveClock(seedChainID, 0, 0); ok {
@@ -173,9 +187,10 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 			INSERT INTO blobs (
 				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-				timestamp, versioned_hash, slot
+				timestamp, versioned_hash, slot,
+				max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas
 			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
 			)
 			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
 				tx_hash = $4,
@@ -187,12 +202,16 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 				total_cost_wei = $10,
 				timestamp = $11,
 				versioned_hash = $12,
-				slot = $13
+				slot = $13,
+				max_priority_fee_per_gas = $14,
+				max_fee_per_gas = $15,
+				priority_fee_per_gas = $16
 		`
 		_, err := database.ExecContext(ctx, query,
 			blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 			blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
 			blob.Timestamp, blob.VersionedHash, blob.Slot,
+			blob.MaxPriorityFeePerGas, blob.MaxFeePerGas, blob.PriorityFeePerGas,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert blob %d: %w", i, err)
@@ -221,6 +240,9 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 			Confirmed:         false,
 			VersionedHash:     versionedHashPtr(fmt.Sprintf("0x01%062x", 0x1000000+i)),
 			Nonce:             uint64(1000 + i),
+
+			MaxPriorityFeePerGas: weiPtr(uint64(rollupIndex+1) * 500_000_000),
+			MaxFeePerGas:         weiPtr(uint64(rollupIndex+1)*500_000_000 + 30_000_000_000),
 		}
 
 		// Insert the pending blob
@@ -228,9 +250,10 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 			INSERT INTO mempool_blobs (
 				chain_id, tx_hash, blob_index, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-				timestamp, versioned_hash, nonce, last_seen
+				timestamp, versioned_hash, nonce, last_seen,
+				max_priority_fee_per_gas, max_fee_per_gas
 			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
 			)
 			ON CONFLICT (chain_id, tx_hash, blob_index) DO UPDATE SET
 				from_address = $4,
@@ -242,12 +265,15 @@ func addTestBlobs(ctx context.Context, database *db.DB) error {
 				timestamp = $10,
 				versioned_hash = $11,
 				nonce = $12,
-				last_seen = $13
+				last_seen = $13,
+				max_priority_fee_per_gas = $14,
+				max_fee_per_gas = $15
 		`
 		_, err := database.ExecContext(ctx, query,
 			blob.ChainID, blob.TxHash, blob.BlobIndex, blob.FromAddress, blob.UserAttribution,
 			blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
 			blob.Timestamp, blob.VersionedHash, int64(blob.Nonce), blob.Timestamp,
+			blob.MaxPriorityFeePerGas, blob.MaxFeePerGas,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert pending blob %d: %w", i, err)

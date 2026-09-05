@@ -711,6 +711,8 @@ func TestChartRoutesMounted(t *testing.T) {
 				setSliceResult(dest, []attributionUsageChartRow{})
 			case *[]costComparisonChartRow:
 				setSliceResult(dest, []costComparisonChartRow{})
+			case *[]blobTipsChartRow:
+				setSliceResult(dest, []blobTipsChartRow{})
 			default:
 				t.Fatalf("unexpected dest type %T", dest)
 			}
@@ -728,6 +730,7 @@ func TestChartRoutesMounted(t *testing.T) {
 		"/api/v1/charts/blob-market",
 		"/api/v1/charts/attribution-usage",
 		"/api/v1/charts/cost-comparison",
+		"/api/v1/charts/blob-tips",
 	} {
 		req := httptest.NewRequest(http.MethodGet, path+"?range=1h", http.NoBody)
 		w := httptest.NewRecorder()

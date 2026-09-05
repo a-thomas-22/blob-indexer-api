@@ -27,6 +27,8 @@ Two separate binaries:
 - **API server** (`cmd/api/main.go`): HTTP server serving REST endpoints. Reads blob data and indexer status from PostgreSQL.
 - **Indexer** (`cmd/indexer/main.go`): Connects to Ethereum RPC nodes, indexes blob transactions, writes to PostgreSQL.
 
+The indexer runs resumable startup jobs over already-indexed history alongside live indexing: the fine chart rollup backfill, the `/records` streak rebuild, and the priority fee backfill (`internal/indexer/priority_fees.go`), which refetches blocks whose blob rows predate migration 000015 and fills `priority_fee_per_gas` and its caps in place without deleting anything. Progress checkpoints live in `indexer_metadata`. Gate and throttle the fee backfill with `indexer.priority_fee_backfill_enabled` and `indexer.priority_fee_backfill_pause`.
+
 Both share the same database. Production deployments run migrations with the dedicated migration runner: Helm uses a pre-install/pre-upgrade hook for external databases and init containers when the chart owns PostgreSQL. Runtime binaries only run migrations when `database.run_migrations: true` is explicitly configured, which is intended for local development.
 
 ### Key Packages
@@ -60,6 +62,7 @@ Canonical routes are under `/api/v1`. Legacy `/api/*` paths redirect to `/api/v1
 - `/api/v1/users` — top blob users
 - `/api/v1/entities/{key}` — attributed entity detail (aggregates + per-address breakdown; key shared with `/charts/attribution-usage` shares). `/blob/latest` and `/blob/mempool` accept `entity={key}` to filter across the entity's addresses
 - `/api/v1/records` — historical leaderboards (streaks, base fee peaks, busiest hours)
+- `/api/v1/charts/blob-market`, `/api/v1/charts/attribution-usage`, `/api/v1/charts/cost-comparison`, `/api/v1/charts/blob-tips`, `/api/v1/charts/rolling-stats` — bucketed chart series. `blob-tips` reads `blobs.priority_fee_per_gas` directly (no rollup carries it), so it rejects `range=all`
 - `/api/v1/stats` — historical stats
 - `/api/v1/status` — indexer status
 - `/api/v1/dev/*` — development/debug endpoints (metrics, dashboard, logs, queries), gated by `server.dev_mode` and optional `server.dev_api_key`

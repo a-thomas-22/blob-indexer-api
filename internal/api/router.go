@@ -402,6 +402,7 @@ func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) 
 			r.With(aggregateLimit).Get("/blob-market", a.GetBlobMarketChart)
 			r.With(aggregateLimit).Get("/attribution-usage", a.GetAttributionUsageChart)
 			r.With(aggregateLimit).Get("/cost-comparison", a.GetCostComparisonChart)
+			r.With(aggregateLimit).Get("/blob-tips", a.GetBlobTipsChart)
 			r.With(aggregateLimit).Get("/rolling-stats", a.GetRollingStatsChart)
 		})
 
