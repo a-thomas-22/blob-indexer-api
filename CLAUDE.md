@@ -41,6 +41,7 @@ Both share the same database. Production deployments run migrations with the ded
 | indexer | `internal/indexer/` | Core block/blob indexing engine (one per network) |
 | ethereum | `internal/ethereum/` | go-ethereum client wrapper (HTTP + WebSocket) |
 | attribution | `internal/attribution/` | Maps sender addresses to known rollup names |
+| mcpserver | `internal/mcpserver/` | Permissioned MCP server (API-key auth, per-key tool allowlists and rate limits) whose tools loop back into the public REST routes in-process |
 | logger | `internal/logger/` | Zap-based structured JSON logging |
 
 ### Database
@@ -67,12 +68,15 @@ Canonical routes are under `/api/v1`. Legacy `/api/*` paths redirect to `/api/v1
 - `/api/v1/status` — indexer status
 - `/api/v1/dev/*` — development/debug endpoints (metrics, dashboard, logs, queries), gated by `server.dev_mode` and optional `server.dev_api_key`
 - `/swagger/*` — Swagger UI
+- `/mcp` (outside `/api/v1`; path from `mcp.path`) — streamable-HTTP MCP endpoint for LLM clients, mounted only when `mcp.enabled`. Fails closed: Bearer/X-API-Key must match a configured `mcp.keys` entry; each key may carry a tool allowlist. Tools dispatch to the REST handlers through `API.loopbackHandler()` (no edge middleware; the loopback clears the inherited chi route context), so they return the exact REST payloads. Tool catalogue lives in `internal/mcpserver/tools.go`; `cmd/api` validates allowlists against it at startup
 
 ### Configuration
 
 Loaded via Viper: first reads `config.yaml` (or `CONFIG_PATH`), then environment variable overrides.
 
 Key env vars: `DB_URL`, `PORT`, `DEV_MODE`, `LOG_LEVEL`, `RPC_URL`/`ETH_RPC_URL`, `START_BLOCK`, `NETWORK_<NAME>_*`.
+
+MCP: `mcp.enabled`, `mcp.path`, `mcp.rate_limit_*` (per key **per replica**), `mcp.keys[]{name,key,tools}`. Secrets come from `MCP_API_KEYS`; when `mcp.keys` declares keys the env var may only fill in their secrets (undeclared names or tool lists there are load errors), and only when `mcp.keys` is empty does `name:secret[:tool1|tool2]` define principals outright. MCP validation runs only in API mode (`ValidateForAPI`): the indexer shares the ConfigMap but never gets the secret. Helm: `appConfig.mcp.keys[]` is rendered from an explicit field allowlist (`name`, `tools`; any other field fails the render) + `mcpSecret.existingSecret`.
 
 The API uses `config.LoadForAPI()` (RPC URLs optional). The indexer uses `config.Load()` (RPC URLs required).
 

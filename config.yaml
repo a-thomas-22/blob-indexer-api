@@ -69,6 +69,21 @@ websocket:
   max_clients: 10000 # Global cap on concurrent WebSocket clients (0 = unlimited)
   max_conns_per_ip: 32 # Per-IP cap on concurrent WebSocket connections (0 = unlimited)
 
+# Permissioned MCP endpoint for LLM clients (off by default). When enabled,
+# every request must present one of the keys below as a Bearer token; a
+# single shared key is the intended way to give a group non-public access.
+# Secrets are normally supplied via MCP_API_KEYS="community:<secret>" so this
+# file only carries the permission model (names and optional tool allowlists).
+mcp:
+  enabled: false
+  path: /mcp
+  rate_limit_rps: 5 # tool calls per second per key per API replica (shared keys share the budget)
+  rate_limit_burst: 20
+  keys: []
+  #  - name: community
+  #    key: "local-dev-only-at-least-16-chars"
+  #    tools: [] # empty = every tool; e.g. [get_blob_market_overview, get_blob_pricing]
+
 networks:
   - name: "mainnet"
     chain_id: 1

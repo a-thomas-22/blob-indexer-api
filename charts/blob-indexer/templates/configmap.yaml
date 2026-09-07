@@ -60,6 +60,46 @@ data:
       blob_list_base_url: {{ .Values.appConfig.attribution.blob_list_base_url | quote }}
       blob_list_refresh_interval: {{ .Values.appConfig.attribution.blob_list_refresh_interval | quote }}
       blob_list_request_timeout: {{ .Values.appConfig.attribution.blob_list_request_timeout | quote }}
+    {{- with .Values.appConfig.mcp }}
+    mcp:
+      enabled: {{ .enabled | default false }}
+      path: {{ .path | default "/mcp" | quote }}
+      rate_limit_rps: {{ .rate_limit_rps | default 10 }}
+      rate_limit_burst: {{ .rate_limit_burst | default 30 }}
+      {{- /*
+        Key entries are permission declarations only: render an explicit
+        allowlist of fields (name, tools) so no spelling of a secret field
+        (key, Key, KEY, ...) can reach the ConfigMap. Viper lowercases keys on
+        load, so a stray "Key:" WOULD otherwise be honored as the secret. The
+        secret arrives via MCP_API_KEYS (see mcp-secret.yaml / mcpSecret).
+      */}}
+      keys:
+        {{- if .keys }}
+        {{- range .keys }}
+        {{- $entry := . }}
+        {{- range $field, $_ := $entry }}
+        {{- /*
+          Exact spellings only. Matching case-insensitively here while the
+          renderer below reads only ".tools" would let a "Tools:" typo through
+          as an empty allowlist, which the app reads as "every tool" — a
+          silent widening of access instead of a loud failure.
+        */}}
+        {{- if not (has $field (list "name" "tools")) }}
+        {{- fail (printf "appConfig.mcp.keys[] entry %q has field %q; only the exact fields name and tools are allowed here (secrets go in mcpSecret)" (toString $entry.name) $field) }}
+        {{- end }}
+        {{- end }}
+        - name: {{ required "appConfig.mcp.keys[].name is required" .name | quote }}
+          {{- if .tools }}
+          tools:
+            {{- toYaml .tools | nindent 12 }}
+          {{- else }}
+          tools: []
+          {{- end }}
+        {{- end }}
+        {{- else }}
+        []
+        {{- end }}
+    {{- end }}
     {{- if .Values.appConfig.networks }}
     networks:
       {{- /*

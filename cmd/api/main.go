@@ -49,6 +49,7 @@ import (
 	"github.com/a-thomas-22/blob-indexer-api/internal/bootstrap"
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
+	"github.com/a-thomas-22/blob-indexer-api/internal/mcpserver"
 )
 
 // version is set at build time via -ldflags.
@@ -60,7 +61,7 @@ func main() {
 
 	logger.Info("Starting blob-indexer API server", zap.String("version", version))
 
-	resources, err := bootstrap.InitializeApp(config.LoadForAPI)
+	resources, err := bootstrap.InitializeApp(loadAPIConfig)
 	if err != nil {
 		logger.Fatal("Failed to initialize application", zap.Error(err))
 	}
@@ -124,6 +125,20 @@ func main() {
 		logger.Warn("Database close returned error", zap.Error(err))
 	}
 	logger.Info("API server shutdown complete")
+}
+
+// loadAPIConfig loads the API config and additionally checks the MCP tool
+// allowlists against the tool catalog, which only the MCP package knows.
+// A typo in a permission model must stop startup, not silently drop access.
+func loadAPIConfig() (*config.Config, error) {
+	cfg, err := config.LoadForAPI()
+	if err != nil {
+		return nil, err
+	}
+	if err := mcpserver.ValidateConfig(cfg.MCP); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+	return cfg, nil
 }
 
 type namedServer struct {

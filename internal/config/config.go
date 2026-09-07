@@ -3,9 +3,12 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -166,8 +169,39 @@ type Config struct {
 	Indexer     IndexerConfig     `mapstructure:"indexer" yaml:"indexer"`
 	Attribution AttributionConfig `mapstructure:"attribution" yaml:"attribution"`
 	WebSocket   WebSocketConfig   `mapstructure:"websocket" yaml:"websocket"`
+	MCP         MCPConfig         `mapstructure:"mcp" yaml:"mcp"`
 	Networks    []NetworkConfig   `mapstructure:"networks" yaml:"networks"`
 }
+
+// MCPConfig configures the permissioned Model Context Protocol endpoint the
+// API server exposes for LLM clients. The endpoint is off by default and,
+// when enabled, fails closed: every request must present one of the
+// configured API keys, and each key may be restricted to a subset of tools.
+type MCPConfig struct {
+	Enabled bool `mapstructure:"enabled" yaml:"enabled"`
+	// Path is where the streamable-HTTP MCP endpoint is mounted on the public
+	// API listener (default /mcp).
+	Path string `mapstructure:"path" yaml:"path"`
+	// RateLimitRPS and RateLimitBurst bound tool calls per API key. Tool calls
+	// run the same aggregate queries as the REST endpoints but bypass the
+	// per-IP aggregate limiter (calls are attributed to keys, not IPs).
+	RateLimitRPS   float64        `mapstructure:"rate_limit_rps" yaml:"rate_limit_rps"`
+	RateLimitBurst int            `mapstructure:"rate_limit_burst" yaml:"rate_limit_burst"`
+	Keys           []MCPKeyConfig `mapstructure:"keys" yaml:"keys"`
+}
+
+// MCPKeyConfig is one MCP client credential. Name labels the principal in
+// logs and metrics; Key is the bearer secret; Tools optionally restricts the
+// principal to an allowlist of tool names (empty grants every tool).
+type MCPKeyConfig struct {
+	Name  string   `mapstructure:"name" yaml:"name"`
+	Key   string   `mapstructure:"key" yaml:"key"`
+	Tools []string `mapstructure:"tools" yaml:"tools"`
+}
+
+// MinMCPKeyLength is the shortest accepted MCP API key. Keys are static
+// bearer secrets, so short values would be guessable.
+const MinMCPKeyLength = 16
 
 // Load loads the configuration using Viper with full validation (for the indexer).
 func Load() (*Config, error) {
@@ -246,6 +280,11 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("websocket.users_throttle_interval", "30s")
 	v.SetDefault("websocket.max_clients", 10000)
 	v.SetDefault("websocket.max_conns_per_ip", 32)
+	v.SetDefault("mcp.enabled", false)
+	v.SetDefault("mcp.path", "/mcp")
+	v.SetDefault("mcp.rate_limit_rps", 5)
+	v.SetDefault("mcp.rate_limit_burst", 20)
+	v.SetDefault("mcp.keys", []MCPKeyConfig{})
 	v.SetDefault("networks", []NetworkConfig{})
 
 	// Configure Viper to read from config file
@@ -336,6 +375,7 @@ func loadConfig() (*Config, error) {
 	setEnvCSV(v, "TRUSTED_IP_HEADERS", "server.trusted_ip_headers")
 
 	applyCORSEnvOverrides(v)
+	applyMCPEnvOverrides(v)
 
 	// Indexer version - direct environment variable override
 	if version := os.Getenv("INDEXER_VERSION"); version != "" {
@@ -406,6 +446,16 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 	cfg.CORS = normalizeCORSConfig(cfg.CORS)
+	if keys, ok := os.LookupEnv("MCP_API_KEYS"); ok {
+		envKeys, err := parseMCPAPIKeysEnv(keys)
+		if err != nil {
+			return nil, fmt.Errorf("invalid MCP_API_KEYS: %w", err)
+		}
+		cfg.MCP.Keys, err = mergeMCPKeys(cfg.MCP.Keys, envKeys)
+		if err != nil {
+			return nil, fmt.Errorf("invalid MCP_API_KEYS: %w", err)
+		}
+	}
 
 	// Process network-specific environment variables
 	// This needs to be done after unmarshaling because we need the network names
@@ -530,6 +580,163 @@ func parseCommaSeparatedList(value string) []string {
 	return values
 }
 
+// applyMCPEnvOverrides maps the scalar MCP env vars onto config keys. The
+// key list itself is merged after unmarshaling (see mergeMCPKeys) because
+// Viper cannot layer a list of structs from a single env var.
+func applyMCPEnvOverrides(v *viper.Viper) {
+	setEnvValue(v, "MCP_ENABLED", "mcp.enabled")
+	setEnvValue(v, "MCP_PATH", "mcp.path")
+	setEnvValue(v, "MCP_RATE_LIMIT_RPS", "mcp.rate_limit_rps")
+	setEnvValue(v, "MCP_RATE_LIMIT_BURST", "mcp.rate_limit_burst")
+}
+
+// parseMCPAPIKeysEnv parses MCP_API_KEYS, a comma-separated list of
+// "name:secret" or "name:secret:tool1|tool2" entries. Malformed entries are
+// an error rather than being dropped: a silently ignored credential would
+// surface only as an unexplained 401. Secrets therefore cannot contain ':'
+// or ','; use the YAML form for those.
+func parseMCPAPIKeysEnv(value string) ([]MCPKeyConfig, error) {
+	entries := parseCommaSeparatedList(value)
+	keys := make([]MCPKeyConfig, 0, len(entries))
+	for _, entry := range entries {
+		parts := strings.SplitN(entry, ":", 3)
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("entry %q is not of the form name:secret", entry)
+		}
+		key := MCPKeyConfig{Name: strings.TrimSpace(parts[0]), Key: strings.TrimSpace(parts[1])}
+		if key.Name == "" || key.Key == "" {
+			return nil, fmt.Errorf("entry %q has an empty name or secret", entry)
+		}
+		if len(parts) == 3 {
+			key.Tools = normalizeStringList(strings.Split(parts[2], "|"))
+			// A trailing ":" reads as an intended-but-empty allowlist. Empty
+			// means "every tool", so accepting it silently would widen access
+			// on a typo.
+			if len(key.Tools) == 0 {
+				return nil, fmt.Errorf("entry %q has an empty tool list; omit the trailing \":\" to grant every tool", entry)
+			}
+		}
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
+// mergeMCPKeys layers env-supplied secrets over the YAML key list. The YAML
+// (and hence the Helm ConfigMap) owns the permission model; the env var (a
+// Secret) supplies credentials only. So when YAML declares any keys, every
+// env entry must name one of them, may only fill in its secret, and may not
+// carry a tool allowlist. When YAML declares no keys at all, the env var is
+// the whole configuration and its entries (tools included) are taken as-is.
+func mergeMCPKeys(base, overrides []MCPKeyConfig) ([]MCPKeyConfig, error) {
+	if len(base) == 0 {
+		return overrides, nil
+	}
+	merged := make([]MCPKeyConfig, len(base))
+	copy(merged, base)
+	for _, override := range overrides {
+		if len(override.Tools) > 0 {
+			return nil, fmt.Errorf("key %q: tool allowlists must be set in mcp.keys, not MCP_API_KEYS", override.Name)
+		}
+		matched := false
+		for i := range merged {
+			if merged[i].Name == override.Name {
+				merged[i].Key = override.Key
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return nil, fmt.Errorf("key %q is not declared in mcp.keys; MCP_API_KEYS may only supply secrets for declared keys", override.Name)
+		}
+	}
+	return merged, nil
+}
+
+// mcpPathPattern accepts a clean literal path: no chi route metacharacters
+// ({}, *), no whitespace, no query or fragment syntax, no empty segments.
+var mcpPathPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
+
+// mcpReservedPaths are served by the API's own mux or routers and would be
+// shadowed by (or shadow) an MCP endpoint mounted there.
+var mcpReservedPaths = []string{"/api", "/metrics", "/swagger", "/asyncapi.yaml"}
+
+// MaxMCPRateLimitRPS bounds mcp.rate_limit_rps; values past this (and NaN or
+// infinity, which slip past a plain <= 0 check) would disable the limiter.
+const MaxMCPRateLimitRPS = 10000
+
+// MaxMCPPathLength bounds mcp.path so a pathological mount point cannot be
+// configured.
+const MaxMCPPathLength = 512
+
+// validateMCPConfig fails closed: an enabled MCP endpoint must have at least
+// one well-formed, unique, sufficiently long key.
+func validateMCPConfig(cfg *Config) error {
+	if !cfg.MCP.Enabled {
+		return nil
+	}
+	return ValidateMCP(&cfg.MCP)
+}
+
+// ValidateMCP checks and normalizes an MCP configuration in place (names,
+// secrets and tool lists are trimmed). It is exported so the MCP server
+// package enforces exactly these rules for programmatic callers, rather than
+// trusting that config loading already ran. Tool names are checked separately
+// by that package, which owns the catalog.
+func ValidateMCP(mcp *MCPConfig) error {
+	if len(mcp.Path) > MaxMCPPathLength {
+		return fmt.Errorf("mcp.path must be at most %d characters", MaxMCPPathLength)
+	}
+	if !mcpPathPattern.MatchString(mcp.Path) {
+		return fmt.Errorf("mcp.path must be a literal absolute path such as /mcp (got %q)", mcp.Path)
+	}
+	// The pattern allows "." and ".." as segments, but net/http's ServeMux
+	// canonicalizes the request path before routing, so a non-canonical mount
+	// point silently redirects elsewhere (/x/../metrics lands on /metrics).
+	if path.Clean(mcp.Path) != mcp.Path {
+		return fmt.Errorf("mcp.path must be canonical (no . or .. segments); %q resolves to %q", mcp.Path, path.Clean(mcp.Path))
+	}
+	for _, reserved := range mcpReservedPaths {
+		if mcp.Path == reserved || strings.HasPrefix(mcp.Path, reserved+"/") {
+			return fmt.Errorf("mcp.path %q collides with the reserved route %s", mcp.Path, reserved)
+		}
+	}
+	if math.IsNaN(mcp.RateLimitRPS) || math.IsInf(mcp.RateLimitRPS, 0) || mcp.RateLimitRPS <= 0 || mcp.RateLimitRPS > MaxMCPRateLimitRPS {
+		return fmt.Errorf("mcp.rate_limit_rps must be a finite number in (0, %d]", MaxMCPRateLimitRPS)
+	}
+	if mcp.RateLimitBurst <= 0 || mcp.RateLimitBurst > MaxMCPRateLimitRPS {
+		return fmt.Errorf("mcp.rate_limit_burst must be in [1, %d]", MaxMCPRateLimitRPS)
+	}
+	if len(mcp.Keys) == 0 {
+		return fmt.Errorf("mcp.keys must contain at least one key when mcp.enabled is true (otherwise no client could authenticate); set MCP_API_KEYS or mcp.keys")
+	}
+	names := make(map[string]struct{}, len(mcp.Keys))
+	secrets := make(map[string]struct{}, len(mcp.Keys))
+	for i := range mcp.Keys {
+		key := &mcp.Keys[i]
+		key.Name = strings.TrimSpace(key.Name)
+		key.Key = strings.TrimSpace(key.Key)
+		key.Tools = normalizeStringList(key.Tools)
+		if key.Name == "" {
+			return fmt.Errorf("mcp.keys[%d] is missing a name", i)
+		}
+		if _, dup := names[key.Name]; dup {
+			return fmt.Errorf("mcp.keys has duplicate name %q", key.Name)
+		}
+		names[key.Name] = struct{}{}
+		if key.Key == "" {
+			return fmt.Errorf("mcp key %q has no secret; set it in mcp.keys or via MCP_API_KEYS=%s:<secret>", key.Name, key.Name)
+		}
+		if len(key.Key) < MinMCPKeyLength {
+			return fmt.Errorf("mcp key %q is shorter than %d characters", key.Name, MinMCPKeyLength)
+		}
+		if _, dup := secrets[key.Key]; dup {
+			return fmt.Errorf("mcp key %q reuses another key's secret", key.Name)
+		}
+		secrets[key.Key] = struct{}{}
+	}
+	return nil
+}
+
 func normalizeCORSConfig(cfg CORSConfig) CORSConfig {
 	cfg.AllowedOrigins = normalizeStringList(cfg.AllowedOrigins)
 	cfg.AllowedOriginPatterns = normalizeStringList(cfg.AllowedOriginPatterns)
@@ -587,6 +794,15 @@ func validateConfigWithOptions(cfg *Config, requireRPC bool) error {
 	}
 	if err := validateCORSConfig(cfg); err != nil {
 		return err
+	}
+	// The MCP endpoint is served only by the API binary, and its secrets are
+	// injected only into the API pods; the indexer shares the ConfigMap (so it
+	// sees mcp.enabled and the key names) but never the secret. Validating
+	// here in indexer mode would crash-loop the indexer.
+	if !requireRPC {
+		if err := validateMCPConfig(cfg); err != nil {
+			return err
+		}
 	}
 
 	// Validate database URL
