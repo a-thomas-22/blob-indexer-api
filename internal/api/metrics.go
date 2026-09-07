@@ -74,5 +74,8 @@ func (c *apiCollector) Collect(ch chan<- prometheus.Metric) {
 func (a *API) metricsHandler() http.Handler {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(newAPICollector(a))
+	if a.mcp != nil {
+		reg.MustRegister(a.mcp.Collector())
+	}
 	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 }

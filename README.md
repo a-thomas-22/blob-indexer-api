@@ -89,6 +89,39 @@ These endpoints are available only when `server.dev_mode` is enabled, and can be
 
 Legacy `/api/*` paths redirect to `/api/v1/*`. API endpoints accept an optional `network` query parameter (name or chain ID) to specify which network to query. If not provided, the first enabled network is used.
 
+### MCP Endpoint (LLM clients)
+
+The API can expose the same read-only data as a [Model Context Protocol](https://modelcontextprotocol.io) server, so an LLM client such as Claude can be asked "what is going on in the blob market?" and answer from live indexer data. It is off by default and **permissioned**: every request must carry a configured API key, so the endpoint is never public.
+
+- Transport: streamable HTTP (stateless, so any API replica can serve any request) at `mcp.path` (default `POST /mcp`) on the public listener.
+- Auth: `Authorization: Bearer <key>` (or `X-API-Key: <key>`). Unknown or missing keys get `401`. Keys are named principals; a single shared key is the intended way to give a group of people non-public access, and each key may optionally be restricted to a tool allowlist.
+- Tools loop back into the REST handlers in-process, so they return exactly the `/api/v1` payloads (`{"data": ..., "meta": ...}`) with the same caching and validation. Tools: `get_blob_market_overview` (one-call snapshot), `list_networks`, `get_indexer_status`, `get_blob_pricing`, `get_mempool_pressure`, `get_blob_stats`, `get_rolling_stats`, `get_blob_market_chart`, `get_attribution_usage_chart`, `get_cost_comparison_chart`, `get_blob_tips_chart`, `get_top_blob_users`, `get_entity`, `get_blob_records`, `get_latest_blobs`, `get_mempool_blobs`, `get_blob_replacements`, `get_block`, `get_blob_by_tx_hash`, `get_blob_by_versioned_hash`, `search`. One prompt, `explain_blob_market`, walks a model through a plain-language market explanation.
+- Limits: tool calls are rate limited per key (`mcp.rate_limit_rps` / `mcp.rate_limit_burst`); over-limit calls return a retryable tool error. Calls are logged with the key name and counted in the `blob_indexer_mcp_tool_calls_total` Prometheus metric.
+
+Configuration (the secret is normally supplied via `MCP_API_KEYS` rather than the file):
+
+```yaml
+mcp:
+  enabled: true
+  path: /mcp
+  rate_limit_rps: 10
+  rate_limit_burst: 30
+  keys:
+    - name: community            # shared with the group; secret via MCP_API_KEYS=community:<secret>
+    - name: dashboards
+      tools: [get_blob_market_overview, get_blob_pricing]
+```
+
+`MCP_API_KEYS` is a comma-separated list of `name:secret` entries. When `mcp.keys` declares keys, the file owns the permission model and the env var may only supply secrets: every entry must name a declared key, may not carry a tool list, and an undeclared name is a load error. When `mcp.keys` is empty, the env var is the whole configuration and entries may include an allowlist as `name:secret:tool1|tool2`. Malformed entries are load errors rather than being dropped, and secrets may not contain `:` or `,`. Secrets must be at least 16 characters. Enabling MCP without any key is a startup error. `mcp.path` must be a literal path (no chi patterns) outside `/api`, `/metrics`, `/swagger`, and `/asyncapi.yaml`.
+
+The rate limit is enforced per key **per API replica** with an in-process bucket, so the effective cap for a shared key is `rate_limit_rps × replicas`. Set the limit with your replica count in mind, or enforce a credential-aware limit at the edge.
+
+Claude Code example:
+
+```bash
+claude mcp add --transport http blob-indexer https://your-api.example.com/mcp --header "Authorization: Bearer <secret>"
+```
+
 ## API Documentation
 
 The API is documented using Swagger/OpenAPI. When the server is running, you can access the Swagger UI at:
@@ -205,6 +238,10 @@ Alternatively, you can use environment variables:
 - `CORS_EXPOSED_HEADERS` - Comma-separated response headers exposed to browsers
 - `CORS_ALLOW_CREDENTIALS` - Send `Access-Control-Allow-Credentials: true` (default: false)
 - `CORS_MAX_AGE_SECONDS` - Preflight cache duration in seconds (default: 86400)
+- `MCP_ENABLED` - Expose the permissioned MCP endpoint (default: false)
+- `MCP_PATH` - Mount path for the MCP endpoint (default: /mcp)
+- `MCP_API_KEYS` - Comma-separated `name:secret[:tool1|tool2]` MCP API keys (see MCP Endpoint)
+- `MCP_RATE_LIMIT_RPS` / `MCP_RATE_LIMIT_BURST` - Per-key tool-call rate limit (default: 5 / 20)
 
 For backward compatibility, you can configure a single network using:
 - `RPC_URL` - Ethereum node endpoint
@@ -303,6 +340,20 @@ databaseSecret:
 For multi-replica deployments, configure edge rate limiting on Ingress so limits are enforced across all pods. Set `ingress.annotations` in Helm values (for example with NGINX: `nginx.ingress.kubernetes.io/limit-rps` and `nginx.ingress.kubernetes.io/limit-burst-multiplier`).
 
 To expose dev endpoints through a separate Kubernetes Service, set `appConfig.server.dev_port` and enable `devService`. The chart will create `<release>-dev` targeting only `/api/v1/dev/*` on the dedicated listener.
+
+To enable the MCP endpoint, declare the principals in `appConfig.mcp.keys` (names and optional tool allowlists only) and supply the secrets through a Secret holding `MCP_API_KEYS`, referenced by `mcpSecret.existingSecret`:
+
+```yaml
+appConfig:
+  mcp:
+    enabled: true
+    keys:
+      - name: community
+mcpSecret:
+  existingSecret: blob-indexer-mcp   # data: MCP_API_KEYS="community:<secret>"
+```
+
+Enabling MCP without `mcpSecret.existingSecret` (or, for local use only, `mcpSecret.apiKeys`) fails the render. Cloudflare rules that cache or rate limit `/api/*` do not cover `/mcp`; the endpoint relies on the app's per-key limit plus the origin's per-IP limiter.
 
 ## Releases
 

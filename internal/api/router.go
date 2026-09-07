@@ -20,6 +20,7 @@ import (
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
+	"github.com/a-thomas-22/blob-indexer-api/internal/mcpserver"
 )
 
 // API holds the API dependencies
@@ -49,6 +50,8 @@ type API struct {
 	entityAddrCache   map[string]entityAddrCacheEntry
 	hub               *Hub
 	poller            *Poller
+	// mcp is the permissioned MCP endpoint, nil when mcp.enabled is false.
+	mcp *mcpserver.Server
 }
 
 type statsCacheEntry struct {
@@ -213,7 +216,40 @@ func newAPI(ctx context.Context, db DBProvider, cfg *config.Config) *API {
 	}
 	go poller.Run(ctx)
 
+	if cfg.MCP.Enabled {
+		// Tool calls loop back into the public REST routes in-process, so the
+		// MCP surface inherits the same caches, validation, and payloads.
+		server, err := mcpserver.New(cfg.MCP, api.loopbackHandler(), cfg.Indexer.Version)
+		if err != nil {
+			// cmd/api validates the MCP config before reaching here, so this
+			// only trips for programmatic callers; fail closed by leaving the
+			// endpoint unmounted rather than serving a partial permission model.
+			logger.Error("MCP endpoint disabled: invalid configuration", zap.Error(err))
+		} else {
+			api.mcp = server
+		}
+	}
+
 	return api
+}
+
+// loopbackHandler serves the public REST routes without the edge middleware
+// (rate limiting, CORS, request logging), for in-process dispatch from the
+// MCP tools. MCP applies its own per-key rate limit, so the aggregate limiter
+// is replaced with a pass-through.
+func (a *API) loopbackHandler() http.Handler {
+	r := chi.NewRouter()
+	r.Route("/api/v1", func(r chi.Router) {
+		a.mountPublicRoutes(r, func(next http.Handler) http.Handler { return next })
+	})
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		// The tool handler's context descends from the inbound MCP request,
+		// which already carries the public router's chi routing state (POST
+		// /mcp). chi treats a present route context as "mounted sub-router"
+		// and would route with it, so clear it to start a fresh match.
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, nil))
+		r.ServeHTTP(w, req)
+	})
 }
 
 // invalidateBlockCaches drops cached responses derived from confirmed-block
@@ -307,6 +343,16 @@ func (a *API) newRouter(opts routerOptions) http.Handler {
 		}
 	})
 
+	// Permissioned MCP endpoint for LLM clients. Lives outside /api/v1 (it is
+	// JSON-RPC over streamable HTTP, not a REST resource) but inside the chi
+	// stack so it shares the per-IP rate limiter, body cap, and request logs.
+	// Authentication happens inside the handler.
+	mcpMounted := false
+	if opts.includePublicRoutes && a.mcp != nil {
+		r.Handle(a.mcp.Path(), a.mcp.Handler())
+		mcpMounted = true
+	}
+
 	mountLegacyAPIRedirects(r)
 
 	logger.Info("API routes initialized",
@@ -315,7 +361,8 @@ func (a *API) newRouter(opts routerOptions) http.Handler {
 		zap.String("swagger_ui", "/swagger/index.html"),
 		zap.Bool("public_routes", opts.includePublicRoutes),
 		zap.Bool("dev_routes", opts.includeDevRoutes),
-		zap.Bool("dev_mode", cfg.Server.DevMode))
+		zap.Bool("dev_mode", cfg.Server.DevMode),
+		zap.Bool("mcp", mcpMounted))
 
 	// Serve Prometheus /metrics from a parent mux so it bypasses the chi
 	// middleware stack — scrapes are never rate-limited and don't increment the

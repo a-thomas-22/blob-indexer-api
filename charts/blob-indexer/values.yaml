@@ -145,6 +145,25 @@ rpcSecret:
   # Override the chart-managed Secret name (defaults to "<fullname>-rpc").
   name: ""
 
+# MCP API key Secret. Provides the MCP_API_KEYS env var
+# ("name:secret,name2:secret2", optionally "name:secret:tool1|tool2") to the
+# API pods when appConfig.mcp.enabled is true.
+#
+# Two ways to supply it:
+#   1. existingSecret (RECOMMENDED for prod): provision a Secret out-of-band
+#      with a key named `key` (default MCP_API_KEYS) and set
+#      mcpSecret.existingSecret to its name.
+#   2. Chart-managed (local/dev only): set mcpSecret.apiKeys and the chart
+#      renders a Secret. WARNING: this stores the credential in Helm release
+#      history and any values file.
+# Secrets must be at least 16 characters and must not contain ':' or ','.
+mcpSecret:
+  existingSecret: ""
+  # Override the chart-managed Secret name (defaults to "<fullname>-mcp").
+  name: ""
+  key: MCP_API_KEYS
+  apiKeys: ""
+
 # Application configuration -- rendered into a ConfigMap as YAML.
 # Maps directly to the Config struct in internal/config/config.go.
 appConfig:
@@ -236,6 +255,31 @@ appConfig:
     blob_list_base_url: "https://github.com/tirante-dev/blob-list/releases/latest/download"
     blob_list_refresh_interval: "1h"
     blob_list_request_timeout: "10s"
+  # Permissioned Model Context Protocol endpoint for LLM clients (Claude,
+  # etc.), served by the API pods at `path` on the public listener. Off by
+  # default. When enabled the endpoint fails closed: every request must carry
+  # one of the configured API keys as a Bearer token.
+  #
+  # `keys` declares the principals and (optionally) which tools each may call;
+  # it is rendered into the credential-free ConfigMap and MUST NOT contain the
+  # secrets: only `name` and `tools` are accepted per entry (any other field,
+  # in any capitalization, fails the render). Secrets are injected as the
+  # MCP_API_KEYS env var from a Secret (see mcpSecret) in the form
+  # "name:secret,name2:secret2"; the app fills each declared key's secret by
+  # name and rejects undeclared names. A single shared key (one entry) is the
+  # intended way to give a group of people non-public access.
+  mcp:
+    enabled: false
+    path: /mcp
+    # Tool calls per second (and burst) allowed per API key PER REPLICA: each
+    # pod keeps its own bucket, so the effective cap for a shared key is
+    # rate_limit_rps × api.replicaCount. Calls beyond it get a retryable tool
+    # error rather than a transport failure.
+    rate_limit_rps: 10
+    rate_limit_burst: 30
+    keys: []
+    #  - name: community
+    #    tools: []          # empty = every tool; or e.g. [get_blob_market_overview, get_blob_pricing]
   networks:
     - name: "mainnet"
       chain_id: 1
