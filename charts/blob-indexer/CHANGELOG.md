@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.14...blob-indexer-chart-v0.7.0) (2026-09-07)
+
+
+### Features
+
+* add permissioned MCP endpoint for blob market queries ([#331](https://github.com/a-thomas-22/blob-indexer-api/issues/331)) ([9bc2ad9](https://github.com/a-thomas-22/blob-indexer-api/commit/9bc2ad9597a856348f68cdb20a2f88a39f76970b))
+* **api:** record blob transaction priority fees and add blob-tips chart ([#327](https://github.com/a-thomas-22/blob-indexer-api/issues/327)) ([d9b737f](https://github.com/a-thomas-22/blob-indexer-api/commit/d9b737fdc466f3bb1913c41b25ae0b158559e000))
+
+
+### Bug Fixes
+
+* **helm:** update chart app version to 0.17.0 ([e122521](https://github.com/a-thomas-22/blob-indexer-api/commit/e1225211e9e6e243464f01a34c3d9efab520ff21))
+* **helm:** update chart app version to 0.18.0 ([81e18d8](https://github.com/a-thomas-22/blob-indexer-api/commit/81e18d86d299636baeca967e71cecf7808d70d39))
+
 ## [0.6.14](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.13...blob-indexer-chart-v0.6.14) (2026-08-10)
 
 
