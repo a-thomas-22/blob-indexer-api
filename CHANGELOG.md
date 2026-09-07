@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.17.0...blob-indexer-api-v0.18.0) (2026-09-07)
+
+
+### Features
+
+* add permissioned MCP endpoint for blob market queries ([#331](https://github.com/a-thomas-22/blob-indexer-api/issues/331)) ([9bc2ad9](https://github.com/a-thomas-22/blob-indexer-api/commit/9bc2ad9597a856348f68cdb20a2f88a39f76970b))
+
 ## [0.17.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.16.0...blob-indexer-api-v0.17.0) (2026-09-05)
 
 
