@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -608,6 +609,12 @@ func parseMCPAPIKeysEnv(value string) ([]MCPKeyConfig, error) {
 		}
 		if len(parts) == 3 {
 			key.Tools = normalizeStringList(strings.Split(parts[2], "|"))
+			// A trailing ":" reads as an intended-but-empty allowlist. Empty
+			// means "every tool", so accepting it silently would widen access
+			// on a typo.
+			if len(key.Tools) == 0 {
+				return nil, fmt.Errorf("entry %q has an empty tool list; omit the trailing \":\" to grant every tool", entry)
+			}
 		}
 		keys = append(keys, key)
 	}
@@ -657,16 +664,36 @@ var mcpReservedPaths = []string{"/api", "/metrics", "/swagger", "/asyncapi.yaml"
 // infinity, which slip past a plain <= 0 check) would disable the limiter.
 const MaxMCPRateLimitRPS = 10000
 
+// MaxMCPPathLength bounds mcp.path so a pathological mount point cannot be
+// configured.
+const MaxMCPPathLength = 512
+
 // validateMCPConfig fails closed: an enabled MCP endpoint must have at least
-// one well-formed, unique, sufficiently long key. Tool names are checked by
-// the MCP server package, which owns the tool catalog.
+// one well-formed, unique, sufficiently long key.
 func validateMCPConfig(cfg *Config) error {
-	mcp := &cfg.MCP
-	if !mcp.Enabled {
+	if !cfg.MCP.Enabled {
 		return nil
+	}
+	return ValidateMCP(&cfg.MCP)
+}
+
+// ValidateMCP checks and normalizes an MCP configuration in place (names,
+// secrets and tool lists are trimmed). It is exported so the MCP server
+// package enforces exactly these rules for programmatic callers, rather than
+// trusting that config loading already ran. Tool names are checked separately
+// by that package, which owns the catalog.
+func ValidateMCP(mcp *MCPConfig) error {
+	if len(mcp.Path) > MaxMCPPathLength {
+		return fmt.Errorf("mcp.path must be at most %d characters", MaxMCPPathLength)
 	}
 	if !mcpPathPattern.MatchString(mcp.Path) {
 		return fmt.Errorf("mcp.path must be a literal absolute path such as /mcp (got %q)", mcp.Path)
+	}
+	// The pattern allows "." and ".." as segments, but net/http's ServeMux
+	// canonicalizes the request path before routing, so a non-canonical mount
+	// point silently redirects elsewhere (/x/../metrics lands on /metrics).
+	if path.Clean(mcp.Path) != mcp.Path {
+		return fmt.Errorf("mcp.path must be canonical (no . or .. segments); %q resolves to %q", mcp.Path, path.Clean(mcp.Path))
 	}
 	for _, reserved := range mcpReservedPaths {
 		if mcp.Path == reserved || strings.HasPrefix(mcp.Path, reserved+"/") {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -192,13 +193,24 @@ func TestNew_RejectsBadInputs(t *testing.T) {
 		t.Fatalf("expected unknown-tool error, got %v", err)
 	}
 
-	// Structural invariants are re-checked here so a programmatic caller
-	// cannot cross-wire principals (servers are keyed by name).
+	// The full structural validation runs here too, so a programmatic caller
+	// gets the same guarantees as the API binary: no cross-wired principals
+	// (servers are keyed by name), no credential that collides once the
+	// presented value is trimmed, no unlimitable limiter, no unmountable path.
 	cases := map[string]func(*config.MCPConfig){
-		"duplicate name":   func(c *config.MCPConfig) { c.Keys[1].Name = c.Keys[0].Name },
-		"duplicate secret": func(c *config.MCPConfig) { c.Keys[1].Key = c.Keys[0].Key },
-		"empty name":       func(c *config.MCPConfig) { c.Keys[0].Name = "" },
-		"empty secret":     func(c *config.MCPConfig) { c.Keys[0].Key = "" },
+		"duplicate name":             func(c *config.MCPConfig) { c.Keys[1].Name = c.Keys[0].Name },
+		"duplicate secret":           func(c *config.MCPConfig) { c.Keys[1].Key = c.Keys[0].Key },
+		"secret collides on trim":    func(c *config.MCPConfig) { c.Keys[1].Key = "  " + c.Keys[0].Key + "  " },
+		"empty name":                 func(c *config.MCPConfig) { c.Keys[0].Name = "" },
+		"empty secret":               func(c *config.MCPConfig) { c.Keys[0].Key = "" },
+		"whitespace-only secret":     func(c *config.MCPConfig) { c.Keys[0].Key = "        " },
+		"short secret":               func(c *config.MCPConfig) { c.Keys[0].Key = "short" },
+		"nan rate limit":             func(c *config.MCPConfig) { c.RateLimitRPS = math.NaN() },
+		"inf rate limit":             func(c *config.MCPConfig) { c.RateLimitRPS = math.Inf(1) },
+		"zero burst":                 func(c *config.MCPConfig) { c.RateLimitBurst = 0 },
+		"non-canonical path":         func(c *config.MCPConfig) { c.Path = "/x/../metrics" },
+		"path with chi wildcard":     func(c *config.MCPConfig) { c.Path = "/mcp/*" },
+		"path collides with metrics": func(c *config.MCPConfig) { c.Path = "/metrics" },
 	}
 	for name, mutate := range cases {
 		c := testConfig()
@@ -253,6 +265,23 @@ func TestNew_DefaultsVersion(t *testing.T) {
 	}
 	if session.InitializeResult().Instructions == "" {
 		t.Fatal("expected server instructions to be advertised")
+	}
+}
+
+func TestNew_NormalizesKeys(t *testing.T) {
+	// New trims through ValidateMCP, so a padded configured secret is stored
+	// (and must be presented) in its trimmed form — matching how the request
+	// credential is parsed.
+	cfg := testConfig()
+	cfg.Keys[0].Key = "  " + testKey + "  "
+	cfg.Keys[0].Name = " community "
+	server, err := New(cfg, newFakeBackend(), "test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	p, ok := server.lookup(testKey)
+	if !ok || p.name != "community" {
+		t.Fatalf("expected trimmed credential to authenticate as community, got %v %+v", ok, p)
 	}
 }
 

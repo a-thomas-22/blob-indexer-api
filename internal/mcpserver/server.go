@@ -104,29 +104,22 @@ func New(cfg config.MCPConfig, backend http.Handler, version string) (*Server, e
 	if backend == nil {
 		return nil, fmt.Errorf("mcpserver: backend handler is required")
 	}
-	if err := ValidateConfig(cfg); err != nil {
-		return nil, err
-	}
 	if version == "" {
 		version = "dev"
 	}
-	// The config package validates these for the API binary; re-check here so
-	// programmatic callers cannot cross-wire principals (servers are keyed by
-	// name, so a duplicate name would route one secret to another's tool set).
-	names := make(map[string]struct{}, len(cfg.Keys))
-	secrets := make(map[string]struct{}, len(cfg.Keys))
-	for _, key := range cfg.Keys {
-		if key.Name == "" || key.Key == "" {
-			return nil, fmt.Errorf("mcpserver: key entries need a name and a secret")
-		}
-		if _, dup := names[key.Name]; dup {
-			return nil, fmt.Errorf("mcpserver: duplicate key name %q", key.Name)
-		}
-		if _, dup := secrets[key.Key]; dup {
-			return nil, fmt.Errorf("mcpserver: key %q reuses another key's secret", key.Name)
-		}
-		names[key.Name] = struct{}{}
-		secrets[key.Key] = struct{}{}
+	// Re-run the full structural validation here rather than trusting that
+	// config loading already did. A programmatic caller could otherwise build
+	// a server with duplicate names (which cross-wires principals, since
+	// servers are keyed by name), untrimmed secrets (which authenticate as a
+	// different principal once the request credential is trimmed), a limiter
+	// built from NaN, or a path the router cannot mount. ValidateMCP also
+	// normalizes the keys in this local copy.
+	cfg.Enabled = true
+	if err := config.ValidateMCP(&cfg); err != nil {
+		return nil, fmt.Errorf("mcpserver: %w", err)
+	}
+	if err := ValidateConfig(cfg); err != nil {
+		return nil, err
 	}
 
 	s := &Server{

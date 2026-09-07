@@ -78,8 +78,14 @@ data:
         {{- range .keys }}
         {{- $entry := . }}
         {{- range $field, $_ := $entry }}
-        {{- if not (has (lower $field) (list "name" "tools")) }}
-        {{- fail (printf "appConfig.mcp.keys[] entry %q has field %q; only name and tools are allowed here (secrets go in mcpSecret)" (toString $entry.name) $field) }}
+        {{- /*
+          Exact spellings only. Matching case-insensitively here while the
+          renderer below reads only ".tools" would let a "Tools:" typo through
+          as an empty allowlist, which the app reads as "every tool" — a
+          silent widening of access instead of a loud failure.
+        */}}
+        {{- if not (has $field (list "name" "tools")) }}
+        {{- fail (printf "appConfig.mcp.keys[] entry %q has field %q; only the exact fields name and tools are allowed here (secrets go in mcpSecret)" (toString $entry.name) $field) }}
         {{- end }}
         {{- end }}
         - name: {{ required "appConfig.mcp.keys[].name is required" .name | quote }}

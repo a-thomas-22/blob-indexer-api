@@ -95,6 +95,9 @@ func TestValidateMCPConfig_Errors(t *testing.T) {
 		{"chi param", func(c *Config) { c.MCP.Path = "/{mcp}" }, "mcp.path must be a literal absolute path"},
 		{"whitespace", func(c *Config) { c.MCP.Path = "/mcp x" }, "mcp.path must be a literal absolute path"},
 		{"query syntax", func(c *Config) { c.MCP.Path = "/mcp?x=1" }, "mcp.path must be a literal absolute path"},
+		{"dot segment", func(c *Config) { c.MCP.Path = "/x/../metrics" }, "mcp.path must be canonical"},
+		{"single dot", func(c *Config) { c.MCP.Path = "/mcp/." }, "mcp.path must be canonical"},
+		{"over-long path", func(c *Config) { c.MCP.Path = "/" + strings.Repeat("m", MaxMCPPathLength) }, "at most 512 characters"},
 		{"api path", func(c *Config) { c.MCP.Path = "/api/v1/mcp" }, "collides with the reserved route /api"},
 		{"api exact", func(c *Config) { c.MCP.Path = "/api" }, "collides with the reserved route /api"},
 		{"metrics path", func(c *Config) { c.MCP.Path = "/metrics" }, "collides with the reserved route /metrics"},
@@ -143,8 +146,9 @@ func TestParseMCPAPIKeysEnv(t *testing.T) {
 		t.Fatalf("keys[1] = %+v", keys[1])
 	}
 
-	// Malformed entries are errors, never silently dropped.
-	for _, bad := range []string{"bad", ":nokey", "noname:", "ok:" + fakeSecret("ok") + ",bad"} {
+	// Malformed entries are errors, never silently dropped. A trailing ":"
+	// reads as an empty allowlist, which would mean "every tool".
+	for _, bad := range []string{"bad", ":nokey", "noname:", "ok:" + fakeSecret("ok") + ",bad", "ok:" + fakeSecret("ok") + ":", "ok:" + fakeSecret("ok") + ": | "} {
 		if _, err := parseMCPAPIKeysEnv(bad); err == nil {
 			t.Fatalf("expected error for %q", bad)
 		}

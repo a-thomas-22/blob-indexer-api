@@ -217,10 +217,10 @@ Build a container image reference from the chart defaults and a component overri
 Name of the Secret carrying MCP_API_KEYS for the API deployment.
 */}}
 {{- define "blob-indexer.mcpSecretName" -}}
-{{- if .Values.mcpSecret.existingSecret -}}
-{{- .Values.mcpSecret.existingSecret -}}
-{{- else if .Values.mcpSecret.name -}}
-{{- .Values.mcpSecret.name -}}
+{{- if trim .Values.mcpSecret.existingSecret -}}
+{{- trim .Values.mcpSecret.existingSecret -}}
+{{- else if trim .Values.mcpSecret.name -}}
+{{- trim .Values.mcpSecret.name -}}
 {{- else -}}
 {{ include "blob-indexer.fullname" . }}-mcp
 {{- end -}}
@@ -231,7 +231,8 @@ Whether the chart renders its own MCP Secret: only when MCP is enabled, no
 existingSecret is given, and values supply the keys (chart-managed path).
 */}}
 {{- define "blob-indexer.createMcpSecret" -}}
-{{- if and .Values.appConfig.mcp.enabled (not (trim .Values.mcpSecret.existingSecret)) (trim .Values.mcpSecret.apiKeys) -}}
+{{- $mcp := default dict .Values.appConfig.mcp -}}
+{{- if and $mcp.enabled (not (trim .Values.mcpSecret.existingSecret)) (trim .Values.mcpSecret.apiKeys) -}}
 true
 {{- end -}}
 {{- end }}
@@ -242,7 +243,8 @@ required (not optional) because the app refuses to start an enabled MCP endpoint
 without keys, so a missing Secret should fail loudly at pod start.
 */}}
 {{- define "blob-indexer.mcpEnv" -}}
-{{- if .Values.appConfig.mcp.enabled -}}
+{{- $mcp := default dict .Values.appConfig.mcp -}}
+{{- if $mcp.enabled -}}
 {{- if not (or (trim .Values.mcpSecret.existingSecret) (trim .Values.mcpSecret.apiKeys)) -}}
 {{- fail "appConfig.mcp.enabled is true: set mcpSecret.existingSecret (recommended) or mcpSecret.apiKeys to supply MCP_API_KEYS" -}}
 {{- end -}}
