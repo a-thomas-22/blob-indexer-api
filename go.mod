@@ -23,7 +23,7 @@ require (
 	github.com/swaggo/http-swagger v1.3.4
 	go.uber.org/zap v1.28.0
 	golang.org/x/sync v0.22.0
-	golang.org/x/time v0.15.0
+	golang.org/x/time v0.16.0
 )
 
 require (
