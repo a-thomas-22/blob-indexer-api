@@ -67,6 +67,85 @@ type Blob struct {
 	// sender's nonce under a new hash. Excluded from scanning: no query
 	// selects it, and legacy pending rows hold NULL.
 	Nonce uint64 `db:"-"`
+	// FirstSeenAt is when the indexer first saw the transaction pending,
+	// copied from mempool_blobs.timestamp when the block promoted the row.
+	// The block timestamp minus this is the time to inclusion. NULL when the
+	// tx was never observed pending (indexed from history, or it arrived
+	// with its block) and for rows indexed before migration 000017. For
+	// pending rows, queries project mempool_blobs.timestamp here.
+	FirstSeenAt *time.Time `db:"first_seen_at"`
+	// TxIndex is the carrying transaction's position in its block. NULL for
+	// pending rows and for confirmed rows indexed before migration 000017
+	// that no backfill or reindex has revisited.
+	TxIndex *int `db:"tx_index"`
+}
+
+// BlockBuilder records who built an indexed block, from the header's fee
+// recipient and extra data, plus the pending-pool snapshot aggregates taken
+// when the block arrived live. One row per indexed block, keyed like
+// block_metrics. See migration 000017 for the column semantics.
+type BlockBuilder struct {
+	ChainID        int       `db:"chain_id"`
+	BlockNumber    int64     `db:"block_number"`
+	BlockTimestamp time.Time `db:"block_timestamp"`
+	// FeeRecipient is header.coinbase in the same checksummed form as
+	// Blob.FromAddress.
+	FeeRecipient string `db:"fee_recipient"`
+	// ExtraData is header.extraData as 0x-prefixed hex ("0x" when empty).
+	ExtraData string `db:"extra_data"`
+	// BuilderKey groups blocks by builder; BuilderName is its display
+	// label. Both are resolved by the indexer's builder registry from the
+	// raw fields and are never empty.
+	BuilderKey  string `db:"builder_key"`
+	BuilderName string `db:"builder_name"`
+	TxCount     int    `db:"tx_count"`
+	// ProposerPaymentWei and ProposerPaymentTo describe the block's last
+	// transaction when it was sent by the fee recipient (the conventional
+	// MEV-Boost proposer payment); both are NULL otherwise.
+	ProposerPaymentWei *string `db:"proposer_payment_wei"`
+	ProposerPaymentTo  *string `db:"proposer_payment_to"`
+	// CandidateSnapshot is true when the block arrived live and the indexer
+	// classified the pending blob pool against it; the aggregates below are
+	// NULL when it is false.
+	CandidateSnapshot     bool    `db:"candidate_snapshot"`
+	PendingCandidateTxs   *int    `db:"pending_candidate_txs"`
+	EligibleSkippedTxs    *int    `db:"eligible_skipped_txs"`
+	EligibleSkippedBlobs  *int    `db:"eligible_skipped_blobs"`
+	EligibleSkippedMaxTip *string `db:"eligible_skipped_max_tip"`
+}
+
+// Classification of a pending blob transaction a live block did not include
+// (blob_inclusion_candidates.reason). Only CandidateEligible supports a
+// claim about builder behavior; the others explain why inclusion was
+// impossible or unlikely regardless of the builder. When several apply, the
+// first in this order wins.
+const (
+	CandidateTooRecent        = "too_recent"
+	CandidateNonceGap         = "nonce_gap"
+	CandidatePricedOutBlobFee = "priced_out_blob_fee"
+	CandidatePricedOutExecFee = "priced_out_exec_fee"
+	CandidateNoRoom           = "no_room"
+	CandidateEligible         = "eligible"
+)
+
+// BlobInclusionCandidate is one pending blob transaction our node had seen
+// when a live block arrived and that the block did not include. Rows are
+// pruned after the indexer's retention window; the per-block aggregates on
+// BlockBuilder are permanent.
+type BlobInclusionCandidate struct {
+	ChainID              int       `db:"chain_id"`
+	BlockNumber          int64     `db:"block_number"`
+	BlockTimestamp       time.Time `db:"block_timestamp"`
+	TxHash               string    `db:"tx_hash"`
+	FromAddress          string    `db:"from_address"`
+	UserAttribution      string    `db:"user_attribution"`
+	Nonce                *int64    `db:"nonce"`
+	BlobCount            int       `db:"blob_count"`
+	MaxPriorityFeePerGas *string   `db:"max_priority_fee_per_gas"`
+	MaxFeePerGas         *string   `db:"max_fee_per_gas"`
+	MaxFeePerBlobGas     *string   `db:"max_fee_per_blob_gas"`
+	FirstSeenAt          time.Time `db:"first_seen_at"`
+	Reason               string    `db:"reason"`
 }
 
 // BlobReplacement records a pending blob transaction the indexer evicted
@@ -80,6 +159,14 @@ type BlobReplacement struct {
 	FromAddress       string    `db:"from_address"`
 	Nonce             int64     `db:"nonce"`
 	ReplacedAt        time.Time `db:"replaced_at"`
+	// Fee context of both sides of the bump, in wei, and when the replaced
+	// transaction was first seen pending. All NULL on rows written before
+	// migration 000017.
+	ReplacedMaxPriorityFeePerGas    *string    `db:"replaced_max_priority_fee_per_gas"`
+	ReplacedMaxFeePerBlobGas        *string    `db:"replaced_max_fee_per_blob_gas"`
+	ReplacedFirstSeenAt             *time.Time `db:"replaced_first_seen_at"`
+	ReplacementMaxPriorityFeePerGas *string    `db:"replacement_max_priority_fee_per_gas"`
+	ReplacementMaxFeePerBlobGas     *string    `db:"replacement_max_fee_per_blob_gas"`
 }
 
 // BlobUser represents a known blob transaction sender
@@ -255,6 +342,17 @@ const (
 	// execution-layer fees; the backfill refetches their blocks and fills the
 	// fees in place, and this checkpoint lets a restart resume the walk.
 	MetadataPriorityFeeBackfillBlock = "priority_fee_backfill_block"
+	// MetadataBlockBuilderBackfillBlock is the highest block the block
+	// builder backfill has walked. Blocks indexed before migration 000017
+	// have no block_builders row; the backfill refetches them and inserts
+	// the row (never touching blobs), and this checkpoint lets a restart
+	// resume the walk.
+	MetadataBlockBuilderBackfillBlock = "block_builder_backfill_block"
+	// MetadataBlockBuilderRegistryVersion fingerprints the builder registry
+	// the block_builders labels were resolved with. When the running
+	// binary's registry differs, the indexer relabels existing rows from
+	// their raw fields before recording the new fingerprint.
+	MetadataBlockBuilderRegistryVersion = "block_builder_registry_version"
 )
 
 // FormatMetadataTimestamp serializes metadata timestamps consistently.
