@@ -15,13 +15,13 @@ import (
 
 // GetBlockByNumber godoc
 // @Summary Get an indexed block by number
-// @Description Retrieve a single indexed block with its confirmed blobs and block-level pricing data. The data shape matches the WebSocket new_block event payload, so clients can reuse the same transform. Zero-blob blocks are indexed too and return an empty blobs list; 404 means the block is not indexed (missed slot, ahead of the chain head, or outside the indexed range).
+// @Description Retrieve a single indexed block with its confirmed blobs, block-level pricing data, and the builder that produced it. The shared fields match the WebSocket new_block event payload, so clients can reuse the same transform; candidates is REST-only and lists the pending blob transactions our node had seen that the block did not include. builder is omitted for blocks the builder backfill has not reached, and candidates is empty when no live snapshot was taken or the retention window has pruned it. Zero-blob blocks are indexed too and return an empty blobs list; 404 means the block is not indexed (missed slot, ahead of the chain head, or outside the indexed range).
 // @Tags blocks
 // @Accept json
 // @Produce json
 // @Param network query string false "Network name or chain ID (default: first enabled network)"
 // @Param number path int true "Block number (positive integer)"
-// @Success 200 {object} Response{data=NewBlockData} "Success"
+// @Success 200 {object} Response{data=BlockDetailResponse} "Success"
 // @Failure 400 {object} Response "Bad request"
 // @Failure 404 {object} Response "Block not indexed"
 // @Failure 500 {object} Response "Internal server error"
@@ -90,6 +90,38 @@ func (a *API) GetBlockByNumber(w http.ResponseWriter, r *http.Request) {
 	}
 	pricing := toBlockPricingResponse(metric)
 
+	// The builder row is written in the same transaction as block_metrics,
+	// so it is either present or absent — never torn against the reads
+	// above. A missing row just means the backfill has not reached this
+	// height, which is not an error.
+	var builder *BlockBuilderResponse
+	var builderRow models.BlockBuilder
+	switch err := a.db.GetContext(r.Context(), &builderRow, queryBlockBuilderForBlock, network.ChainID, blockNumber); {
+	case err == nil:
+		response := toBlockBuilderResponse(builderRow)
+		builder = &response
+	case errors.Is(err, sql.ErrNoRows):
+	default:
+		logger.Error("Failed to get block builder",
+			zap.String("network", network.Name),
+			zap.Int64("block", blockNumber),
+			zap.Error(err))
+		a.respondError(w, http.StatusInternalServerError, "Failed to get block")
+		return
+	}
+
+	// Candidate detail is pruned on a retention window, so an empty list is
+	// the normal outcome for anything but a recent, live-indexed block.
+	var candidateRows []models.BlobInclusionCandidate
+	if err := a.db.SelectContext(r.Context(), &candidateRows, queryBlobInclusionCandidatesForBlock, network.ChainID, blockNumber); err != nil {
+		logger.Error("Failed to get block inclusion candidates",
+			zap.String("network", network.Name),
+			zap.Int64("block", blockNumber),
+			zap.Error(err))
+		a.respondError(w, http.StatusInternalServerError, "Failed to get block")
+		return
+	}
+
 	// An indexed block at a height is effectively immutable, so the response is
 	// safely cacheable — same reorg self-heal bound as a confirmed blob.
 	if consistent {
@@ -101,11 +133,15 @@ func (a *API) GetBlockByNumber(w http.ResponseWriter, r *http.Request) {
 			zap.Int("blob_count", metric.BlobCount),
 			zap.Int("blob_rows", len(blobs)))
 	}
-	a.respondSuccess(w, NewBlockData{
-		BlockNumber: metric.BlockNumber,
-		BlobCount:   metric.BlobCount,
-		Timestamp:   metric.BlockTimestamp,
-		Blobs:       brs,
-		Pricing:     &pricing,
+	a.respondSuccess(w, BlockDetailResponse{
+		NewBlockData: NewBlockData{
+			BlockNumber: metric.BlockNumber,
+			BlobCount:   metric.BlobCount,
+			Timestamp:   metric.BlockTimestamp,
+			Blobs:       brs,
+			Pricing:     &pricing,
+			Builder:     builder,
+		},
+		Candidates: toBlobInclusionCandidateResponses(candidateRows),
 	})
 }
