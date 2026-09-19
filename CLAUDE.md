@@ -59,16 +59,17 @@ Canonical routes are under `/api/v1`. Legacy `/api/*` paths redirect to `/api/v1
 - `/api/v1/ws` — WebSocket updates
 - `/api/v1/networks`, `/api/v1/networks/{chainId}` — network listing and status
 - `/api/v1/blob/latest`, `/api/v1/blob/mempool`, `/api/v1/blob/pricing`, `/api/v1/blob/replacements`, `/api/v1/blob/by-hash/{versionedHash}`, `/api/v1/blob/{txHash}` — blob queries
-- `/api/v1/block/{number}` — single indexed block with its blobs (matches the WebSocket `new_block` payload)
+- `/api/v1/block/{number}` — single indexed block with its blobs, pricing and `builder` (shared fields match the WebSocket `new_block` payload), plus a REST-only `candidates` list from `blob_inclusion_candidates`
 - `/api/v1/users` — top blob users
 - `/api/v1/entities/{key}` — attributed entity detail (aggregates + per-address breakdown; key shared with `/charts/attribution-usage` shares). `/blob/latest` and `/blob/mempool` accept `entity={key}` to filter across the entity's addresses
+- `/api/v1/builders`, `/api/v1/builders/{key}` — block-builder leaderboard and detail over a bounded window (`range` in `1h|24h|7d|30d`, default `24h`; `all` rejected). Reads `block_builders` joined to `block_metrics` and `blobs`; the detail adds per-entity `users` (with `inclusion_index`), `skipped` (eligible `blob_inclusion_candidates`) and `recent_blocks`, and 404s when the key has no blocks in range
 - `/api/v1/records` — historical leaderboards (streaks, base fee peaks, busiest hours)
-- `/api/v1/charts/blob-market`, `/api/v1/charts/attribution-usage`, `/api/v1/charts/cost-comparison`, `/api/v1/charts/blob-tips`, `/api/v1/charts/rolling-stats` — bucketed chart series. `blob-tips` reads `blobs.priority_fee_per_gas` directly (no rollup carries it), so it rejects `range=all`
+- `/api/v1/charts/blob-market`, `/api/v1/charts/attribution-usage`, `/api/v1/charts/cost-comparison`, `/api/v1/charts/blob-tips`, `/api/v1/charts/builder-share`, `/api/v1/charts/rolling-stats` — bucketed chart series. `blob-tips` reads `blobs.priority_fee_per_gas` directly and `builder-share` reads `block_builders` (no rollup carries either), so both reject `range=all`
 - `/api/v1/stats` — historical stats
 - `/api/v1/status` — indexer status
 - `/api/v1/dev/*` — development/debug endpoints (metrics, dashboard, logs, queries), gated by `server.dev_mode` and optional `server.dev_api_key`
 - `/swagger/*` — Swagger UI
-- `/mcp` (outside `/api/v1`; path from `mcp.path`) — streamable-HTTP MCP endpoint for LLM clients, mounted only when `mcp.enabled`. Fails closed: Bearer/X-API-Key must match a configured `mcp.keys` entry; each key may carry a tool allowlist. Tools dispatch to the REST handlers through `API.loopbackHandler()` (no edge middleware; the loopback clears the inherited chi route context), so they return the exact REST payloads. Tool catalogue lives in `internal/mcpserver/tools.go`; `cmd/api` validates allowlists against it at startup
+- `/mcp` (outside `/api/v1`; path from `mcp.path`) — streamable-HTTP MCP endpoint for LLM clients, mounted only when `mcp.enabled`. Fails closed: Bearer/X-API-Key must match a configured `mcp.keys` entry; each key may carry a tool allowlist. Tools dispatch to the REST handlers through `API.loopbackHandler()` (no edge middleware; the loopback clears the inherited chi route context), so they return the exact REST payloads. Tool catalogue (including `get_builders`, `get_builder`, `get_builder_share_chart`) lives in `internal/mcpserver/tools.go`; `cmd/api` validates allowlists against it at startup
 
 ### Configuration
 

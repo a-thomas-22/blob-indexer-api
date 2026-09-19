@@ -47,7 +47,14 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 - `GET /api/v1/blob/{txHash}?network=mainnet` - Fetch a specific blob by transaction hash
 
 ### Block Endpoints
-- `GET /api/v1/block/{number}?network=mainnet` - Fetch a single indexed block with its blobs and pricing (same shape as the WebSocket `new_block` event); 404 if the block is not indexed
+- `GET /api/v1/block/{number}?network=mainnet` - Fetch a single indexed block with its blobs, pricing, and the builder that produced it (the shared fields match the WebSocket `new_block` event); 404 if the block is not indexed. The REST-only `candidates` list carries the pending blob transactions our node had seen that the block did not include, each with the reason it is classified under; it is empty for blocks indexed from history or once the retention window has pruned it
+
+### Builder Endpoints
+Who builds the blocks blobs land in, and how each builder behaves. `range` accepts `1h`, `24h`, `7d`, or `30d` and defaults to `24h`; `all` is rejected, because no rollup table carries the builder.
+- `GET /api/v1/builders?network=mainnet&range=24h` - Builders ranked by blocks produced, with block and blob volume and share, full blocks, MEV-Boost proposer payments, the spread of priority fees the blob transactions they included paid, how long those transactions waited, and how many eligible pending blob transactions they left out
+- `GET /api/v1/builders/{key}?network=mainnet&range=24h` - One builder's aggregates plus `users` (per attribution entity, with an `inclusion_index` comparing the entity's share on this builder against its share of the whole window), `skipped` (eligible pending transactions left out), and `recent_blocks`; 404 if the builder produced no indexed block in the window
+
+`skipped` counts and the `candidates` aggregates describe what **our node** saw pending and not included. Private order flow and slow blob propagation mean a candidate we saw may never have reached the builder, so present them as "visible to our node and not included" rather than as a builder decision.
 
 ### User Endpoints
 - `GET /api/v1/users?network=mainnet&limit=10&range=24h` - Top blob users by blobs submitted; `range` (`1h`, `24h`, `7d`, `30d`, `all`; default `all`) scopes counts, spend, and share percentages to a recent window and is echoed back as `meta.range`
@@ -95,7 +102,7 @@ The API can expose the same read-only data as a [Model Context Protocol](https:/
 
 - Transport: streamable HTTP (stateless, so any API replica can serve any request) at `mcp.path` (default `POST /mcp`) on the public listener.
 - Auth: `Authorization: Bearer <key>` (or `X-API-Key: <key>`). Unknown or missing keys get `401`. Keys are named principals; a single shared key is the intended way to give a group of people non-public access, and each key may optionally be restricted to a tool allowlist.
-- Tools loop back into the REST handlers in-process, so they return exactly the `/api/v1` payloads (`{"data": ..., "meta": ...}`) with the same caching and validation. Tools: `get_blob_market_overview` (one-call snapshot), `list_networks`, `get_indexer_status`, `get_blob_pricing`, `get_mempool_pressure`, `get_blob_stats`, `get_rolling_stats`, `get_blob_market_chart`, `get_attribution_usage_chart`, `get_cost_comparison_chart`, `get_blob_tips_chart`, `get_top_blob_users`, `get_entity`, `get_blob_records`, `get_latest_blobs`, `get_mempool_blobs`, `get_blob_replacements`, `get_block`, `get_blob_by_tx_hash`, `get_blob_by_versioned_hash`, `search`. One prompt, `explain_blob_market`, walks a model through a plain-language market explanation.
+- Tools loop back into the REST handlers in-process, so they return exactly the `/api/v1` payloads (`{"data": ..., "meta": ...}`) with the same caching and validation. Tools: `get_blob_market_overview` (one-call snapshot), `list_networks`, `get_indexer_status`, `get_blob_pricing`, `get_mempool_pressure`, `get_blob_stats`, `get_rolling_stats`, `get_blob_market_chart`, `get_attribution_usage_chart`, `get_cost_comparison_chart`, `get_blob_tips_chart`, `get_builder_share_chart`, `get_builders`, `get_builder`, `get_top_blob_users`, `get_entity`, `get_blob_records`, `get_latest_blobs`, `get_mempool_blobs`, `get_blob_replacements`, `get_block`, `get_blob_by_tx_hash`, `get_blob_by_versioned_hash`, `search`. One prompt, `explain_blob_market`, walks a model through a plain-language market explanation.
 - Limits: tool calls are rate limited per key (`mcp.rate_limit_rps` / `mcp.rate_limit_burst`); over-limit calls return a retryable tool error. Calls are logged with the key name and counted in the `blob_indexer_mcp_tool_calls_total` Prometheus metric.
 
 Configuration (the secret is normally supplied via `MCP_API_KEYS` rather than the file):
