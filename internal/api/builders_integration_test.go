@@ -383,6 +383,16 @@ func TestBuilderEndpointsAgainstRealPostgres(t *testing.T) {
 		if data.Skipped[1].Key != buildAddrSkip || data.Skipped[1].Blobs != 1 || data.Skipped[1].MaxTipGwei != "3" {
 			t.Errorf("skipped[1] = %+v", data.Skipped[1])
 		}
+		// The rows above are rebuilt from candidate detail that is pruned on
+		// a retention window, while builder.candidates sums permanent
+		// aggregates; skipped_detail_from says where the detail starts. Every
+		// seeded candidate sits on block 1000.
+		if data.SkippedDetailFrom == nil {
+			t.Fatal("expected skipped_detail_from alongside a skipped breakdown")
+		}
+		if !data.SkippedDetailFrom.Equal(base.Add(-30 * time.Minute)) {
+			t.Errorf("skipped_detail_from = %v, want %v", data.SkippedDetailFrom, base.Add(-30*time.Minute))
+		}
 
 		if len(data.RecentBlocks) != 3 {
 			t.Fatalf("expected 3 recent blocks, got %+v", data.RecentBlocks)
@@ -601,6 +611,108 @@ func TestBuilderEndpointsAgainstRealPostgres(t *testing.T) {
 	})
 }
 
+// A sender whose stored attribution changed inside the window must still
+// collapse to one entity row, the way /users?group=entity does: the address
+// is aggregated first and one attribution chosen for it, rather than each
+// transaction carrying the name it happened to be stored with. Otherwise the
+// builder's user rows, their shares and their entity links disagree with the
+// leaderboard the frontend shows beside them.
+func TestBuilderDetailGroupsEntitiesLikeUsers(t *testing.T) {
+	sqlxDB, _ := resetBuilderSchema(t, "api_builders_grouping")
+	base := time.Now().UTC().Truncate(time.Second)
+	const renamed = "0xRenamedSender"
+
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO block_metrics (chain_id, block_number, block_timestamp, blob_count, blob_params_max) VALUES
+			(1, 2000, $1, 1, 6),
+			(1, 2001, $2, 1, 6)
+	`, base.Add(-20*time.Minute), base.Add(-10*time.Minute)); err != nil {
+		t.Fatalf("seed block_metrics: %v", err)
+	}
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO block_builders (
+			chain_id, block_number, block_timestamp, fee_recipient, extra_data,
+			builder_key, builder_name, tx_count, candidate_snapshot,
+			pending_candidate_txs, eligible_skipped_txs, eligible_skipped_blobs
+		) VALUES
+			(1, 2000, $1, '0xTitanA', '0x67657468', 'titan', 'Titan', 10, TRUE, 1, 1, 1),
+			(1, 2001, $2, '0xTitanA', '0x67657468', 'titan', 'Titan', 10, TRUE, 1, 1, 1)
+	`, base.Add(-20*time.Minute), base.Add(-10*time.Minute)); err != nil {
+		t.Fatalf("seed block_builders: %v", err)
+	}
+
+	// One address, two blocks, two different stored attribution names — the
+	// registry renamed the rollup mid-window.
+	for _, row := range []struct {
+		block       int64
+		txHash      string
+		attribution string
+		at          time.Time
+	}{
+		{2000, "0xrenamed-a", "Old Rollup", base.Add(-20 * time.Minute)},
+		{2001, "0xrenamed-b", "New Rollup", base.Add(-10 * time.Minute)},
+	} {
+		if _, err := sqlxDB.Exec(`
+			INSERT INTO blobs (
+				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+				timestamp, max_fee_per_blob_gas, blob_gas_used,
+				max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas, first_seen_at, tx_index
+			) VALUES (1, $1, 0, $2, $3, $4, 131072, 10, 2, 1310720, $5, 12, 131072,
+				1000000000, 60000000000, 1000000000, $5, 1)
+		`, row.block, row.txHash, renamed, row.attribution, row.at); err != nil {
+			t.Fatalf("seed blob %s: %v", row.txHash, err)
+		}
+	}
+
+	// The same rename in the candidate detail behind `skipped`.
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO blob_inclusion_candidates (
+			chain_id, block_number, block_timestamp, tx_hash, from_address, user_attribution,
+			nonce, blob_count, max_priority_fee_per_gas, max_fee_per_gas, max_fee_per_blob_gas,
+			first_seen_at, reason
+		) VALUES
+			(1, 2000, $1, '0xskip-old', $3, 'Old Rollup', 1, 1, 2000000000, 50000000000, 20, $1, 'eligible'),
+			(1, 2001, $2, '0xskip-new', $3, 'New Rollup', 2, 1, 4000000000, 50000000000, 20, $2, 'eligible')
+	`, base.Add(-20*time.Minute), base.Add(-10*time.Minute), renamed); err != nil {
+		t.Fatalf("seed blob_inclusion_candidates: %v", err)
+	}
+
+	a := newBuilderTestAPI(sqlxDB)
+	w := httptest.NewRecorder()
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("key", "titan")
+	req := httptest.NewRequest(http.MethodGet, "/builders/titan?range=24h", http.NoBody)
+	a.GetBuilderByKey(w, req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	data := decodeBuilderDetail(t, w)
+
+	if len(data.Users) != 1 {
+		t.Fatalf("the address must collapse into one entity row, got %+v", data.Users)
+	}
+	user := data.Users[0]
+	// MAX() over the window's names picks 'Old Rollup', exactly as
+	// /users?group=entity's per-address aggregation does.
+	if user.Key != "old_rollup" || !user.IsEntity || user.Name != "Old Rollup" {
+		t.Errorf("user row identity = %+v", user)
+	}
+	if user.Blobs != 2 || user.TxCount != 2 {
+		t.Errorf("user volume = %+v, want both transactions on one row", user)
+	}
+	if user.ShareWithinBuilderPercent != 100 {
+		t.Errorf("share_within_builder_percent = %v, want 100", user.ShareWithinBuilderPercent)
+	}
+
+	if len(data.Skipped) != 1 {
+		t.Fatalf("the skipped breakdown must group by the same rule, got %+v", data.Skipped)
+	}
+	if data.Skipped[0].Key != "old_rollup" || data.Skipped[0].Txs != 2 {
+		t.Errorf("skipped row = %+v", data.Skipped[0])
+	}
+}
+
 // newBlockRequestForChain routes a /block/{number} request at chain 1, which
 // is what the integration fixtures seed.
 func newBlockRequestForChain(number string) *http.Request {
@@ -710,9 +822,11 @@ func TestBuilderQueryPlansStayOnRangeIndexes(t *testing.T) {
 		return text
 	}
 
-	// A sequential scan of either range table means the window bound is not
-	// being pushed into an index, which is the whole reason range=all is
-	// rejected.
+	// A sequential scan of any of these means the window bound is not being
+	// pushed into an index, which is the whole reason range=all is rejected.
+	// block_metrics is included because it has no timestamp index at all:
+	// only the block-number bounds the builder queries derive keep it off a
+	// full scan of the chain's history.
 	assertNoSeqScan := func(name, plan string, tables ...string) {
 		t.Helper()
 		for _, table := range tables {
@@ -723,10 +837,10 @@ func TestBuilderQueryPlansStayOnRangeIndexes(t *testing.T) {
 	}
 
 	plan := explain("builders 24h", queryBuilderAggregates, 1, start, end, "")
-	assertNoSeqScan("builders 24h", plan, "blobs", "block_builders")
+	assertNoSeqScan("builders 24h", plan, "blobs", "block_builders", "block_metrics")
 
 	plan = explain("builder detail 24h", queryBuilderAggregates, 1, start, end, "builder-1")
-	assertNoSeqScan("builder detail 24h", plan, "blobs", "block_builders")
+	assertNoSeqScan("builder detail 24h", plan, "blobs", "block_builders", "block_metrics")
 
 	plan = explain("builder users 24h", queryBuilderUsers, 1, start, end, "builder-1")
 	assertNoSeqScan("builder users 24h", plan, "blobs", "block_builders")
@@ -735,10 +849,16 @@ func TestBuilderQueryPlansStayOnRangeIndexes(t *testing.T) {
 	assertNoSeqScan("builder skipped 24h", plan, "block_builders", "blob_inclusion_candidates")
 
 	plan = explain("builder recent blocks", queryBuilderRecentBlocks, 1, start, end, "builder-1", builderRecentBlockLimit)
-	assertNoSeqScan("builder recent blocks", plan, "block_builders")
+	assertNoSeqScan("builder recent blocks", plan, "block_builders", "block_metrics")
 
 	plan = explain("builder-share chart 24h", queryBuilderShareTimeChart, 1, start, end, int64(3600), defaultBuilderSeriesLimit)
-	assertNoSeqScan("builder-share chart 24h", plan, "block_builders")
+	assertNoSeqScan("builder-share chart 24h", plan, "block_builders", "block_metrics")
+
+	plan = explain("builder-share chart by block", queryBuilderShareBlockChart, 1, start, end, defaultBuilderSeriesLimit)
+	assertNoSeqScan("builder-share chart by block", plan, "block_builders", "block_metrics")
+
+	plan = explain("builder skipped detail coverage", queryBuilderSkippedDetailFrom, 1, start, end)
+	assertNoSeqScan("builder skipped detail coverage", plan, "blob_inclusion_candidates")
 
 	// Sanity: the seeded window really is a small slice of the table, so the
 	// plans above were a meaningful test of selectivity.

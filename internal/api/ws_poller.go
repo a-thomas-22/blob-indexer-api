@@ -392,15 +392,24 @@ func (p *Poller) broadcastBlock(ctx context.Context, network config.NetworkConfi
 
 	// The builder row commits with the block's metrics, so a missing one
 	// means the backfill has not reached this height rather than a torn
-	// read. A query failure is not worth dropping the broadcast over: the
-	// block still carries its blobs and pricing.
+	// read — which is exactly why a failed read must not be broadcast as an
+	// absent builder: clients cannot tell the two apart, and the event is
+	// never repeated. Retry once, and if that fails too, fall through to the
+	// same handling as a metrics or blob failure: unmark the height so the
+	// trailing scan re-broadcasts it with its builder.
 	var builders []models.BlockBuilder
-	if err := p.db.SelectContext(queryCtx, &builders, queryBlockBuildersByBlockNumbers, network.ChainID, pq.Array([]int64{int64(blockNumber)})); err != nil {
-		logger.Warn("Poller: failed to query block builder for broadcast",
+	builderErr := p.db.SelectContext(queryCtx, &builders, queryBlockBuildersByBlockNumbers, network.ChainID, pq.Array([]int64{int64(blockNumber)}))
+	if builderErr != nil {
+		builders = nil
+		builderErr = p.db.SelectContext(queryCtx, &builders, queryBlockBuildersByBlockNumbers, network.ChainID, pq.Array([]int64{int64(blockNumber)}))
+	}
+	if builderErr != nil {
+		logger.Error("Poller: failed to query block builder for broadcast",
 			zap.String("network", network.Name),
 			zap.Uint64("block", blockNumber),
-			zap.Error(err))
-		builders = nil
+			zap.Error(builderErr))
+		delete(st.seen, blockNumber)
+		return false
 	}
 
 	pricing := toBlockPricingResponse(metric)

@@ -303,16 +303,29 @@ type BuilderRecentBlock struct {
 // /builders carries for the builder, plus who it included, who it left
 // pending, and its most recent blocks.
 type BuilderDetailResponse struct {
-	ChainID      int                  `json:"chain_id"`
-	NetworkName  string               `json:"network_name,omitempty"`
-	Range        string               `json:"range"`
-	Window       BuilderWindow        `json:"window"`
-	Totals       BuilderTotals        `json:"totals"`
-	GeneratedAt  time.Time            `json:"generated_at"`
-	Builder      BuilderStats         `json:"builder"`
-	Users        []BuilderUserRow     `json:"users"`
-	Skipped      []BuilderSkippedRow  `json:"skipped"`
-	RecentBlocks []BuilderRecentBlock `json:"recent_blocks"`
+	ChainID     int                 `json:"chain_id"`
+	NetworkName string              `json:"network_name,omitempty"`
+	Range       string              `json:"range"`
+	Window      BuilderWindow       `json:"window"`
+	Totals      BuilderTotals       `json:"totals"`
+	GeneratedAt time.Time           `json:"generated_at"`
+	Builder     BuilderStats        `json:"builder"`
+	Users       []BuilderUserRow    `json:"users"`
+	Skipped     []BuilderSkippedRow `json:"skipped"`
+	// SkippedDetailFrom is the oldest candidate observation still stored
+	// inside the window, and therefore the instant from which `skipped`
+	// covers anything at all.
+	//
+	// builder.candidates sums the permanent per-block aggregates in
+	// block_builders, but the per-entity `skipped` rows are rebuilt from
+	// blob_inclusion_candidates, which the indexer prunes on a retention
+	// window (about a week by default). On a 30d request the aggregate
+	// counts therefore describe the whole window while the breakdown
+	// describes only the part of it from this timestamp onward, and the two
+	// will not add up. Null when the window holds no candidate detail at
+	// all, which also makes an empty `skipped` list unsurprising.
+	SkippedDetailFrom *time.Time           `json:"skipped_detail_from"`
+	RecentBlocks      []BuilderRecentBlock `json:"recent_blocks"`
 }
 
 type builderUserRow struct {
@@ -527,7 +540,7 @@ func (a *API) GetBuilders(w http.ResponseWriter, r *http.Request) {
 
 // GetBuilderByKey godoc
 // @Summary Get one block builder's detail
-// @Description Retrieve one builder by the key /builders returns: the same aggregate object, plus who it included (per attribution entity, with an inclusion index comparing the entity's share on this builder against its share of the whole window), who it left pending while eligible, and its most recent blocks. 404 when the builder produced no indexed block in the window. range=all is not supported.
+// @Description Retrieve one builder by the key /builders returns: the same aggregate object, plus who it included (per attribution entity, with an inclusion index comparing the entity's share on this builder against its share of the whole window), who it left pending while eligible, and its most recent blocks. The per-entity skipped list is rebuilt from candidate rows the indexer prunes on a retention window (about a week by default), while builder.candidates sums permanent per-block aggregates, so on a longer range the list covers only part of the window: skipped_detail_from reports the instant it starts from, and is null when the window holds no candidate detail. 404 when the builder produced no indexed block in the window. range=all is not supported.
 // @Tags builders
 // @Accept json
 // @Produce json
@@ -596,9 +609,19 @@ func (a *API) GetBuilderByKey(w http.ResponseWriter, r *http.Request) {
 	a.respondSuccess(w, value)
 }
 
-// builderDetail assembles the four reads behind /builders/{key}. The
-// aggregate read runs first and short-circuits to errBuilderNotFound, so an
-// unknown key costs one query rather than four.
+// builderDetail assembles the reads behind /builders/{key}. The aggregate
+// read runs first and short-circuits to errBuilderNotFound, so an unknown
+// key costs one query rather than five.
+//
+// The reads are not wrapped in a transaction, so a block committing between
+// them can leave the response internally inconsistent by up to one block:
+// the aggregate can predate a commit the user rows already include, and a
+// reorg can move a block out from under a later read. The tear window is the
+// span of these queries — milliseconds — and the response cache and edge TTL
+// bound how long such a composite can be served, the same accepted bound the
+// entity and chart endpoints already carry. A serializable snapshot would
+// cost a transaction per request on the read path's hottest endpoints for an
+// inconsistency smaller than the cache staleness a client already tolerates.
 func (a *API) builderDetail(ctx context.Context, chainID int, networkName, key, rangeLabel string, start, end, generatedAt time.Time) (BuilderDetailResponse, error) {
 	var aggregates []builderAggregateRow
 	if err := a.db.SelectContext(ctx, &aggregates, queryBuilderAggregates, chainID, start, end, key); err != nil {
@@ -677,6 +700,17 @@ func (a *API) builderDetail(ctx context.Context, chainID int, networkName, key, 
 			skipped.P50TipGwei = gweiOrZero(p50)
 		}
 		response.Skipped = append(response.Skipped, skipped)
+	}
+
+	// How much of the window the rows above actually cover: candidate detail
+	// is pruned while the aggregates in builder.candidates are permanent.
+	var detailFrom sql.NullTime
+	if err := a.db.GetContext(ctx, &detailFrom, queryBuilderSkippedDetailFrom, chainID, start, end); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return BuilderDetailResponse{}, err
+	}
+	if detailFrom.Valid {
+		from := detailFrom.Time.UTC()
+		response.SkippedDetailFrom = &from
 	}
 
 	var blockRows []builderRecentBlockRow

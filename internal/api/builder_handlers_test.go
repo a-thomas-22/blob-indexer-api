@@ -298,8 +298,23 @@ func TestGetBuilders_DBTimeoutIs503(t *testing.T) {
 
 // builderDetailDB dispatches the four reads of /builders/{key} by destination
 // type, so a test only has to supply the rows it cares about.
-func builderDetailDB(aggregates []builderAggregateRow, users []builderUserRow, skipped []builderSkippedRow, blocks []builderRecentBlockRow) *mockDB {
+// detailFrom, when supplied, stands in for the oldest surviving candidate
+// observation the skipped-detail-coverage read returns.
+func builderDetailDB(aggregates []builderAggregateRow, users []builderUserRow, skipped []builderSkippedRow, blocks []builderRecentBlockRow, detailFrom ...time.Time) *mockDB {
 	return &mockDB{
+		getFn: func(_ context.Context, dest interface{}, query string, _ ...interface{}) error {
+			target, ok := dest.(*sql.NullTime)
+			if !ok {
+				return fmt.Errorf("unexpected get destination %T", dest)
+			}
+			if query != queryBuilderSkippedDetailFrom {
+				return fmt.Errorf("unexpected get query %q", query)
+			}
+			if len(detailFrom) > 0 {
+				*target = sql.NullTime{Time: detailFrom[0], Valid: true}
+			}
+			return nil
+		},
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
 			switch dest.(type) {
 			case *[]builderAggregateRow:
@@ -430,6 +445,42 @@ func TestGetBuilderByKey_Success(t *testing.T) {
 	if !data.RecentBlocks[0].CandidateSnapshot || data.RecentBlocks[0].EligibleSkippedTxs == nil {
 		t.Errorf("recent block snapshot fields = %+v", data.RecentBlocks[0])
 	}
+	// No candidate rows survive in the window, so the skipped breakdown
+	// covers none of it and the boundary is null rather than a made-up time.
+	if data.SkippedDetailFrom != nil {
+		t.Errorf("skipped_detail_from = %v, want null", data.SkippedDetailFrom)
+	}
+}
+
+// candidate rows are pruned while the block_builders aggregates behind
+// builder.candidates are permanent, so a long window mixes a full month of
+// counts with a week of detail. skipped_detail_from is what tells a client
+// where the detail actually starts.
+func TestGetBuilderByKey_ReportsSkippedDetailCoverage(t *testing.T) {
+	detailFrom := time.Date(2026, 6, 24, 9, 30, 0, 0, time.UTC)
+	db := builderDetailDB(
+		[]builderAggregateRow{sampleBuilderAggregateRow()},
+		nil,
+		[]builderSkippedRow{{Key: "other_rollup", Txs: 4, Blobs: 6}},
+		nil,
+		detailFrom,
+	)
+	a := newTestAPIWithDB(db)
+	w := httptest.NewRecorder()
+	a.GetBuilderByKey(w, builderKeyRequest("titan", "?range=30d"))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	data := decodeBuilderDetail(t, w)
+	if data.SkippedDetailFrom == nil || !data.SkippedDetailFrom.Equal(detailFrom) {
+		t.Fatalf("skipped_detail_from = %v, want %v", data.SkippedDetailFrom, detailFrom)
+	}
+	// The aggregate still describes the whole window; the two disagreeing is
+	// exactly what the boundary explains.
+	if data.Builder.Candidates == nil || data.Builder.Candidates.EligibleSkippedTxs == 0 {
+		t.Fatalf("expected the permanent aggregate alongside the pruned detail, got %+v", data.Builder.Candidates)
+	}
 }
 
 func TestGetBuilderByKey_NotFound(t *testing.T) {
@@ -527,11 +578,17 @@ func TestGetBuilderByKey_BadRangeAndNetwork(t *testing.T) {
 }
 
 func TestGetBuilderByKey_FollowUpQueryErrors(t *testing.T) {
-	// Each of the three follow-up reads must surface as a 500 rather than a
-	// partially populated payload.
-	for _, failOn := range []string{"users", "skipped", "blocks"} {
+	// Each follow-up read must surface as a 500 rather than a partially
+	// populated payload.
+	for _, failOn := range []string{"users", "skipped", "blocks", "detail_from"} {
 		t.Run(failOn, func(t *testing.T) {
 			db := &mockDB{
+				getFn: func(_ context.Context, _ interface{}, _ string, _ ...interface{}) error {
+					if failOn == "detail_from" {
+						return fmt.Errorf("db error")
+					}
+					return nil
+				},
 				selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
 					switch dest.(type) {
 					case *[]builderAggregateRow:

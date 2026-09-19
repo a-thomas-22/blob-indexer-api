@@ -190,9 +190,12 @@ components:
             data. Omitted for blocks with no builder row — blocks indexed
             before builder attribution existed, until the indexer's backfill
             reaches them. The row is written in the same transaction as the
-            block's metrics, so it is never half-present. `GET
-            /api/v1/block/{number}` carries the same object, plus a REST-only
-            `candidates` list that this event does not.
+            block's metrics, so it is never half-present, and a failed
+            builder read defers the whole event rather than publishing it
+            without this field: an omitted `builder` always means "no row",
+            never "the lookup failed". `GET /api/v1/block/{number}` carries
+            the same object, plus a REST-only `candidates` list that this
+            event does not.
     BlockBuilderResponse:
       type: object
       description: >-

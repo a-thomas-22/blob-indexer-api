@@ -148,6 +148,13 @@ func (a *API) buildBlockSnapshot(ctx context.Context, network config.NetworkConf
 
 	// Builder rows are optional: blocks the builder backfill has not reached
 	// simply carry no builder object, matching the live new_block event.
+	//
+	// This read gets its own snapshot, so a reorg committing between it and
+	// the reads above can pair one fork's metrics with another's builder for
+	// a block in the window. The tear window is the span of these three
+	// queries and the replacement block re-notifies over the same socket
+	// immediately after, so the client self-heals within a block — the same
+	// bound the REST endpoints accept.
 	var builders []models.BlockBuilder
 	if err := a.db.SelectContext(queryCtx, &builders, queryBlockBuildersByBlockNumbers, network.ChainID, pq.Array(blockNumbers)); err != nil {
 		return snapshot, err

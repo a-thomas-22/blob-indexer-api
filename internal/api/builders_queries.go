@@ -23,6 +23,31 @@ import "fmt"
 // values reach 1e18 wei, past the 2^53 boundary where a double detour would
 // round, and a discrete median is an actually-observed payment.
 
+// block_metrics carries no timestamp index — only its primary key
+// (chain_id, block_number) and (chain_id, block_number DESC) — so a join
+// that constrains block_builders by timestamp alone leaves the planner free
+// to hash the whole chain's metrics history against the window's handful of
+// builder rows, which it does. builderBlockNumberBoundsSQL derives the
+// window's block-number extent from the already-materialized builder rows,
+// and builderMetricsBlockBoundSQL feeds it back as scalar sub-selects: those
+// evaluate once as InitPlan parameters and are usable as index bounds, so
+// block_metrics is reached by a primary-key range scan over the window
+// instead of a sequential scan. The bounds CTE must follow a CTE named
+// range_builder_blocks holding the window's builder rows.
+//
+// An empty window yields NULL bounds, which makes the predicate NULL: the
+// LEFT JOIN then matches nothing, which is the same answer an empty window
+// would have produced anyway.
+const builderBlockNumberBoundsSQL = `
+	range_block_bounds AS (
+		SELECT MIN(block_number) AS min_block, MAX(block_number) AS max_block
+		FROM range_builder_blocks
+	),`
+
+const builderMetricsBlockBoundSQL = `
+			AND bm.block_number >= (SELECT min_block FROM range_block_bounds)
+			AND bm.block_number <= (SELECT max_block FROM range_block_bounds)`
+
 // builderTxSourceSQL collapses the range's confirmed blob rows to one row per
 // transaction — the unit tips and inclusion latency are measured in — keyed
 // by block so the callers can attach the builder. The columns are constant
@@ -54,7 +79,7 @@ var queryBuilderAggregates = `
 	WITH bounds AS (
 		SELECT $2::timestamp AS range_start, $3::timestamp AS range_end
 	),
-	range_blocks AS MATERIALIZED (
+	range_builder_blocks AS MATERIALIZED (
 		SELECT
 			bb.block_number,
 			bb.block_timestamp,
@@ -65,17 +90,24 @@ var queryBuilderAggregates = `
 			bb.candidate_snapshot,
 			bb.eligible_skipped_txs,
 			bb.eligible_skipped_blobs,
-			bb.eligible_skipped_max_tip,
-			COALESCE(bm.blob_count, 0) AS blob_count,
-			bm.blob_params_max
+			bb.eligible_skipped_max_tip
 		FROM bounds b
 		JOIN block_builders bb
 			ON bb.chain_id = $1
 			AND bb.block_timestamp >= b.range_start
 			AND bb.block_timestamp < b.range_end
+	),
+	` + builderBlockNumberBoundsSQL + `
+	range_blocks AS MATERIALIZED (
+		SELECT
+			rb.*,
+			COALESCE(bm.blob_count, 0) AS blob_count,
+			bm.blob_params_max
+		FROM range_builder_blocks rb
 		LEFT JOIN block_metrics bm
 			ON bm.chain_id = $1
-			AND bm.block_number = bb.block_number
+			AND bm.block_number = rb.block_number
+			` + builderMetricsBlockBoundSQL + `
 	),
 	totals AS (
 		SELECT
@@ -147,6 +179,9 @@ var queryBuilderAggregates = `
 			builder_key,
 			COUNT(priority_fee)::bigint AS tip_tx_count,
 			MIN(priority_fee)::text AS tip_min_wei,
+			-- Cast to double for percentile_cont: an execution-layer tip is a
+			-- few gwei, orders of magnitude below the 2^53 boundary where a
+			-- double loses wei, unlike the proposer payments above.
 			(percentile_cont(0.10) WITHIN GROUP (ORDER BY priority_fee::double precision))::numeric::text AS tip_p10_wei,
 			(percentile_cont(0.50) WITHIN GROUP (ORDER BY priority_fee::double precision))::numeric::text AS tip_p50_wei,
 			(percentile_cont(0.90) WITHIN GROUP (ORDER BY priority_fee::double precision))::numeric::text AS tip_p90_wei,
@@ -190,17 +225,44 @@ var queryBuilderAggregates = `
 	ORDER BY bs.blocks DESC, bs.builder_key ASC
 `
 
+// builderAddressAttributionSQL picks one attribution per sender address the
+// way /users?group=entity does (queries.go, user_totals): every row of the
+// address in the window is folded into a single name before any entity slug
+// is derived, so an address whose stored attribution changed mid-window
+// still collapses to exactly one row instead of splitting into one entity
+// per name it carried. The stored per-row attribution wins over the
+// blob_users registry name, matching the per-address COALESCE there.
+//
+// It expects a source CTE exposing from_address, row_attribution and
+// known_name, and produces address_attribution.
+func builderAddressAttributionSQL(source string) string {
+	return `
+	address_attribution AS (
+		SELECT
+			from_address,
+			COALESCE(
+				NULLIF(MAX(BTRIM(row_attribution)), ''),
+				NULLIF(MAX(BTRIM(known_name)), ''),
+				''
+			) AS attribution
+		FROM ` + source + `
+		GROUP BY from_address
+	)`
+}
+
 // builderEntityKeyedTxsSQL keys the range's blob transactions by attribution
-// entity using the /users group=entity rule: an attributed sender collapses
-// into its entity slug, an unattributed one stays keyed by its own address.
-// It expects a bounds CTE and produces keyed_txs.
+// entity using the /users group=entity rule: the sender's window-wide
+// attribution (builderAddressAttributionSQL) decides the key, an attributed
+// sender collapses into its entity slug, and an unattributed one stays keyed
+// by its own address. It expects a bounds CTE and produces keyed_txs.
 var builderEntityKeyedTxsSQL = `
 	range_blob_rows AS MATERIALIZED (
 		SELECT
 			bl.block_number,
 			bl.tx_hash,
 			bl.from_address,
-			COALESCE(NULLIF(BTRIM(bl.user_attribution), ''), NULLIF(BTRIM(ku.name), ''), '') AS attribution,
+			bl.user_attribution AS row_attribution,
+			ku.name AS known_name,
 			bl.priority_fee_per_gas,
 			bl.first_seen_at
 		FROM bounds b
@@ -212,12 +274,12 @@ var builderEntityKeyedTxsSQL = `
 			ON ku.chain_id = bl.chain_id
 			AND LOWER(ku.address) = LOWER(bl.from_address)
 	),
+	` + builderAddressAttributionSQL("range_blob_rows") + `,
 	range_txs AS (
 		SELECT
 			block_number,
 			tx_hash,
 			MIN(from_address) AS from_address,
-			MIN(attribution) AS attribution,
 			COUNT(*)::bigint AS blob_count,
 			MIN(priority_fee_per_gas) AS priority_fee,
 			MIN(first_seen_at) AS first_seen_at
@@ -228,15 +290,16 @@ var builderEntityKeyedTxsSQL = `
 		SELECT
 			CASE WHEN slug.entity_slug = '' THEN t.from_address ELSE slug.entity_slug END AS group_key,
 			(slug.entity_slug <> '') AS is_entity,
-			t.attribution,
+			a.attribution,
 			t.from_address,
 			t.block_number,
 			t.blob_count,
 			t.priority_fee,
 			t.first_seen_at
 		FROM range_txs t
+		JOIN address_attribution a ON a.from_address = t.from_address
 		CROSS JOIN LATERAL (
-			SELECT COALESCE(NULLIF(` + entityKeySQL("t.attribution") + `, ''), '') AS entity_slug
+			SELECT COALESCE(NULLIF(` + entityKeySQL("a.attribution") + `, ''), '') AS entity_slug
 		) slug
 	)
 `
@@ -283,6 +346,9 @@ var queryBuilderUsers = `
 			bool_or(is_entity) AS is_entity,
 			SUM(blob_count)::bigint AS blobs,
 			COUNT(*)::bigint AS tx_count,
+			-- Cast to double for percentile_cont: an execution-layer tip is a
+			-- few gwei, orders of magnitude below the 2^53 boundary where a
+			-- double loses wei, unlike the proposer payments above.
 			(percentile_cont(0.5) WITHIN GROUP (ORDER BY priority_fee::double precision))::numeric::text AS tip_p50_wei,
 			COUNT(first_seen_at)::bigint AS inclusion_sample_count,
 			percentile_cont(0.5) WITHIN GROUP (
@@ -340,11 +406,12 @@ var queryBuilderSkipped = `
 			AND bb.block_timestamp >= b.range_start
 			AND bb.block_timestamp < b.range_end
 	),
-	candidates AS (
+	candidates AS MATERIALIZED (
 		SELECT
 			c.tx_hash,
 			c.from_address,
-			COALESCE(NULLIF(BTRIM(c.user_attribution), ''), NULLIF(BTRIM(ku.name), ''), '') AS attribution,
+			c.user_attribution AS row_attribution,
+			ku.name AS known_name,
 			c.blob_count,
 			c.max_priority_fee_per_gas
 		FROM bounds b
@@ -358,17 +425,19 @@ var queryBuilderSkipped = `
 			ON ku.chain_id = $1
 			AND LOWER(ku.address) = LOWER(c.from_address)
 	),
+	` + builderAddressAttributionSQL("candidates") + `,
 	keyed AS (
 		SELECT
 			CASE WHEN slug.entity_slug = '' THEN c.from_address ELSE slug.entity_slug END AS group_key,
 			(slug.entity_slug <> '') AS is_entity,
-			c.attribution,
+			a.attribution,
 			c.from_address,
 			c.blob_count,
 			c.max_priority_fee_per_gas
 		FROM candidates c
+		JOIN address_attribution a ON a.from_address = c.from_address
 		CROSS JOIN LATERAL (
-			SELECT COALESCE(NULLIF(` + entityKeySQL("c.attribution") + `, ''), '') AS entity_slug
+			SELECT COALESCE(NULLIF(` + entityKeySQL("a.attribution") + `, ''), '') AS entity_slug
 		) slug
 	)
 	SELECT
@@ -378,10 +447,33 @@ var queryBuilderSkipped = `
 		COUNT(*)::bigint AS txs,
 		COALESCE(SUM(blob_count), 0)::bigint AS blobs,
 		MAX(max_priority_fee_per_gas)::text AS max_tip_wei,
+		-- Same lossless-in-practice double cast as the leaderboard tips.
 		(percentile_cont(0.5) WITHIN GROUP (ORDER BY max_priority_fee_per_gas::double precision))::numeric::text AS p50_tip_wei
 	FROM keyed
 	GROUP BY group_key
 	ORDER BY blobs DESC, key ASC
+`
+
+// queryBuilderSkippedDetailFrom is the earliest candidate row still held for
+// the chain inside the requested window. block_builders' skipped aggregates
+// are permanent, but the blob_inclusion_candidates rows the per-entity
+// `skipped` list is rebuilt from are pruned on a retention window, so a 30d
+// response can carry a month of aggregate counts over a week of detail.
+// Reporting the boundary lets a client say which part of the window the
+// detail actually covers instead of silently under-reporting it.
+//
+// It is chain-wide rather than builder-scoped on purpose: pruning is a
+// chain-wide clock, so the oldest surviving row bounds every builder's
+// detail. The (chain_id, block_timestamp) index turns the MIN into a single
+// ordered index probe.
+//
+// Args: $1 chain id, $2 range start, $3 range end.
+var queryBuilderSkippedDetailFrom = `
+	SELECT MIN(block_timestamp)
+	FROM blob_inclusion_candidates
+	WHERE chain_id = $1
+		AND block_timestamp >= $2
+		AND block_timestamp < $3
 `
 
 // builderRecentBlockLimit is how many of a builder's most recent blocks the
@@ -571,24 +663,34 @@ var queryBuilderShareTimeChart = `
 		) AS g(bucket_start)
 		WHERE b.range_end > b.range_start
 	),
-	builder_rows AS MATERIALIZED (
+	range_builder_blocks AS MATERIALIZED (
 		SELECT
 			TIMESTAMP 'epoch' + (
 				FLOOR(EXTRACT(EPOCH FROM bb.block_timestamp) / $4::numeric)::bigint
 				* $4::bigint
 				* INTERVAL '1 second'
 			) AS bucket_start,
+			bb.block_number,
 			bb.builder_key,
-			bb.builder_name,
-			COALESCE(bm.blob_count, 0) AS blob_count
+			bb.builder_name
 		FROM bounds b
 		JOIN block_builders bb
 			ON bb.chain_id = $1
 			AND bb.block_timestamp >= b.range_start
 			AND bb.block_timestamp < b.range_end
+	),
+	` + builderBlockNumberBoundsSQL + `
+	builder_rows AS MATERIALIZED (
+		SELECT
+			rb.bucket_start,
+			rb.builder_key,
+			rb.builder_name,
+			COALESCE(bm.blob_count, 0) AS blob_count
+		FROM range_builder_blocks rb
 		LEFT JOIN block_metrics bm
 			ON bm.chain_id = $1
-			AND bm.block_number = bb.block_number
+			AND bm.block_number = rb.block_number
+			` + builderMetricsBlockBoundSQL + `
 	),
 ` + builderShareSeriesSQL("$5") + fmt.Sprintf(builderShareSelectSQL, "NULL::bigint", "b.bucket_start ASC")
 
@@ -599,10 +701,12 @@ var queryBuilderShareBlockChart = `
 	WITH bounds AS (
 		SELECT $2::timestamp AS range_start, $3::timestamp AS range_end
 	),
-	buckets AS (
+	range_builder_blocks AS MATERIALIZED (
 		SELECT
 			bb.block_number,
 			bb.block_timestamp AS bucket_start,
+			bb.builder_key,
+			bb.builder_name,
 			b.range_start,
 			b.range_end
 		FROM bounds b
@@ -611,18 +715,24 @@ var queryBuilderShareBlockChart = `
 			AND bb.block_timestamp >= b.range_start
 			AND bb.block_timestamp < b.range_end
 	),
+	-- One bucket per block, and each block's builder already came out of the
+	-- scan above: re-joining block_builders by block number here would only
+	-- buy the planner an excuse to scan the whole table again.
+	buckets AS (
+		SELECT block_number, bucket_start, range_start, range_end
+		FROM range_builder_blocks
+	),
+	` + builderBlockNumberBoundsSQL + `
 	builder_rows AS MATERIALIZED (
 		SELECT
-			bu.bucket_start,
-			bb.builder_key,
-			bb.builder_name,
+			rb.bucket_start,
+			rb.builder_key,
+			rb.builder_name,
 			COALESCE(bm.blob_count, 0) AS blob_count
-		FROM buckets bu
-		JOIN block_builders bb
-			ON bb.chain_id = $1
-			AND bb.block_number = bu.block_number
+		FROM range_builder_blocks rb
 		LEFT JOIN block_metrics bm
 			ON bm.chain_id = $1
-			AND bm.block_number = bu.block_number
+			AND bm.block_number = rb.block_number
+			` + builderMetricsBlockBoundSQL + `
 	),
 ` + builderShareSeriesSQL("$4") + fmt.Sprintf(builderShareSelectSQL, "b.block_number", "b.block_number ASC")

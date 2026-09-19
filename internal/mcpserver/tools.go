@@ -367,7 +367,7 @@ var toolSpecs = []toolSpec{
 	{
 		name:        toolGetBuilder,
 		title:       "Builder detail",
-		description: "Detail for one block builder: its aggregates over the window plus which senders it included (with an inclusion index comparing the sender's share on this builder against its share of the whole market), which eligible pending transactions it left out, and its most recent blocks.",
+		description: "Detail for one block builder: its aggregates over the window plus which senders it included (with an inclusion index comparing the sender's share on this builder against its share of the whole market), which eligible pending transactions it left out, and its most recent blocks. The per-sender skipped list is rebuilt from candidate rows that are pruned after about a week, while builder.candidates sums permanent aggregates, so on a longer range the two do not add up: skipped_detail_from says when the breakdown starts covering the window.",
 		register: registerTool(func(in builderInput) (string, url.Values, error) {
 			key, err := requirePathValue("key", in.Key)
 			if err != nil {

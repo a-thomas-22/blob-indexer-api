@@ -52,7 +52,9 @@ The Blob Indexer API continuously indexes new blocks and pending blob transactio
 ### Builder Endpoints
 Who builds the blocks blobs land in, and how each builder behaves. `range` accepts `1h`, `24h`, `7d`, or `30d` and defaults to `24h`; `all` is rejected, because no rollup table carries the builder.
 - `GET /api/v1/builders?network=mainnet&range=24h` - Builders ranked by blocks produced, with block and blob volume and share, full blocks, MEV-Boost proposer payments, the spread of priority fees the blob transactions they included paid, how long those transactions waited, and how many eligible pending blob transactions they left out
-- `GET /api/v1/builders/{key}?network=mainnet&range=24h` - One builder's aggregates plus `users` (per attribution entity, with an `inclusion_index` comparing the entity's share on this builder against its share of the whole window), `skipped` (eligible pending transactions left out), and `recent_blocks`; 404 if the builder produced no indexed block in the window
+- `GET /api/v1/builders/{key}?network=mainnet&range=24h` - One builder's aggregates plus `users` (per attribution entity, with an `inclusion_index` comparing the entity's share on this builder against its share of the whole window), `skipped` (eligible pending transactions left out), `skipped_detail_from`, and `recent_blocks`; 404 if the builder produced no indexed block in the window
+
+`builder.candidates` sums permanent per-block aggregates, but the `skipped` breakdown is rebuilt from `blob_inclusion_candidates` rows that are pruned after `indexer.candidate_retention` (about a week by default). On a 7d or 30d window the two will not add up: `skipped_detail_from` is the oldest candidate observation left inside the window — the instant the breakdown starts covering — and is null when none survive.
 
 `skipped` counts and the `candidates` aggregates describe what **our node** saw pending and not included. Private order flow and slow blob propagation mean a candidate we saw may never have reached the builder, so present them as "visible to our node and not included" rather than as a builder decision.
 
