@@ -96,6 +96,27 @@ type BlobResponse struct {
 	// no slot exists until inclusion — and for networks whose beacon genesis
 	// time is not configured.
 	Slot *uint64 `json:"slot,omitempty" example:"11813607"`
+	// TxIndex is the carrying transaction's position in its block. Omitted
+	// for pending (mempool) blobs, which have no position until inclusion,
+	// and for confirmed rows indexed before it was stored that no backfill
+	// or reindex has revisited.
+	TxIndex *int `json:"tx_index,omitempty" example:"12"`
+	// FirstSeenAt is when the indexer first saw the transaction pending. For
+	// pending blobs it is the row's own first-seen time; for confirmed ones
+	// it is that time carried over when the block promoted the row. Omitted
+	// when the transaction was never observed pending (indexed from history,
+	// or it arrived with its block) and for rows indexed before it was
+	// stored.
+	FirstSeenAt *time.Time `json:"first_seen_at,omitempty"`
+	// TimeToInclusionMs is how long the transaction waited: the including
+	// block's timestamp minus first_seen_at. Omitted for pending blobs and
+	// whenever first_seen_at is.
+	//
+	// It CAN BE NEGATIVE. A block's timestamp is its slot start, so a
+	// transaction our node first saw after that instant but which still made
+	// the block yields a negative wait. That is real information — the
+	// builder had it before we did — so it is reported rather than clamped.
+	TimeToInclusionMs *int64 `json:"time_to_inclusion_ms,omitempty" example:"4200"`
 }
 
 // BlobReplacementResponse is one observed replacement event: a pending blob
@@ -111,6 +132,18 @@ type BlobReplacementResponse struct {
 	FromAddress       string    `json:"from_address"`
 	Nonce             int64     `json:"nonce"`
 	ReplacedAt        time.Time `json:"replaced_at"`
+	// Fee context of both sides of the bump, in wei as decimal strings with
+	// gwei companions, plus when the replaced transaction was first seen
+	// pending. All omitted on events recorded before these were stored.
+	ReplacedMaxPriorityFeePerGas        *string    `json:"replaced_max_priority_fee_per_gas,omitempty" example:"1000000000"`
+	ReplacedMaxPriorityFeePerGasGwei    string     `json:"replaced_max_priority_fee_per_gas_gwei,omitempty" example:"1"`
+	ReplacedMaxFeePerBlobGas            *string    `json:"replaced_max_fee_per_blob_gas,omitempty" example:"2000000000"`
+	ReplacedMaxFeePerBlobGasGwei        string     `json:"replaced_max_fee_per_blob_gas_gwei,omitempty" example:"2"`
+	ReplacedFirstSeenAt                 *time.Time `json:"replaced_first_seen_at,omitempty"`
+	ReplacementMaxPriorityFeePerGas     *string    `json:"replacement_max_priority_fee_per_gas,omitempty" example:"3000000000"`
+	ReplacementMaxPriorityFeePerGasGwei string     `json:"replacement_max_priority_fee_per_gas_gwei,omitempty" example:"3"`
+	ReplacementMaxFeePerBlobGas         *string    `json:"replacement_max_fee_per_blob_gas,omitempty" example:"4000000000"`
+	ReplacementMaxFeePerBlobGasGwei     string     `json:"replacement_max_fee_per_blob_gas_gwei,omitempty" example:"4"`
 }
 
 // BlockPricingResponse represents block-level blob pricing data
@@ -284,9 +317,27 @@ func toBlobResponse(blob models.Blob, network config.NetworkConfig) BlobResponse
 		MaxFeePerGasGwei:         formatOptionalWeiAsGwei(blob.MaxFeePerGas),
 		PriorityFeePerGas:        blob.PriorityFeePerGas,
 		PriorityFeePerGasGwei:    formatOptionalWeiAsGwei(blob.PriorityFeePerGas),
+
+		TxIndex:     blob.TxIndex,
+		FirstSeenAt: blob.FirstSeenAt,
 	}
+	response.TimeToInclusionMs = blobTimeToInclusionMs(blob)
 	response.RealizedCostWei, response.MaxCostWei, response.HeadroomWei, response.HeadroomPercent = deriveBlobCostFields(blob)
 	return response
+}
+
+// blobTimeToInclusionMs derives how long a confirmed blob's transaction
+// waited: its block timestamp (the row's timestamp, which for confirmed rows
+// is the block's) minus the first time the indexer saw it pending. Pending
+// rows project their own first-seen time into first_seen_at, so the
+// difference there would be a constant zero and is omitted instead. The
+// result is deliberately signed; see BlobResponse.TimeToInclusionMs.
+func blobTimeToInclusionMs(blob models.Blob) *int64 {
+	if !blob.Confirmed || blob.FirstSeenAt == nil {
+		return nil
+	}
+	ms := blob.Timestamp.Sub(*blob.FirstSeenAt).Milliseconds()
+	return &ms
 }
 
 // blobSlot resolves a blob's beacon slot: the stored index-time value when
@@ -719,6 +770,16 @@ func (a *API) GetBlobReplacements(w http.ResponseWriter, r *http.Request) {
 			FromAddress:       e.FromAddress,
 			Nonce:             e.Nonce,
 			ReplacedAt:        e.ReplacedAt,
+
+			ReplacedMaxPriorityFeePerGas:        e.ReplacedMaxPriorityFeePerGas,
+			ReplacedMaxPriorityFeePerGasGwei:    formatOptionalWeiAsGwei(e.ReplacedMaxPriorityFeePerGas),
+			ReplacedMaxFeePerBlobGas:            e.ReplacedMaxFeePerBlobGas,
+			ReplacedMaxFeePerBlobGasGwei:        formatOptionalWeiAsGwei(e.ReplacedMaxFeePerBlobGas),
+			ReplacedFirstSeenAt:                 e.ReplacedFirstSeenAt,
+			ReplacementMaxPriorityFeePerGas:     e.ReplacementMaxPriorityFeePerGas,
+			ReplacementMaxPriorityFeePerGasGwei: formatOptionalWeiAsGwei(e.ReplacementMaxPriorityFeePerGas),
+			ReplacementMaxFeePerBlobGas:         e.ReplacementMaxFeePerBlobGas,
+			ReplacementMaxFeePerBlobGasGwei:     formatOptionalWeiAsGwei(e.ReplacementMaxFeePerBlobGas),
 		})
 	}
 	a.respondSuccess(w, response)

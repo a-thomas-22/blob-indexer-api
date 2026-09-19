@@ -33,6 +33,8 @@ const blobSelectColumns = `
 	max_priority_fee_per_gas,
 	max_fee_per_gas,
 	priority_fee_per_gas,
+	first_seen_at,
+	tx_index,
 	ARRAY(
 		SELECT b2.versioned_hash FROM blobs b2
 		WHERE b2.chain_id = blobs.chain_id AND b2.tx_hash = blobs.tx_hash
@@ -69,12 +71,31 @@ const mempoolBlobSelectColumns = `
 	max_priority_fee_per_gas,
 	max_fee_per_gas,
 	priority_fee_per_gas,
+	timestamp AS first_seen_at,
+	NULL::int AS tx_index,
 	ARRAY(
 		SELECT m2.versioned_hash FROM mempool_blobs m2
 		WHERE m2.chain_id = mempool_blobs.chain_id AND m2.tx_hash = mempool_blobs.tx_hash
 			AND m2.versioned_hash IS NOT NULL
 		ORDER BY m2.blob_index
 	) AS versioned_hashes
+`
+
+// blobReplacementSelectColumns projects blob_replacements rows into the
+// models.BlobReplacement shape. The five fee-context columns were added by
+// migration 000017 and are NULL on rows written before it, so every consumer
+// treats them as optional.
+const blobReplacementSelectColumns = `
+	replaced_tx_hash,
+	replacement_tx_hash,
+	from_address,
+	nonce,
+	replaced_at,
+	replaced_max_priority_fee_per_gas,
+	replaced_max_fee_per_blob_gas,
+	replaced_first_seen_at,
+	replacement_max_priority_fee_per_gas,
+	replacement_max_fee_per_blob_gas
 `
 
 const blockMetricsSelectColumns = `
@@ -1157,7 +1178,7 @@ const (
 
 	// queryBlobReplacements lists observed replacement events, newest first.
 	queryBlobReplacements = `
-		SELECT replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at
+		SELECT ` + blobReplacementSelectColumns + `
 		FROM blob_replacements
 		WHERE chain_id = $1
 		ORDER BY replaced_at DESC
@@ -1167,7 +1188,7 @@ const (
 	// queryBlobReplacementsByTxHash resolves the replacement events touching
 	// one transaction hash, on either side of the replacement.
 	queryBlobReplacementsByTxHash = `
-		SELECT replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at
+		SELECT ` + blobReplacementSelectColumns + `
 		FROM blob_replacements
 		WHERE chain_id = $1 AND (replaced_tx_hash = $2 OR replacement_tx_hash = $2)
 		ORDER BY replaced_at DESC
@@ -1652,6 +1673,8 @@ const (
 			page.max_priority_fee_per_gas,
 			page.max_fee_per_gas,
 			page.priority_fee_per_gas,
+			page.first_seen_at,
+			page.tx_index,
 			ARRAY(
 				SELECT b2.versioned_hash FROM blobs b2
 				WHERE b2.chain_id = page.chain_id AND b2.tx_hash = page.tx_hash
@@ -1666,7 +1689,8 @@ const (
 					user_attribution, blob_size_bytes, base_fee_per_blob_gas,
 					tip_per_blob_gas, total_cost_wei, timestamp,
 					max_fee_per_blob_gas, blob_gas_used, versioned_hash, slot,
-					max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas
+					max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas,
+					first_seen_at, tx_index
 				FROM blobs
 				WHERE chain_id = $1 AND from_address = addr.from_address
 				ORDER BY timestamp DESC, blob_index ASC

@@ -433,6 +433,14 @@ func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) 
 		// takes the same aggregate rate limit.
 		r.With(aggregateLimit).Get("/entities/{key}", a.GetEntityByKey)
 
+		// Builder endpoints: block-builder leaderboard and detail. Both scan
+		// block_builders and blobs over a bounded window, so they take the
+		// aggregate rate limit like the charts.
+		r.Route("/builders", func(r chi.Router) {
+			r.With(aggregateLimit).Get("/", a.GetBuilders)
+			r.With(aggregateLimit).Get("/{key}", a.GetBuilderByKey)
+		})
+
 		// Records endpoint: historical leaderboards. Every list is a top-N
 		// read over incrementally maintained summaries, but it is four of them
 		// per request, so it takes the aggregate rate limit.
@@ -450,6 +458,7 @@ func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) 
 			r.With(aggregateLimit).Get("/attribution-usage", a.GetAttributionUsageChart)
 			r.With(aggregateLimit).Get("/cost-comparison", a.GetCostComparisonChart)
 			r.With(aggregateLimit).Get("/blob-tips", a.GetBlobTipsChart)
+			r.With(aggregateLimit).Get("/builder-share", a.GetBuilderShareChart)
 			r.With(aggregateLimit).Get("/rolling-stats", a.GetRollingStatsChart)
 		})
 

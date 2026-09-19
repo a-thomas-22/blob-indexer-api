@@ -146,11 +146,23 @@ func (a *API) buildBlockSnapshot(ctx context.Context, network config.NetworkConf
 		blobsByBlock[blob.BlockNumber] = append(blobsByBlock[blob.BlockNumber], toBlobResponse(blob, network))
 	}
 
+	// Builder rows are optional: blocks the builder backfill has not reached
+	// simply carry no builder object, matching the live new_block event.
+	var builders []models.BlockBuilder
+	if err := a.db.SelectContext(queryCtx, &builders, queryBlockBuildersByBlockNumbers, network.ChainID, pq.Array(blockNumbers)); err != nil {
+		return snapshot, err
+	}
+	buildersByBlock := blockBuildersByNumber(builders)
+
 	for _, metric := range metrics {
 		pricing := toBlockPricingResponse(metric)
 		brs := blobsByBlock[metric.BlockNumber]
 		if brs == nil {
 			brs = []BlobResponse{}
+		}
+		var builder *BlockBuilderResponse
+		if response, ok := buildersByBlock[metric.BlockNumber]; ok {
+			builder = &response
 		}
 		snapshot.Blocks = append(snapshot.Blocks, NewBlockData{
 			BlockNumber: metric.BlockNumber,
@@ -158,6 +170,7 @@ func (a *API) buildBlockSnapshot(ctx context.Context, network config.NetworkConf
 			Timestamp:   metric.BlockTimestamp,
 			Blobs:       brs,
 			Pricing:     &pricing,
+			Builder:     builder,
 		})
 	}
 	return snapshot, nil

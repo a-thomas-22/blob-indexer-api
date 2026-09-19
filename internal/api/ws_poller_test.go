@@ -93,6 +93,8 @@ type pollerBlockDB struct {
 	metricsErr    error
 	blobsFor      map[uint64][]models.Blob
 	blobsErr      error
+	buildersFor   map[uint64][]models.BlockBuilder
+	buildersErr   error
 }
 
 func (p *pollerBlockDB) mock() *mockDB {
@@ -136,6 +138,22 @@ func (p *pollerBlockDB) mock() *mockDB {
 				*dest.(*[]models.Blob) = append([]models.Blob(nil), p.blobsFor[args[1].(uint64)]...)
 			case queryTopBlobUsersAllByCount:
 				*dest.(*[]models.BlobUserStats) = []models.BlobUserStats{}
+			}
+			return nil
+		},
+		builderSelectFn: func(_ context.Context, dest interface{}, _ string, args ...interface{}) error {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			out, ok := dest.(*[]models.BlockBuilder)
+			if !ok {
+				return nil
+			}
+			if p.buildersErr != nil {
+				return p.buildersErr
+			}
+			nums := args[1].(*pq.Int64Array)
+			for _, n := range *nums {
+				*out = append(*out, p.buildersFor[uint64(n)]...)
 			}
 			return nil
 		},
@@ -388,6 +406,74 @@ func TestPoller_NotificationBroadcastsBlock(t *testing.T) {
 	}
 	if st.head != 101 {
 		t.Fatalf("head should advance to 101, got %d", st.head)
+	}
+}
+
+// The new_block payload carries the builder that produced the block when the
+// row exists, and stays a valid broadcast when it does not.
+func TestPoller_BroadcastCarriesBuilder(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+	client := registerTestClient(t, hub)
+
+	blockDB := &pollerBlockDB{
+		metricsFor:  map[uint64][]models.BlockMetrics{101: metricsRow(101, 1)},
+		blobsFor:    map[uint64][]models.Blob{101: {blobRow(101, "0xaaa")}},
+		buildersFor: map[uint64][]models.BlockBuilder{101: {testBlockBuilderRow(101)}},
+	}
+	poller := NewPoller(blockDB.mock(), hub, testNetworks(), time.Hour, time.Hour)
+	st := poller.chainState(11155111)
+	st.baselined = true
+	st.head = 100
+
+	poller.handleNotification(context.Background(), `{"chain_id":11155111,"block_number":101}`)
+
+	events := drainEvents(client, 50*time.Millisecond)
+	var builder *BlockBuilderResponse
+	for _, event := range events {
+		if event.Type != EventNewBlock {
+			continue
+		}
+		var payload NewBlockData
+		raw, err := json.Marshal(event.Data)
+		if err != nil {
+			t.Fatalf("marshal event: %v", err)
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatalf("unmarshal new_block: %v", err)
+		}
+		builder = payload.Builder
+	}
+	if builder == nil || builder.Key != "beaverbuild" {
+		t.Fatalf("expected the new_block event to carry the builder, got %+v", builder)
+	}
+}
+
+// A failing builder read must not cost the client its block: the event is
+// still broadcast, just without the builder object.
+func TestPoller_BroadcastSurvivesBuilderQueryError(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+	client := registerTestClient(t, hub)
+
+	blockDB := &pollerBlockDB{
+		metricsFor:  map[uint64][]models.BlockMetrics{101: metricsRow(101, 1)},
+		blobsFor:    map[uint64][]models.Blob{101: {blobRow(101, "0xaaa")}},
+		buildersErr: fmt.Errorf("transient"),
+	}
+	poller := NewPoller(blockDB.mock(), hub, testNetworks(), time.Hour, time.Hour)
+	st := poller.chainState(11155111)
+	st.baselined = true
+	st.head = 100
+
+	poller.handleNotification(context.Background(), `{"chain_id":11155111,"block_number":101}`)
+
+	events := drainEvents(client, 50*time.Millisecond)
+	nums := newBlockNumbers(t, events)
+	if len(nums) != 1 || nums[0] != 101 {
+		t.Fatalf("expected the block to broadcast anyway, got %v", nums)
 	}
 }
 
