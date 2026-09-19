@@ -195,6 +195,21 @@ indexer:
   batch_size: 100
   polling_interval: 15s
   mempool_polling_interval: 30s
+  # Block builder attribution (block_builders / blob_inclusion_candidates).
+  # A block older than candidate_snapshot_max_lag is indexed without a
+  # pending-pool snapshot, so historical catch-up never records a snapshot of
+  # a pool that has moved on. candidate_min_age is how long a pending blob tx
+  # must have been visible before its omission counts against a builder, and
+  # candidate_retention bounds how long the per-transaction detail is kept
+  # (the per-block aggregates are permanent).
+  candidate_snapshot_max_lag: 60s
+  candidate_min_age: 6s
+  candidate_retention: 168h
+  # Startup walk that adds builder rows to blocks indexed before the table
+  # existed, by refetching each block. Resumable and non-destructive; the
+  # pause throttles the RPC load it adds next to live indexing.
+  builder_backfill_enabled: true
+  builder_backfill_pause: 250ms
 
 networks:
   - name: "mainnet"

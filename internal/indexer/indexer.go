@@ -250,23 +250,33 @@ type Indexer struct {
 	// priorityFeeBackfill tunes the startup walk that fills execution fees
 	// onto rows indexed before they were stored; fields so tests can shrink
 	// windows and waits. See priorityFeeBackfillSettings.
-	priorityFeeBackfill   priorityFeeBackfillSettings
-	ctx                   context.Context
-	cancel                context.CancelFunc
-	wg                    sync.WaitGroup
-	lastIndexedBlock      uint64 // accessed with sync/atomic
-	indexerVersion        string
-	mu                    sync.Mutex // protects DB metadata writes
-	dbWriteMu             sync.Mutex // serializes same-network writes that fire summary rollup triggers
-	blockTaskCh           chan BlockTask
-	useWebsocket          bool
-	blockSub              *ethereum.BlockSubscription
-	pendingTxSub          *ethereum.PendingTxSubscription
-	mempoolPollingStarted uint32
-	failedBlocks          map[uint64]int // block number -> cumulative failure count
-	failedBlockNextRetry  map[uint64]time.Time
-	failedBlocksMu        sync.Mutex
-	reorgDetected         uint32 // atomic flag: 1 = reorg detected, main loop should reset
+	priorityFeeBackfill priorityFeeBackfillSettings
+	// candidateSnapshotMaxLag bounds how far behind the wall clock a block
+	// may be for its pending-pool snapshot to be taken; candidateMinAge is
+	// the grace period below which a pending tx is 'too_recent' to hold the
+	// builder to; candidateRetention bounds how long the per-transaction
+	// detail survives the prune. Unset (zero) takes the package default; a
+	// negative max lag disables snapshots and a negative retention disables
+	// the prune.
+	candidateSnapshotMaxLag time.Duration
+	candidateMinAge         time.Duration
+	candidateRetention      time.Duration
+	ctx                     context.Context
+	cancel                  context.CancelFunc
+	wg                      sync.WaitGroup
+	lastIndexedBlock        uint64 // accessed with sync/atomic
+	indexerVersion          string
+	mu                      sync.Mutex // protects DB metadata writes
+	dbWriteMu               sync.Mutex // serializes same-network writes that fire summary rollup triggers
+	blockTaskCh             chan BlockTask
+	useWebsocket            bool
+	blockSub                *ethereum.BlockSubscription
+	pendingTxSub            *ethereum.PendingTxSubscription
+	mempoolPollingStarted   uint32
+	failedBlocks            map[uint64]int // block number -> cumulative failure count
+	failedBlockNextRetry    map[uint64]time.Time
+	failedBlocksMu          sync.Mutex
+	reorgDetected           uint32 // atomic flag: 1 = reorg detected, main loop should reset
 	// reorgRangeMu guards reorgRewindFrom/reorgInvalidatedThrough, which are
 	// only meaningful while reorgDetected == 1. Reorgs signaled before the main
 	// loop consumes the flag merge into the widest invalidated range.
@@ -340,6 +350,9 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		streakBackfillEnabled:      true,
 		streakBackfillRetryBackoff: defaultStreakBackfillRetryBackoff,
 		priorityFeeBackfill:        newPriorityFeeBackfillSettings(cfg.Indexer),
+		candidateSnapshotMaxLag:    durationOrDefault(cfg.Indexer.CandidateSnapshotMaxLag, defaultCandidateSnapshotMaxLag),
+		candidateMinAge:            durationOrDefault(cfg.Indexer.CandidateMinAge, defaultCandidateMinAge),
+		candidateRetention:         durationOrDefault(cfg.Indexer.CandidateRetention, defaultCandidateRetention),
 		ctx:                        indexerCtx,
 		cancel:                     cancel,
 		indexerVersion:             cfg.Indexer.Version,
@@ -600,6 +613,20 @@ func (i *Indexer) Start() error {
 		go func() {
 			defer i.wg.Done()
 			i.runStreakBackfill()
+		}()
+	}
+
+	// Relabel existing builder rows when this binary's registry differs from
+	// the one that wrote them. Cheap: one distinct scan plus an UPDATE per
+	// raw (fee_recipient, extra_data) pair whose resolution changed. The
+	// historical builder backfill belongs at the end of this goroutine, after
+	// the relabel returns, so the rows it writes are labeled once, by the
+	// current registry, instead of being relabeled right behind it.
+	if i.db != nil {
+		i.wg.Add(1)
+		go func() {
+			defer i.wg.Done()
+			i.runBuilderRelabel()
 		}()
 	}
 
@@ -1647,7 +1674,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 	var attributedUsers []string
 	blobIndex := 0
 
-	for _, tx := range block.Transactions() {
+	for txIndex, tx := range block.Transactions() {
 		if !i.ethClient.IsBlobTransaction(tx) {
 			continue
 		}
@@ -1671,6 +1698,11 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		userAttribution := i.attribution.GetUserAttributionForBlock(from, int64(blockNumber))
 
 		metrics := calculateBlobMetrics(tx, blobBaseFee, header.BaseFee)
+
+		// The carrying transaction's position in the block, shared by every
+		// blob row it carries: where a builder placed the blob txs, and
+		// whether it ordered them by tip.
+		positionInBlock := txIndex
 
 		for _, blobHash := range blobHashes {
 			versionedHash := blobHash.Hex()
@@ -1696,6 +1728,7 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 				MaxPriorityFeePerGas: metrics.maxPriorityFeePerGas,
 				MaxFeePerGas:         metrics.maxFeePerGas,
 				PriorityFeePerGas:    metrics.priorityFeePerGas,
+				TxIndex:              &positionInBlock,
 			})
 			blobIndex++
 		}
@@ -1732,7 +1765,12 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 		ParentHash:  block.ParentHash().Hex(),
 	}
 
-	if err := i.insertBlockData(blobs, indexedBlock, blockMetrics, fetchEpoch); err != nil {
+	// Who built this block, from the header fields that describe it. The
+	// pending-pool snapshot fields are filled by insertBlockData, which is
+	// where the promotion deletes have already run.
+	blockBuilder := i.blockBuilderRow(block, timestamp)
+
+	if err := i.insertBlockData(blobs, indexedBlock, blockMetrics, blockBuilder, fetchEpoch); err != nil {
 		return fmt.Errorf("failed to insert block data for block %d: %w", blockNumber, err)
 	}
 
@@ -1887,6 +1925,12 @@ func (i *Indexer) handleReorg(fromBlock uint64) error {
 	}
 	if _, err := tx.ExecContext(i.ctx, "DELETE FROM block_metrics WHERE chain_id = $1 AND block_number >= $2", i.network.ChainID, int64(forkBlock+1)); err != nil {
 		return fmt.Errorf("failed to delete reorged block metrics: %w", err)
+	}
+	if _, err := tx.ExecContext(i.ctx, "DELETE FROM block_builders WHERE chain_id = $1 AND block_number >= $2", i.network.ChainID, int64(forkBlock+1)); err != nil {
+		return fmt.Errorf("failed to delete reorged block builders: %w", err)
+	}
+	if _, err := tx.ExecContext(i.ctx, "DELETE FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_number >= $2", i.network.ChainID, int64(forkBlock+1)); err != nil {
+		return fmt.Errorf("failed to delete reorged blob inclusion candidates: %w", err)
 	}
 	if _, err := tx.ExecContext(i.ctx, "DELETE FROM indexed_blocks WHERE chain_id = $1 AND block_number >= $2", i.network.ChainID, forkBlock+1); err != nil {
 		return fmt.Errorf("failed to delete reorged indexed blocks: %w", err)
@@ -2196,9 +2240,18 @@ func (i *Indexer) completeReorgRecoveryIfCovered(fetchEpoch uint64) {
 		zap.Uint64("invalidated_through", through))
 }
 
+// stringOrEmpty renders an optional string for a text[] bind parameter,
+// where the empty string stands for SQL NULL.
+func stringOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 // blobInsertColumns is the number of columns written per row when inserting
 // into blobs.
-const blobInsertColumns = 18
+const blobInsertColumns = 20
 
 // mempoolBlobInsertColumns is the number of columns written per row when
 // upserting into mempool_blobs.
@@ -2236,11 +2289,16 @@ func valuesPlaceholders(rows, width int, casts []string) string {
 	return b.String()
 }
 
-// insertBlockData inserts all blobs, block metrics, and records the indexed block in a single
-// database transaction. This ensures atomicity — either the entire block is recorded or nothing is.
+// insertBlockData inserts all blobs, block metrics, the block's builder row,
+// and records the indexed block in a single database transaction. This
+// ensures atomicity — either the entire block is recorded or nothing is.
 // fetchEpoch is the reorgEpoch value sampled before the block was fetched via
 // RPC; the insert is refused if a cleanup committed in between.
-func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.IndexedBlock, blockMetrics *models.BlockMetrics, fetchEpoch uint64) error {
+//
+// blockBuilder may be nil (callers that only record a block's existence);
+// when it is set and the block is recent enough, the pending blob pool left
+// over after this block's promotions is classified and summarized onto it.
+func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.IndexedBlock, blockMetrics *models.BlockMetrics, blockBuilder *models.BlockBuilder, fetchEpoch uint64) error {
 	unlockWrites := i.lockDBWrites()
 	defer unlockWrites()
 
@@ -2273,6 +2331,8 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 		txHashes := make([]string, 0, len(blobs))
 		senders := make([]string, 0, len(blobs))
 		nonces := make([]int64, 0, len(blobs))
+		replacementTips := make([]string, 0, len(blobs))
+		replacementBlobFees := make([]string, 0, len(blobs))
 		for _, blob := range blobs {
 			if _, seen := txHashSet[blob.TxHash]; seen {
 				continue
@@ -2281,26 +2341,58 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			txHashes = append(txHashes, blob.TxHash)
 			senders = append(senders, blob.FromAddress)
 			nonces = append(nonces, int64(blob.Nonce))
+			replacementTips = append(replacementTips, stringOrEmpty(blob.MaxPriorityFeePerGas))
+			replacementBlobFees = append(replacementBlobFees, stringOrEmpty(blob.MaxFeePerBlobGas))
 		}
 
-		// Delete pending blob rows that are now being confirmed
+		// Delete pending blob rows that are now being confirmed, carrying
+		// their first-seen timestamps out with them: once the rows are gone
+		// the only record of when the node first saw the transaction is the
+		// one copied onto the confirmed rows below.
 		if len(txHashes) > 0 {
 			deleteQuery, deleteArgs, err := sqlx.In(
-				"DELETE FROM mempool_blobs WHERE chain_id = ? AND tx_hash IN (?)",
+				"DELETE FROM mempool_blobs WHERE chain_id = ? AND tx_hash IN (?) RETURNING tx_hash, timestamp",
 				i.network.ChainID, txHashes,
 			)
 			if err != nil {
 				return fmt.Errorf("failed to build pending blob delete query: %w", err)
 			}
 			deleteQuery = tx.Rebind(deleteQuery)
-			res, err := tx.ExecContext(i.ctx, deleteQuery, deleteArgs...)
+			promotedRows, err := tx.QueryContext(i.ctx, deleteQuery, deleteArgs...)
 			if err != nil {
 				return fmt.Errorf("failed to delete pending blobs: %w", err)
 			}
-			if promoted, _ := res.RowsAffected(); promoted > 0 {
+			firstSeen := make(map[string]time.Time, len(txHashes))
+			var promoted int64
+			for promotedRows.Next() {
+				var hash string
+				var seenAt time.Time
+				if err := promotedRows.Scan(&hash, &seenAt); err != nil {
+					promotedRows.Close()
+					return fmt.Errorf("failed to read promoted pending blobs: %w", err)
+				}
+				promoted++
+				// One row per blob of the transaction; they share the
+				// timestamp, but take the earliest defensively.
+				if existing, ok := firstSeen[hash]; !ok || seenAt.Before(existing) {
+					firstSeen[hash] = seenAt
+				}
+			}
+			if err := promotedRows.Err(); err != nil {
+				promotedRows.Close()
+				return fmt.Errorf("failed to read promoted pending blobs: %w", err)
+			}
+			promotedRows.Close()
+			if promoted > 0 {
 				logger.Debug("Promoted pending blobs to confirmed",
 					zap.String("network", i.network.Name),
 					zap.Int64("promoted_count", promoted))
+			}
+			for idx := range blobs {
+				if seenAt, ok := firstSeen[blobs[idx].TxHash]; ok {
+					seen := seenAt
+					blobs[idx].FirstSeenAt = &seen
+				}
 			}
 
 			// A confirmed tx also invalidates any pending tx it replaced:
@@ -2311,21 +2403,41 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			// Each evicted hash is recorded in blob_replacements in the
 			// same statement — the hash-based delete ran first, so only
 			// genuinely replaced hashes reach the log.
+			// The replacement side's fee context comes from the confirming
+			// transaction's own blob rows, carried in alongside its hash;
+			// the replaced side's comes out of the rows being deleted.
+			// Empty strings stand for "not observed" and become NULL, so a
+			// legacy row without caps does not read as a zero bid.
 			supersededRes, err := tx.ExecContext(i.ctx,
 				`WITH superseded AS (
 					DELETE FROM mempool_blobs m
-					USING unnest($2::text[], $3::bigint[], $4::text[]) AS t(from_address, nonce, replacement_tx_hash)
+					USING unnest($2::text[], $3::bigint[], $4::text[], $6::text[], $7::text[])
+						AS t(from_address, nonce, replacement_tx_hash, replacement_tip, replacement_blob_fee)
 					WHERE m.chain_id = $1 AND m.from_address = t.from_address AND m.nonce = t.nonce
-					RETURNING m.tx_hash, m.from_address, m.nonce, t.replacement_tx_hash
+					RETURNING m.tx_hash, m.from_address, m.nonce,
+						m.max_priority_fee_per_gas, m.max_fee_per_blob_gas, m.timestamp,
+						t.replacement_tx_hash, t.replacement_tip, t.replacement_blob_fee
 				)
-				INSERT INTO blob_replacements (chain_id, replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at)
-				SELECT DISTINCT $1, tx_hash, replacement_tx_hash, from_address, nonce, $5::timestamp FROM superseded
+				INSERT INTO blob_replacements (
+					chain_id, replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at,
+					replaced_max_priority_fee_per_gas, replaced_max_fee_per_blob_gas, replaced_first_seen_at,
+					replacement_max_priority_fee_per_gas, replacement_max_fee_per_blob_gas)
+				SELECT DISTINCT $1, tx_hash, replacement_tx_hash, from_address, nonce, $5::timestamp,
+					max_priority_fee_per_gas, max_fee_per_blob_gas, timestamp,
+					NULLIF(replacement_tip, '')::numeric, NULLIF(replacement_blob_fee, '')::numeric
+				FROM superseded
 				ON CONFLICT (chain_id, replaced_tx_hash) DO UPDATE SET
 					replacement_tx_hash = EXCLUDED.replacement_tx_hash,
 					from_address = EXCLUDED.from_address,
 					nonce = EXCLUDED.nonce,
-					replaced_at = EXCLUDED.replaced_at`,
+					replaced_at = EXCLUDED.replaced_at,
+					replaced_max_priority_fee_per_gas = EXCLUDED.replaced_max_priority_fee_per_gas,
+					replaced_max_fee_per_blob_gas = EXCLUDED.replaced_max_fee_per_blob_gas,
+					replaced_first_seen_at = EXCLUDED.replaced_first_seen_at,
+					replacement_max_priority_fee_per_gas = EXCLUDED.replacement_max_priority_fee_per_gas,
+					replacement_max_fee_per_blob_gas = EXCLUDED.replacement_max_fee_per_blob_gas`,
 				i.network.ChainID, pq.Array(senders), pq.Array(nonces), pq.Array(txHashes), blobs[0].Timestamp,
+				pq.Array(replacementTips), pq.Array(replacementBlobFees),
 			)
 			if err != nil {
 				return fmt.Errorf("failed to delete superseded pending blobs: %w", err)
@@ -2348,7 +2460,8 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
 				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
 				timestamp, max_fee_per_blob_gas, blob_gas_used, versioned_hash, slot,
-				max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas
+				max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas,
+				first_seen_at, tx_index
 			) VALUES ` + valuesPlaceholders(len(blobs), blobInsertColumns, nil) + `
 			ON CONFLICT (chain_id, block_number, blob_index) DO UPDATE SET
 				tx_hash = EXCLUDED.tx_hash,
@@ -2365,7 +2478,13 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				slot = EXCLUDED.slot,
 				max_priority_fee_per_gas = EXCLUDED.max_priority_fee_per_gas,
 				max_fee_per_gas = EXCLUDED.max_fee_per_gas,
-				priority_fee_per_gas = EXCLUDED.priority_fee_per_gas
+				priority_fee_per_gas = EXCLUDED.priority_fee_per_gas,
+				-- first_seen_at is an observation, not a derivation: a
+				-- reprocess of an already-promoted block has no pending row
+				-- left to read it from, so it must never overwrite a stored
+				-- value with NULL.
+				first_seen_at = COALESCE(EXCLUDED.first_seen_at, blobs.first_seen_at),
+				tx_index = EXCLUDED.tx_index
 		`
 		insertArgs := make([]interface{}, 0, len(blobs)*blobInsertColumns)
 		for _, blob := range blobs {
@@ -2373,7 +2492,8 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				blob.ChainID, blob.BlockNumber, blob.BlobIndex, blob.TxHash, blob.FromAddress, blob.UserAttribution,
 				blob.BlobSizeBytes, blob.BaseFeePerBlobGas, blob.TipPerBlobGas, blob.TotalCostWei,
 				blob.Timestamp, blob.MaxFeePerBlobGas, blob.BlobGasUsed, blob.VersionedHash, blob.Slot,
-				blob.MaxPriorityFeePerGas, blob.MaxFeePerGas, blob.PriorityFeePerGas)
+				blob.MaxPriorityFeePerGas, blob.MaxFeePerGas, blob.PriorityFeePerGas,
+				blob.FirstSeenAt, blob.TxIndex)
 		}
 		if _, err := tx.ExecContext(i.ctx, insertQuery, insertArgs...); err != nil {
 			return fmt.Errorf("failed to insert blobs (block: %d): %w", indexedBlock.BlockNumber, err)
@@ -2408,6 +2528,44 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 			blockMetrics.BlobParamsTarget, blockMetrics.BlobParamsMax, blockMetrics.UpdateFraction)
 		if err != nil {
 			return fmt.Errorf("failed to insert block metrics: %w", err)
+		}
+	}
+
+	// Record who built the block, and — for a block that just arrived — what
+	// this node's pending blob pool still held after its promotions. The
+	// snapshot is deliberately skipped for older blocks: the pool describes
+	// now, not the moment a historical block was built, so catch-up and
+	// backfills store the identity with candidate_snapshot = false and NULL
+	// aggregates rather than a snapshot of an unrelated pool.
+	if blockBuilder != nil {
+		builderRow := *blockBuilder
+		if blockMetrics != nil && i.candidateSnapshotDue(blockMetrics.BlockTimestamp) {
+			pending, err := i.selectPendingCandidates(tx)
+			if err != nil {
+				return fmt.Errorf("failed to read pending blob candidates (block: %d): %w", indexedBlock.BlockNumber, err)
+			}
+			candidates := classifyCandidates(pending, candidateBlockContext{
+				ChainID:          indexedBlock.ChainID,
+				BlockNumber:      indexedBlock.BlockNumber,
+				BlockTimestamp:   blockMetrics.BlockTimestamp,
+				MinAge:           i.candidateMinAge,
+				BlobBaseFee:      parseWei(blockMetrics.BlobBaseFee),
+				BaseFee:          parseWei(blockMetrics.BaseFeeWei),
+				RemainingBlobGas: blockMetrics.BlobGasLimit - blockMetrics.BlobGasUsed,
+			})
+			if err := i.insertCandidates(tx, candidates); err != nil {
+				return fmt.Errorf("failed to insert blob inclusion candidates (block: %d): %w", indexedBlock.BlockNumber, err)
+			}
+
+			pendingTxs, skippedTxs, skippedBlobs, maxTip := candidateAggregates(candidates)
+			builderRow.CandidateSnapshot = true
+			builderRow.PendingCandidateTxs = &pendingTxs
+			builderRow.EligibleSkippedTxs = &skippedTxs
+			builderRow.EligibleSkippedBlobs = &skippedBlobs
+			builderRow.EligibleSkippedMaxTip = maxTip
+		}
+		if err := i.upsertBlockBuilder(tx, &builderRow); err != nil {
+			return fmt.Errorf("failed to insert block builder (block: %d): %w", indexedBlock.BlockNumber, err)
 		}
 	}
 
@@ -2652,6 +2810,8 @@ func (i *Indexer) runMempoolCleanup() {
 					zap.String("network", i.network.Name),
 					zap.Int64("pruned_count", pruned))
 			}
+
+			i.pruneStaleCandidates(i.ctx)
 		}
 	}
 }
@@ -2770,16 +2930,28 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 	supersededRes, err := tx.ExecContext(i.ctx,
 		`WITH superseded AS (
 			DELETE FROM mempool_blobs WHERE chain_id = $1 AND from_address = $2 AND nonce = $3 AND tx_hash <> $4
-			RETURNING tx_hash
+			RETURNING tx_hash, max_priority_fee_per_gas, max_fee_per_blob_gas, timestamp
 		)
-		INSERT INTO blob_replacements (chain_id, replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at)
-		SELECT DISTINCT $1, tx_hash, $4, $2, $3, $5::timestamp FROM superseded
+		INSERT INTO blob_replacements (
+			chain_id, replaced_tx_hash, replacement_tx_hash, from_address, nonce, replaced_at,
+			replaced_max_priority_fee_per_gas, replaced_max_fee_per_blob_gas, replaced_first_seen_at,
+			replacement_max_priority_fee_per_gas, replacement_max_fee_per_blob_gas)
+		SELECT DISTINCT $1, tx_hash, $4, $2, $3, $5::timestamp,
+			max_priority_fee_per_gas, max_fee_per_blob_gas, timestamp,
+			NULLIF($6, '')::numeric, NULLIF($7, '')::numeric
+		FROM superseded
 		ON CONFLICT (chain_id, replaced_tx_hash) DO UPDATE SET
 			replacement_tx_hash = EXCLUDED.replacement_tx_hash,
 			from_address = EXCLUDED.from_address,
 			nonce = EXCLUDED.nonce,
-			replaced_at = EXCLUDED.replaced_at`,
+			replaced_at = EXCLUDED.replaced_at,
+			replaced_max_priority_fee_per_gas = EXCLUDED.replaced_max_priority_fee_per_gas,
+			replaced_max_fee_per_blob_gas = EXCLUDED.replaced_max_fee_per_blob_gas,
+			replaced_first_seen_at = EXCLUDED.replaced_first_seen_at,
+			replacement_max_priority_fee_per_gas = EXCLUDED.replacement_max_priority_fee_per_gas,
+			replacement_max_fee_per_blob_gas = EXCLUDED.replacement_max_fee_per_blob_gas`,
 		networkID, blobs[0].FromAddress, int64(blobs[0].Nonce), txHash, blobs[0].Timestamp,
+		stringOrEmpty(blobs[0].MaxPriorityFeePerGas), stringOrEmpty(blobs[0].MaxFeePerBlobGas),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to delete superseded pending blobs (tx: %s): %w", txHash, err)
@@ -2898,6 +3070,17 @@ func (i *Indexer) deleteReindexRange(startBlock, endBlock uint64) error {
 	query = "DELETE FROM block_metrics WHERE chain_id = $1 AND block_number >= $2 AND block_number <= $3"
 	if _, err := tx.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock); err != nil {
 		return fmt.Errorf("failed to delete existing block metrics: %w", err)
+	}
+
+	// Delete existing builder rows and their candidate detail in the range.
+	query = "DELETE FROM block_builders WHERE chain_id = $1 AND block_number >= $2 AND block_number <= $3"
+	if _, err := tx.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock); err != nil {
+		return fmt.Errorf("failed to delete existing block builders: %w", err)
+	}
+
+	query = "DELETE FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_number >= $2 AND block_number <= $3"
+	if _, err := tx.ExecContext(i.ctx, query, i.network.ChainID, startBlock, endBlock); err != nil {
+		return fmt.Errorf("failed to delete existing blob inclusion candidates: %w", err)
 	}
 
 	// Delete existing indexed block records in the range.

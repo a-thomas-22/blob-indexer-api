@@ -55,6 +55,11 @@ data:
       rpc_rate_limit: {{ .Values.appConfig.indexer.rpc_rate_limit }}
       priority_fee_backfill_enabled: {{ .Values.appConfig.indexer.priority_fee_backfill_enabled }}
       priority_fee_backfill_pause: {{ .Values.appConfig.indexer.priority_fee_backfill_pause | quote }}
+      candidate_snapshot_max_lag: {{ .Values.appConfig.indexer.candidate_snapshot_max_lag | quote }}
+      candidate_min_age: {{ .Values.appConfig.indexer.candidate_min_age | quote }}
+      candidate_retention: {{ .Values.appConfig.indexer.candidate_retention | quote }}
+      builder_backfill_enabled: {{ .Values.appConfig.indexer.builder_backfill_enabled }}
+      builder_backfill_pause: {{ .Values.appConfig.indexer.builder_backfill_pause | quote }}
     attribution:
       blob_list_enabled: {{ .Values.appConfig.attribution.blob_list_enabled }}
       blob_list_base_url: {{ .Values.appConfig.attribution.blob_list_base_url | quote }}

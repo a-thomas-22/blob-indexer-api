@@ -138,6 +138,30 @@ type IndexerConfig struct {
 	// PriorityFeeBackfillPause is the wait between backfill windows, which
 	// throttles the RPC load the walk adds alongside live indexing.
 	PriorityFeeBackfillPause time.Duration `mapstructure:"priority_fee_backfill_pause" yaml:"priority_fee_backfill_pause"`
+	// CandidateSnapshotMaxLag bounds how far behind the wall clock a block
+	// may be for the indexer to record what its pending blob pool looked
+	// like when the block arrived. Blocks older than this are indexed
+	// without a snapshot (candidate_snapshot = false, NULL aggregates): the
+	// pool the node holds now says nothing about the pool the builder faced
+	// then, so historical catch-up must not fabricate one.
+	CandidateSnapshotMaxLag time.Duration `mapstructure:"candidate_snapshot_max_lag" yaml:"candidate_snapshot_max_lag"`
+	// CandidateMinAge is how long a pending blob transaction must have been
+	// visible to this node before a block's builder is treated as having
+	// had a chance to include it. Anything newer is classified 'too_recent'
+	// instead of counting against the builder.
+	CandidateMinAge time.Duration `mapstructure:"candidate_min_age" yaml:"candidate_min_age"`
+	// CandidateRetention bounds how long the per-transaction candidate
+	// detail (blob_inclusion_candidates) is kept. The per-block aggregates
+	// on block_builders are permanent, so this only trades detail for disk.
+	CandidateRetention time.Duration `mapstructure:"candidate_retention" yaml:"candidate_retention"`
+	// BuilderBackfillEnabled gates the startup walk that inserts
+	// block_builders rows for blocks indexed before that table existed. The
+	// walk refetches each such block and inserts the row without deleting
+	// anything, so it only costs RPC calls.
+	BuilderBackfillEnabled bool `mapstructure:"builder_backfill_enabled" yaml:"builder_backfill_enabled"`
+	// BuilderBackfillPause is the wait between builder backfill windows,
+	// which throttles the RPC load that walk adds alongside live indexing.
+	BuilderBackfillPause time.Duration `mapstructure:"builder_backfill_pause" yaml:"builder_backfill_pause"`
 }
 
 // AttributionConfig holds dynamic attribution registry configuration.
@@ -272,6 +296,11 @@ func loadConfig() (*Config, error) {
 	v.SetDefault("indexer.rpc_rate_limit", 0)
 	v.SetDefault("indexer.priority_fee_backfill_enabled", true)
 	v.SetDefault("indexer.priority_fee_backfill_pause", "250ms")
+	v.SetDefault("indexer.candidate_snapshot_max_lag", "60s")
+	v.SetDefault("indexer.candidate_min_age", "6s")
+	v.SetDefault("indexer.candidate_retention", "168h")
+	v.SetDefault("indexer.builder_backfill_enabled", true)
+	v.SetDefault("indexer.builder_backfill_pause", "250ms")
 	v.SetDefault("attribution.blob_list_enabled", true)
 	v.SetDefault("attribution.blob_list_base_url", "https://github.com/tirante-dev/blob-list/releases/latest/download")
 	v.SetDefault("attribution.blob_list_refresh_interval", "1h")
@@ -518,6 +547,18 @@ func loadConfig() (*Config, error) {
 		return nil, err
 	}
 	if cfg.Indexer.PriorityFeeBackfillPause, err = parseDuration(v, "indexer.priority_fee_backfill_pause", "priority_fee_backfill_pause"); err != nil {
+		return nil, err
+	}
+	if cfg.Indexer.CandidateSnapshotMaxLag, err = parseDuration(v, "indexer.candidate_snapshot_max_lag", "candidate_snapshot_max_lag"); err != nil {
+		return nil, err
+	}
+	if cfg.Indexer.CandidateMinAge, err = parseDuration(v, "indexer.candidate_min_age", "candidate_min_age"); err != nil {
+		return nil, err
+	}
+	if cfg.Indexer.CandidateRetention, err = parseDuration(v, "indexer.candidate_retention", "candidate_retention"); err != nil {
+		return nil, err
+	}
+	if cfg.Indexer.BuilderBackfillPause, err = parseDuration(v, "indexer.builder_backfill_pause", "builder_backfill_pause"); err != nil {
 		return nil, err
 	}
 	if cfg.Attribution.BlobListRefreshInterval, err = parseDuration(v, "attribution.blob_list_refresh_interval", "blob_list_refresh_interval"); err != nil {

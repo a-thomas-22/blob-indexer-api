@@ -250,6 +250,26 @@ appConfig:
     # Pause between backfill windows (2000 blocks each), which throttles the
     # RPC load the walk adds next to live indexing.
     priority_fee_backfill_pause: "250ms"
+    # How far behind the wall clock a block may be for the indexer to record
+    # what its pending blob pool held when the block arrived. Older blocks
+    # (historical catch-up, backfills) are stored with no snapshot instead of
+    # one taken against a pool that has since moved on.
+    candidate_snapshot_max_lag: "60s"
+    # How long a pending blob transaction must have been visible to this node
+    # before a block's builder is treated as having had a chance to include
+    # it; anything newer is recorded as 'too_recent'.
+    candidate_min_age: "6s"
+    # How long the per-transaction inclusion-candidate detail is kept. The
+    # per-block aggregates on block_builders are permanent, so this only
+    # trades detail for disk.
+    candidate_retention: "168h"
+    # Startup walk that adds a builder row to blocks indexed before the
+    # block_builders table existed, by refetching each such block. Resumable
+    # and non-destructive; disable to stop spending RPC calls on history.
+    builder_backfill_enabled: true
+    # Pause between builder backfill windows, which throttles the RPC load
+    # that walk adds next to live indexing.
+    builder_backfill_pause: "250ms"
   attribution:
     blob_list_enabled: true
     blob_list_base_url: "https://github.com/tirante-dev/blob-list/releases/latest/download"

@@ -99,7 +99,7 @@ func TestIntegrationInsertBlockDataMultiRow(t *testing.T) {
 	}
 	indexedBlock := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 100, BlockHash: "0xhash", ParentHash: "0xparent"}
 
-	if err := idx.insertBlockData(blobs, indexedBlock, nil, 0); err != nil {
+	if err := idx.insertBlockData(blobs, indexedBlock, nil, nil, 0); err != nil {
 		t.Fatalf("insertBlockData() error = %v", err)
 	}
 
@@ -139,7 +139,7 @@ func TestIntegrationInsertBlockDataMultiRow(t *testing.T) {
 
 	// Re-inserting the same block takes the ON CONFLICT DO UPDATE path; the
 	// update trigger's net delta must be zero.
-	if err := idx.insertBlockData(blobs, indexedBlock, nil, 0); err != nil {
+	if err := idx.insertBlockData(blobs, indexedBlock, nil, nil, 0); err != nil {
 		t.Fatalf("insertBlockData() reinsert error = %v", err)
 	}
 	if err := database.GetContext(ctx, &stats.TotalConfirmedBlobs,
@@ -167,14 +167,14 @@ func TestIntegrationInsertBlockDataTrimsStaleBlobRows(t *testing.T) {
 		integrationBlob(100, 2, "0xstale", "0xaaa", true),
 	}
 	staleIndexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 100, BlockHash: "0xstalehash", ParentHash: "0xstaleparent"}
-	if err := idx.insertBlockData(stale, staleIndexed, nil, 0); err != nil {
+	if err := idx.insertBlockData(stale, staleIndexed, nil, nil, 0); err != nil {
 		t.Fatalf("insertBlockData() stale insert error = %v", err)
 	}
 
 	// The canonical reprocess of block 100 carries a single blob from 0xbbb.
 	canonical := []models.Blob{integrationBlob(100, 0, "0xcanon", "0xbbb", true)}
 	canonicalIndexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 100, BlockHash: "0xcanonhash", ParentHash: "0xcanonparent"}
-	if err := idx.insertBlockData(canonical, canonicalIndexed, nil, 0); err != nil {
+	if err := idx.insertBlockData(canonical, canonicalIndexed, nil, nil, 0); err != nil {
 		t.Fatalf("insertBlockData() canonical reprocess error = %v", err)
 	}
 
@@ -213,7 +213,7 @@ func TestIntegrationInsertBlockDataTrimsStaleBlobRows(t *testing.T) {
 	// A canonical block with no blobs at all must clear every stale row too —
 	// the trim has to run even when the insert loop is skipped entirely.
 	emptyIndexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 100, BlockHash: "0xemptyhash", ParentHash: "0xemptyparent"}
-	if err := idx.insertBlockData(nil, emptyIndexed, nil, 0); err != nil {
+	if err := idx.insertBlockData(nil, emptyIndexed, nil, nil, 0); err != nil {
 		t.Fatalf("insertBlockData() empty reprocess error = %v", err)
 	}
 	var blobCount int
@@ -345,7 +345,7 @@ func TestIntegrationInsertPendingBlobsUpsert(t *testing.T) {
 	// resurrect pending rows.
 	confirmedBlob := integrationBlob(200, 0, "0xpending", "0xccc", true)
 	indexedBlock := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 200, BlockHash: "0xhash200", ParentHash: "0xparent200"}
-	if err := idx.insertBlockData([]models.Blob{confirmedBlob}, indexedBlock, nil, 0); err != nil {
+	if err := idx.insertBlockData([]models.Blob{confirmedBlob}, indexedBlock, nil, nil, 0); err != nil {
 		t.Fatalf("insertBlockData() promote error = %v", err)
 	}
 	var pendingLeft int
@@ -440,7 +440,7 @@ func TestIntegrationMempoolReplacementCleanup(t *testing.T) {
 	final := integrationBlob(400, 0, "0xfinal", "0xsender", true)
 	final.Nonce = 7
 	indexedBlock := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 400, BlockHash: "0xhash400", ParentHash: "0xparent400"}
-	if err := idx.insertBlockData([]models.Blob{final}, indexedBlock, nil, 0); err != nil {
+	if err := idx.insertBlockData([]models.Blob{final}, indexedBlock, nil, nil, 0); err != nil {
 		t.Fatalf("insertBlockData() confirm error = %v", err)
 	}
 	if got := pendingTxHashes(); len(got) != 1 || got[0] != "0xother" {
@@ -625,7 +625,7 @@ func TestIntegrationReorgRecoveryMarkerLifecycle(t *testing.T) {
 			blobs = []models.Blob{integrationBlob(int64(blockNumber), 0, "0xreorgtx", "0xddd", true)}
 		}
 		indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: int64(blockNumber), BlockHash: hash, ParentHash: parent}
-		if err := idx.insertBlockData(blobs, indexed, nil, 0); err != nil {
+		if err := idx.insertBlockData(blobs, indexed, nil, nil, 0); err != nil {
 			t.Fatalf("insertBlockData(%d): %v", blockNumber, err)
 		}
 	}
@@ -716,7 +716,7 @@ func TestIntegrationReorgRecoveryMarkerLifecycle(t *testing.T) {
 			BlockHash:   canonical.Hash().Hex(),
 			ParentHash:  canonical.ParentHash().Hex(),
 		}
-		if err := recovered.insertBlockData(nil, indexed, nil, 0); err != nil {
+		if err := recovered.insertBlockData(nil, indexed, nil, nil, 0); err != nil {
 			t.Fatalf("reindex insertBlockData(%d): %v", blockNumber, err)
 		}
 	}
@@ -748,7 +748,7 @@ func TestIntegrationInsertBlockDataReplacesPriorityFees(t *testing.T) {
 	stale := integrationBlob(300, 1, "0xtxstale", "0xbbb", true)
 	staleTipCap, staleFeeCap, stalePaid := "9000000000", "40000000000", "9000000000"
 	stale.MaxPriorityFeePerGas, stale.MaxFeePerGas, stale.PriorityFeePerGas = &staleTipCap, &staleFeeCap, &stalePaid
-	if err := idx.insertBlockData([]models.Blob{legacy, stale}, indexedBlock, nil, 0); err != nil {
+	if err := idx.insertBlockData([]models.Blob{legacy, stale}, indexedBlock, nil, nil, 0); err != nil {
 		t.Fatalf("insertBlockData() first pass error = %v", err)
 	}
 
@@ -781,7 +781,7 @@ func TestIntegrationInsertBlockDataReplacesPriorityFees(t *testing.T) {
 	canonicalStale := integrationBlob(300, 1, "0xtxstale", "0xbbb", true)
 	stalePaidNow := "500000000"
 	canonicalStale.MaxPriorityFeePerGas, canonicalStale.MaxFeePerGas, canonicalStale.PriorityFeePerGas = &staleTipCap, &staleFeeCap, &stalePaidNow
-	if err := idx.insertBlockData([]models.Blob{canonicalLegacy, canonicalStale}, indexedBlock, nil, 0); err != nil {
+	if err := idx.insertBlockData([]models.Blob{canonicalLegacy, canonicalStale}, indexedBlock, nil, nil, 0); err != nil {
 		t.Fatalf("insertBlockData() replay error = %v", err)
 	}
 
