@@ -24,17 +24,29 @@ type BlobTxIndexUpdate struct {
 	TxIndex     int
 }
 
+// MissingBuilderBlock is one indexed block with no block_builders row, and
+// the block hash the rest of this network's data for that height describes.
+// The backfill refetches by number and must check that the node answered
+// with the same block: the stored metrics, blobs and tx positions belong to
+// this hash, and pairing them with a different fork's builder would make the
+// row describe two chains at once.
+type MissingBuilderBlock struct {
+	BlockNumber int64  `db:"block_number"`
+	BlockHash   string `db:"block_hash"`
+}
+
 // BlocksMissingBlockBuilders lists, in ascending order, the blocks in the
 // closed range [fromBlock, toBlock] that this network has indexed but for
-// which no block_builders row exists. Blocks indexed before migration 000017
-// have none; so does any block whose builder write was lost. The anti-join
-// runs on both tables' (chain_id, block_number) primary keys, so the cost is
-// bounded by the range width rather than by history.
-func (db *DB) BlocksMissingBlockBuilders(ctx context.Context, networkID int, fromBlock, toBlock int64) ([]int64, error) {
+// which no block_builders row exists, each with its indexed block hash.
+// Blocks indexed before migration 000017 have none; so does any block whose
+// builder write was lost. The anti-join runs on both tables' (chain_id,
+// block_number) primary keys, so the cost is bounded by the range width
+// rather than by history.
+func (db *DB) BlocksMissingBlockBuilders(ctx context.Context, networkID int, fromBlock, toBlock int64) ([]MissingBuilderBlock, error) {
 	if toBlock < fromBlock {
 		return nil, fmt.Errorf("builder backfill window for network %d has inverted bounds [%d, %d]", networkID, fromBlock, toBlock)
 	}
-	var blocks []int64
+	var blocks []MissingBuilderBlock
 	if err := db.SelectContext(ctx, &blocks, blocksMissingBlockBuilders, networkID, fromBlock, toBlock); err != nil {
 		return nil, fmt.Errorf("failed to list blocks missing block builders for network %d [%d, %d]: %w",
 			networkID, fromBlock, toBlock, err)
@@ -143,7 +155,7 @@ func derefOrEmpty(value *string) string {
 }
 
 const blocksMissingBlockBuilders = `
-	SELECT ib.block_number
+	SELECT ib.block_number, ib.block_hash
 	FROM indexed_blocks ib
 	LEFT JOIN block_builders bb
 		ON bb.chain_id = ib.chain_id

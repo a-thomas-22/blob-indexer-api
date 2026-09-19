@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"reflect"
 	"regexp"
 	"testing"
 	"time"
@@ -33,15 +34,17 @@ func TestBlocksMissingBlockBuilders(t *testing.T) {
 		database, mock := newMockDB(t)
 		mock.ExpectQuery(regexp.QuoteMeta("FROM indexed_blocks ib")).
 			WithArgs(1, int64(100), int64(102)).
-			WillReturnRows(sqlmock.NewRows([]string{"block_number"}).AddRow(100).AddRow(102))
+			WillReturnRows(sqlmock.NewRows([]string{"block_number", "block_hash"}).
+				AddRow(100, "0xaa").AddRow(102, "0xcc"))
 
 		blocks, err := database.BlocksMissingBlockBuilders(ctx, 1, 100, 102)
 
 		if err != nil {
 			t.Fatalf("BlocksMissingBlockBuilders() error = %v", err)
 		}
-		if len(blocks) != 2 || blocks[0] != 100 || blocks[1] != 102 {
-			t.Fatalf("blocks = %v, want [100 102]", blocks)
+		want := []MissingBuilderBlock{{BlockNumber: 100, BlockHash: "0xaa"}, {BlockNumber: 102, BlockHash: "0xcc"}}
+		if !reflect.DeepEqual(blocks, want) {
+			t.Fatalf("blocks = %v, want %v", blocks, want)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("expectations: %v", err)

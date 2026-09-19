@@ -101,17 +101,22 @@ const (
 //     address.
 //
 // Only the first case sets Known.
+//
+// The registry is matched against the lowercased raw bytes, before the
+// printable-ASCII trim the fallbacks depend on. Extra data is arbitrary
+// bytes and trimExtraData rejects the whole value when any byte outside
+// printable ASCII survives the trim, so matching after it would hide a
+// registered label sitting next to one stray byte ("Gambit ☃").
 func Resolve(extraData []byte, feeRecipient string) Builder {
-	label := trimExtraData(extraData)
-	lowered := strings.ToLower(label)
-	if lowered != "" {
+	if raw := strings.ToLower(string(extraData)); raw != "" {
 		for _, entry := range registry {
-			if strings.Contains(lowered, entry.Match) {
+			if strings.Contains(raw, entry.Match) {
 				return Builder{Key: entry.Key, Name: entry.Name, Known: true}
 			}
 		}
 	}
 
+	label := trimExtraData(extraData)
 	if len(label) >= minASCIIFallbackLen {
 		if slug := slugify(label); slug != "" {
 			return Builder{Key: "extra:" + slug, Name: label}

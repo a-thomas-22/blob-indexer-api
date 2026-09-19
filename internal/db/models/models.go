@@ -73,6 +73,11 @@ type Blob struct {
 	// tx was never observed pending (indexed from history, or it arrived
 	// with its block) and for rows indexed before migration 000017. For
 	// pending rows, queries project mempool_blobs.timestamp here.
+	//
+	// Accepted limitation: the value cannot be rederived from the chain, so
+	// a reindex or reorg cleanup that deletes the confirmed row drops it for
+	// good — the reinserted row carries NULL unless the transaction is still
+	// pending when it is reinserted.
 	FirstSeenAt *time.Time `db:"first_seen_at"`
 	// TxIndex is the carrying transaction's position in its block. NULL for
 	// pending rows and for confirmed rows indexed before migration 000017

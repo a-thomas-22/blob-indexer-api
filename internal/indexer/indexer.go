@@ -648,8 +648,11 @@ func (i *Indexer) Start() error {
 		}()
 	}
 
-	// Start periodic cleanup of stale pending blobs
-	if i.mempoolTTL > 0 && i.mempoolCleanupInterval > 0 {
+	// Start periodic maintenance: the stale pending blob sweep and the
+	// replacement-log prune (both gated on the mempool TTL) plus the
+	// candidate detail prune, which is gated only on its own retention
+	// setting and therefore keeps the loop alive on its own.
+	if i.maintenanceDue() {
 		i.wg.Add(1)
 		go func() {
 			defer i.wg.Done()
@@ -2489,8 +2492,17 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				-- first_seen_at is an observation, not a derivation: a
 				-- reprocess of an already-promoted block has no pending row
 				-- left to read it from, so it must never overwrite a stored
-				-- value with NULL.
-				first_seen_at = COALESCE(EXCLUDED.first_seen_at, blobs.first_seen_at),
+				-- value with NULL. The conflict key is the blob slot
+				-- (chain_id, block_number, blob_index), not the transaction,
+				-- so the stored value is only carried over when the row
+				-- still describes the same transaction; a sibling fork
+				-- putting a different transaction in this slot must not
+				-- inherit the previous occupant's observation.
+				first_seen_at = CASE
+					WHEN blobs.tx_hash = EXCLUDED.tx_hash
+						THEN COALESCE(EXCLUDED.first_seen_at, blobs.first_seen_at)
+					ELSE EXCLUDED.first_seen_at
+				END,
 				tx_index = EXCLUDED.tx_index
 		`
 		insertArgs := make([]interface{}, 0, len(blobs)*blobInsertColumns)
@@ -2546,30 +2558,26 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 	// aggregates rather than a snapshot of an unrelated pool.
 	if blockBuilder != nil {
 		builderRow := *blockBuilder
+		// A block already carrying a snapshot keeps it: the same live
+		// height can be enqueued twice (the polling walker and the
+		// WebSocket follower produce tasks independently), and by the
+		// second pass the pool describes a later moment than the one the
+		// builder faced. Re-snapshotting would rewrite the aggregates
+		// while the first pass's candidate rows stayed put. The upsert
+		// preserves the stored snapshot columns for every other reprocess
+		// path too, so the fields left zero here are never written.
 		if blockMetrics != nil && i.candidateSnapshotDue(blockMetrics.BlockTimestamp) {
-			pending, err := i.selectPendingCandidates(tx)
+			snapshotTaken, err := i.blockHasCandidateSnapshot(tx, indexedBlock.BlockNumber)
 			if err != nil {
-				return fmt.Errorf("failed to read pending blob candidates (block: %d): %w", indexedBlock.BlockNumber, err)
+				return fmt.Errorf("failed to read stored candidate snapshot (block: %d): %w", indexedBlock.BlockNumber, err)
 			}
-			candidates := classifyCandidates(pending, candidateBlockContext{
-				ChainID:          indexedBlock.ChainID,
-				BlockNumber:      indexedBlock.BlockNumber,
-				BlockTimestamp:   blockMetrics.BlockTimestamp,
-				MinAge:           i.candidateMinAge,
-				BlobBaseFee:      parseWei(blockMetrics.BlobBaseFee),
-				BaseFee:          parseWei(blockMetrics.BaseFeeWei),
-				RemainingBlobGas: blockMetrics.BlobGasLimit - blockMetrics.BlobGasUsed,
-			})
-			if err := i.insertCandidates(tx, candidates); err != nil {
-				return fmt.Errorf("failed to insert blob inclusion candidates (block: %d): %w", indexedBlock.BlockNumber, err)
+			if snapshotTaken {
+				logger.Debug("Keeping the first candidate snapshot for a reprocessed block",
+					zap.String("network", i.network.Name),
+					zap.Int64("block", indexedBlock.BlockNumber))
+			} else if err := i.snapshotBlockCandidates(tx, indexedBlock, blockMetrics, &builderRow); err != nil {
+				return err
 			}
-
-			pendingTxs, skippedTxs, skippedBlobs, maxTip := candidateAggregates(candidates)
-			builderRow.CandidateSnapshot = true
-			builderRow.PendingCandidateTxs = &pendingTxs
-			builderRow.EligibleSkippedTxs = &skippedTxs
-			builderRow.EligibleSkippedBlobs = &skippedBlobs
-			builderRow.EligibleSkippedMaxTip = maxTip
 		}
 		if err := i.upsertBlockBuilder(tx, &builderRow); err != nil {
 			return fmt.Errorf("failed to insert block builder (block: %d): %w", indexedBlock.BlockNumber, err)
@@ -2770,56 +2778,103 @@ func (i *Indexer) cleanupLegacyPendingBlobs() {
 	}
 }
 
-// runMempoolCleanup periodically removes pending blobs that have exceeded the configured TTL.
+// mempoolCleanupDue reports whether the TTL sweep of mempool_blobs — and the
+// blob_replacements prune that rides along with it — is configured on. Both
+// hang off the mempool TTL, which a deployment can turn off outright.
+func (i *Indexer) mempoolCleanupDue() bool {
+	return i.mempoolTTL > 0 && i.mempoolCleanupInterval > 0
+}
+
+// maintenanceDue reports whether the periodic maintenance loop has any job
+// configured. Candidate retention is a separate setting from the mempool
+// TTL, so it alone is enough to start the loop.
+func (i *Indexer) maintenanceDue() bool {
+	return i.mempoolCleanupDue() || i.candidateRetention > 0
+}
+
+// maintenanceInterval is the loop's tick. The mempool cleanup interval
+// drives it when that sweep is configured; with only candidate pruning left
+// there is no such setting, so the package default applies rather than
+// inventing a knob.
+func (i *Indexer) maintenanceInterval() time.Duration {
+	if i.mempoolCleanupInterval > 0 {
+		return i.mempoolCleanupInterval
+	}
+	return defaultCandidatePruneInterval
+}
+
+// runMempoolCleanup periodically removes pending blobs that have exceeded
+// the configured TTL, prunes the blob_replacements eviction log, and prunes
+// per-transaction blob inclusion candidate detail past its retention window.
+//
+// The three jobs are independent. The first two are gated on the mempool
+// TTL; candidate pruning is gated only on indexer.candidate_retention and
+// runs on every tick regardless, including after either of the others
+// failed — a deployment that turns the mempool TTL off must not silently
+// leave the LOGGED candidate table growing forever.
 func (i *Indexer) runMempoolCleanup() {
-	logger.Info("Mempool cleanup starting",
+	logger.Info("Indexer maintenance starting",
 		zap.String("network", i.network.Name),
 		zap.Duration("ttl", i.mempoolTTL),
-		zap.Duration("interval", i.mempoolCleanupInterval))
+		zap.Duration("candidate_retention", i.candidateRetention),
+		zap.Duration("interval", i.maintenanceInterval()))
 
-	ticker := time.NewTicker(i.mempoolCleanupInterval)
+	ticker := time.NewTicker(i.maintenanceInterval())
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-i.ctx.Done():
-			logger.Info("Mempool cleanup stopped", zap.String("network", i.network.Name))
+			logger.Info("Indexer maintenance stopped", zap.String("network", i.network.Name))
 			return
 		case <-ticker.C:
-			cutoff := time.Now().UTC().Add(-i.mempoolTTL)
-			unlockWrites := i.lockDBWrites()
-			deleted, err := i.db.DeleteStalePendingBlobs(i.ctx, i.network.ChainID, cutoff)
-			unlockWrites()
-			if err != nil {
-				logger.Error("Failed to clean up stale pending blobs",
-					zap.String("network", i.network.Name),
-					zap.Error(err))
-				continue
+			if i.mempoolCleanupDue() {
+				i.cleanupStalePendingBlobs()
+				i.pruneStaleBlobReplacements()
 			}
-			if deleted > 0 {
-				logger.Info("Cleaned up stale pending blobs",
-					zap.String("network", i.network.Name),
-					zap.Int64("deleted_count", deleted))
-			}
-
-			replacementCutoff := time.Now().UTC().Add(-blobReplacementRetention)
-			unlockWrites = i.lockDBWrites()
-			pruned, err := i.db.DeleteStaleBlobReplacements(i.ctx, i.network.ChainID, replacementCutoff)
-			unlockWrites()
-			if err != nil {
-				logger.Error("Failed to prune stale blob replacements",
-					zap.String("network", i.network.Name),
-					zap.Error(err))
-				continue
-			}
-			if pruned > 0 {
-				logger.Info("Pruned stale blob replacements",
-					zap.String("network", i.network.Name),
-					zap.Int64("pruned_count", pruned))
-			}
-
 			i.pruneStaleCandidates(i.ctx)
 		}
+	}
+}
+
+// cleanupStalePendingBlobs deletes mempool_blobs rows the node has not
+// re-reported within the TTL. Failures are logged; the caller carries on to
+// the other maintenance jobs.
+func (i *Indexer) cleanupStalePendingBlobs() {
+	cutoff := time.Now().UTC().Add(-i.mempoolTTL)
+	unlockWrites := i.lockDBWrites()
+	deleted, err := i.db.DeleteStalePendingBlobs(i.ctx, i.network.ChainID, cutoff)
+	unlockWrites()
+	if err != nil {
+		logger.Error("Failed to clean up stale pending blobs",
+			zap.String("network", i.network.Name),
+			zap.Error(err))
+		return
+	}
+	if deleted > 0 {
+		logger.Info("Cleaned up stale pending blobs",
+			zap.String("network", i.network.Name),
+			zap.Int64("deleted_count", deleted))
+	}
+}
+
+// pruneStaleBlobReplacements drops eviction-log rows past their retention
+// window. Failures are logged; the caller carries on.
+func (i *Indexer) pruneStaleBlobReplacements() {
+	cutoff := time.Now().UTC().Add(-blobReplacementRetention)
+	unlockWrites := i.lockDBWrites()
+	pruned, err := i.db.DeleteStaleBlobReplacements(i.ctx, i.network.ChainID, cutoff)
+	unlockWrites()
+	if err != nil {
+		logger.Error("Failed to prune stale blob replacements",
+			zap.String("network", i.network.Name),
+			zap.Error(err))
+		return
+	}
+	if pruned > 0 {
+		logger.Info("Pruned stale blob replacements",
+			zap.String("network", i.network.Name),
+			zap.Int64("pruned_count", pruned))
 	}
 }
 
@@ -2925,6 +2980,21 @@ func (i *Indexer) insertPendingBlobs(blobs []models.Blob) error {
 		return fmt.Errorf("failed to check confirmed blobs for pending tx: %w", err)
 	}
 	if suppressed {
+		// The observation itself is still worth keeping. The block worker
+		// can win the writer lock while this poll is in flight, promote
+		// nothing (there was no persisted pending row yet) and store the
+		// confirmed blob with a NULL first_seen_at; returning here would
+		// throw away the only record that this node saw the transaction
+		// pending. Fill it in, and only it: a single-column UPDATE leaves
+		// the guarded 000016 triggers a no-op, so no rollup is disturbed.
+		// The IS NULL guard means a real promotion's (earlier) value wins.
+		if _, err := tx.ExecContext(i.ctx,
+			`UPDATE blobs SET first_seen_at = $3
+				WHERE chain_id = $1 AND tx_hash = $2 AND first_seen_at IS NULL`,
+			networkID, txHash, blobs[0].Timestamp,
+		); err != nil {
+			return fmt.Errorf("failed to record first-seen time for confirmed blob tx: %w", err)
+		}
 		return tx.Commit()
 	}
 
@@ -3057,6 +3127,11 @@ func (i *Indexer) Reindex(startBlock, endBlock uint64) error {
 	return i.processBlockRange(startBlock, endBlock)
 }
 
+// deleteReindexRange clears the range so processBlockRange can rebuild it
+// from the chain. Accepted limitation: blobs.first_seen_at is an observation
+// of this node's pending pool, not something a refetch can rederive, so
+// reindexing a range permanently drops the inclusion delays it held unless
+// those transactions happen to still be pending.
 func (i *Indexer) deleteReindexRange(startBlock, endBlock uint64) error {
 	unlockWrites := i.lockDBWrites()
 	defer unlockWrites()

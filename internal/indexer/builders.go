@@ -34,6 +34,15 @@ const (
 	// candidate detail is kept; the per-block aggregates on block_builders
 	// are permanent.
 	defaultCandidateRetention = 7 * 24 * time.Hour
+	// defaultCandidatePruneInterval is how often the candidate detail prune
+	// runs when the mempool cleanup interval, which normally drives the
+	// maintenance loop, is not configured.
+	defaultCandidatePruneInterval = 5 * time.Minute
+	// minCandidateLivenessWindow floors the window within which the node
+	// must have re-reported a pending transaction for it to count as a
+	// candidate. It matters only when the liveness refresh is configured
+	// faster than this; below it, ordinary jitter would drop live rows.
+	minCandidateLivenessWindow = 30 * time.Second
 	// candidateInsertColumns is the number of columns written per
 	// blob_inclusion_candidates row.
 	candidateInsertColumns = 13
@@ -287,9 +296,40 @@ func (i *Indexer) candidateSnapshotDue(blockTimestamp time.Time) bool {
 	return lag <= i.candidateSnapshotMaxLag && lag >= -i.candidateSnapshotMaxLag
 }
 
+// candidateLivenessWindow is how recently the node must have re-reported a
+// pending transaction for it to count as something the builder could have
+// included. It is derived from the configured refresh cadence rather than
+// being its own knob: two refreshes is the shortest window that survives one
+// missed or slow one, floored so a fast cadence does not make the window
+// shorter than ordinary jitter.
+//
+// last_seen is bumped by refreshPendingBlobLiveness, which runs on the
+// mempool poll ticker in polling mode and on the slower reconcile ticker in
+// websocket mode — and on both when the websocket fallback is active. The
+// slower of the two is therefore the cadence a live row is guaranteed to be
+// refreshed at, whichever mode this process ends up in.
+func (i *Indexer) candidateLivenessWindow() time.Duration {
+	refresh := i.mempoolPollingInterval
+	if i.mempoolReconcileInterval > refresh {
+		refresh = i.mempoolReconcileInterval
+	}
+	window := 2 * refresh
+	if window < minCandidateLivenessWindow {
+		window = minCandidateLivenessWindow
+	}
+	return window
+}
+
 // selectPendingCandidates reads the pending blob pool as one row per
 // transaction, inside the block's own transaction and after the promotion
 // deletes, so it holds exactly the transactions this block left behind.
+//
+// Only rows the node still reported within the liveness window count. A
+// transaction the pool dropped — a privately delivered same-nonce
+// cancellation confirmed, say — stops being refreshed but survives in
+// mempool_blobs until the far longer TTL sweep reaches it; counting it
+// would keep blaming builders for skipping a transaction they could no
+// longer see. COALESCE covers legacy rows written before last_seen existed.
 func (i *Indexer) selectPendingCandidates(tx *sqlx.Tx) ([]candidateTx, error) {
 	var rows []candidateTx
 	err := tx.SelectContext(i.ctx, &rows, `
@@ -304,12 +344,66 @@ func (i *Indexer) selectPendingCandidates(tx *sqlx.Tx) ([]candidateTx, error) {
 			MIN(timestamp) AS first_seen_at
 		FROM mempool_blobs
 		WHERE chain_id = $1
+			AND COALESCE(last_seen, timestamp) >= $2
 		GROUP BY tx_hash
-	`, i.network.ChainID)
+	`, i.network.ChainID, time.Now().UTC().Add(-i.candidateLivenessWindow()))
 	if err != nil {
 		return nil, err
 	}
 	return rows, nil
+}
+
+// blockHasCandidateSnapshot reports whether a candidate snapshot has already
+// been stored for this block, read inside the block's own transaction.
+//
+// The first snapshot for a block wins. The polling walker and the WebSocket
+// follower can both enqueue the same live height, so an ordinary live block
+// may be processed twice inside the snapshot lag; the pool has moved on by
+// the second pass (transactions the block genuinely left pending may since
+// have been promoted, and new ones arrived) and re-snapshotting would
+// rewrite the aggregates against a pool that is not the one the builder
+// faced, while leaving the first pass's candidate rows in place.
+func (i *Indexer) blockHasCandidateSnapshot(tx *sqlx.Tx, blockNumber int64) (bool, error) {
+	var taken bool
+	err := tx.QueryRowContext(i.ctx, `
+		SELECT COALESCE(
+			(SELECT candidate_snapshot FROM block_builders WHERE chain_id = $1 AND block_number = $2),
+			FALSE)
+	`, i.network.ChainID, blockNumber).Scan(&taken)
+	if err != nil {
+		return false, err
+	}
+	return taken, nil
+}
+
+// snapshotBlockCandidates classifies the pending pool this block left behind,
+// writes the per-transaction detail, and fills the snapshot columns on the
+// builder row the caller is about to upsert.
+func (i *Indexer) snapshotBlockCandidates(tx *sqlx.Tx, indexedBlock models.IndexedBlock, blockMetrics *models.BlockMetrics, builderRow *models.BlockBuilder) error {
+	pending, err := i.selectPendingCandidates(tx)
+	if err != nil {
+		return fmt.Errorf("failed to read pending blob candidates (block: %d): %w", indexedBlock.BlockNumber, err)
+	}
+	candidates := classifyCandidates(pending, candidateBlockContext{
+		ChainID:          indexedBlock.ChainID,
+		BlockNumber:      indexedBlock.BlockNumber,
+		BlockTimestamp:   blockMetrics.BlockTimestamp,
+		MinAge:           i.candidateMinAge,
+		BlobBaseFee:      parseWei(blockMetrics.BlobBaseFee),
+		BaseFee:          parseWei(blockMetrics.BaseFeeWei),
+		RemainingBlobGas: blockMetrics.BlobGasLimit - blockMetrics.BlobGasUsed,
+	})
+	if err := i.insertCandidates(tx, candidates); err != nil {
+		return fmt.Errorf("failed to insert blob inclusion candidates (block: %d): %w", indexedBlock.BlockNumber, err)
+	}
+
+	pendingTxs, skippedTxs, skippedBlobs, maxTip := candidateAggregates(candidates)
+	builderRow.CandidateSnapshot = true
+	builderRow.PendingCandidateTxs = &pendingTxs
+	builderRow.EligibleSkippedTxs = &skippedTxs
+	builderRow.EligibleSkippedBlobs = &skippedBlobs
+	builderRow.EligibleSkippedMaxTip = maxTip
+	return nil
 }
 
 // insertCandidates writes the per-transaction candidate detail, chunked so
@@ -355,9 +449,18 @@ func (i *Indexer) insertCandidates(tx *sqlx.Tx, candidates []models.BlobInclusio
 	return nil
 }
 
-// upsertBlockBuilder writes the block's builder row. Every column is
+// upsertBlockBuilder writes the block's builder row. The identity columns are
 // overwritten on conflict, like block_metrics: a reprocessed block re-derives
 // all of them from the header it just fetched.
+//
+// The candidate snapshot columns are the exception. They record an
+// observation of the pending pool at one moment, not a derivation of the
+// block, so a stored snapshot survives every later write to the row: the
+// flag ORs, and each aggregate keeps its stored value whenever the stored
+// flag is set. That makes any reprocess path safe, whichever one takes it —
+// a duplicate live pass, the historical backfill, a manual reindex. A reorg
+// replacement block is unaffected because handleReorg deletes the row first,
+// so its snapshot starts from nothing.
 func (i *Indexer) upsertBlockBuilder(tx *sqlx.Tx, builder *models.BlockBuilder) error {
 	_, err := tx.ExecContext(i.ctx, `
 		INSERT INTO block_builders (
@@ -375,11 +478,15 @@ func (i *Indexer) upsertBlockBuilder(tx *sqlx.Tx, builder *models.BlockBuilder) 
 			tx_count = EXCLUDED.tx_count,
 			proposer_payment_wei = EXCLUDED.proposer_payment_wei,
 			proposer_payment_to = EXCLUDED.proposer_payment_to,
-			candidate_snapshot = EXCLUDED.candidate_snapshot,
-			pending_candidate_txs = EXCLUDED.pending_candidate_txs,
-			eligible_skipped_txs = EXCLUDED.eligible_skipped_txs,
-			eligible_skipped_blobs = EXCLUDED.eligible_skipped_blobs,
-			eligible_skipped_max_tip = EXCLUDED.eligible_skipped_max_tip
+			candidate_snapshot = block_builders.candidate_snapshot OR EXCLUDED.candidate_snapshot,
+			pending_candidate_txs = CASE WHEN block_builders.candidate_snapshot
+				THEN block_builders.pending_candidate_txs ELSE EXCLUDED.pending_candidate_txs END,
+			eligible_skipped_txs = CASE WHEN block_builders.candidate_snapshot
+				THEN block_builders.eligible_skipped_txs ELSE EXCLUDED.eligible_skipped_txs END,
+			eligible_skipped_blobs = CASE WHEN block_builders.candidate_snapshot
+				THEN block_builders.eligible_skipped_blobs ELSE EXCLUDED.eligible_skipped_blobs END,
+			eligible_skipped_max_tip = CASE WHEN block_builders.candidate_snapshot
+				THEN block_builders.eligible_skipped_max_tip ELSE EXCLUDED.eligible_skipped_max_tip END
 	`, builder.ChainID, builder.BlockNumber, builder.BlockTimestamp, builder.FeeRecipient, builder.ExtraData,
 		builder.BuilderKey, builder.BuilderName, builder.TxCount, builder.ProposerPaymentWei, builder.ProposerPaymentTo,
 		builder.CandidateSnapshot, builder.PendingCandidateTxs, builder.EligibleSkippedTxs,
@@ -490,8 +597,13 @@ func decodeExtraData(value string) []byte {
 }
 
 // pruneStaleCandidates drops per-transaction candidate detail older than the
-// retention window. It runs on the mempool cleanup ticker next to the
-// blob_replacements prune; the block_builders aggregates it summarized stay.
+// retention window; the block_builders aggregates it summarized stay.
+//
+// It runs on every maintenance tick, gated only on indexer.candidate_retention
+// — not on the mempool TTL that gates the sweeps beside it, and not on those
+// sweeps succeeding. blob_inclusion_candidates is LOGGED and written by every
+// live snapshot, so a deployment that turns the mempool TTL off must not
+// silently stop pruning it.
 func (i *Indexer) pruneStaleCandidates(ctx context.Context) {
 	if i.candidateRetention <= 0 {
 		return

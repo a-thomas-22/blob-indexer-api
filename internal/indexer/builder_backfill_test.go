@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/big"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -51,7 +52,13 @@ func (f *fakeBlockSource) fetch(_ context.Context, number uint64) (*types.Block,
 	if remaining > 0 {
 		return nil, errors.New("rpc failure")
 	}
+	return f.blockAt(number), nil
+}
 
+// blockAt renders the canned block for a height. Tests advertise its hash in
+// the missing-row listing, which the backfill compares against what the
+// source answers, so both sides must come from here.
+func (f *fakeBlockSource) blockAt(number uint64) *types.Block {
 	header := &types.Header{
 		Number:   new(big.Int).SetUint64(number),
 		Time:     number * 12,
@@ -59,7 +66,12 @@ func (f *fakeBlockSource) fetch(_ context.Context, number uint64) (*types.Block,
 		Coinbase: f.coinbase,
 		BaseFee:  big.NewInt(10),
 	}
-	return types.NewBlockWithHeader(header).WithBody(types.Body{Transactions: f.txs}), nil
+	return types.NewBlockWithHeader(header).WithBody(types.Body{Transactions: f.txs})
+}
+
+// hashAt is the canned block's hash as indexed_blocks would hold it.
+func (f *fakeBlockSource) hashAt(number int64) string {
+	return f.blockAt(uint64(number)).Hash().Hex()
 }
 
 func (f *fakeBlockSource) count(number uint64) int {
@@ -87,10 +99,10 @@ func newBuilderBackfillTestIndexer(t *testing.T) (*Indexer, sqlmock.Sqlmock, *fa
 	return idx, mock, source
 }
 
-func expectBuilderlessBlocks(mock sqlmock.Sqlmock, from, to int64, blocks ...int64) {
-	rows := sqlmock.NewRows([]string{"block_number"})
+func expectBuilderlessBlocks(mock sqlmock.Sqlmock, source *fakeBlockSource, from, to int64, blocks ...int64) {
+	rows := sqlmock.NewRows([]string{"block_number", "block_hash"})
 	for _, block := range blocks {
-		rows.AddRow(block)
+		rows.AddRow(block, source.hashAt(block))
 	}
 	mock.ExpectQuery(regexp.QuoteMeta("FROM indexed_blocks ib")).
 		WithArgs(testIndexerChainID, from, to).
@@ -129,12 +141,12 @@ func TestBuilderBackfill_InsertsMissingRowsAndCheckpoints(t *testing.T) {
 	expectMetadataRead(mock, nil)
 	// Window [1,2]: only block 2 lacks a builder row; after the write it is
 	// rechecked and found complete.
-	expectBuilderlessBlocks(mock, 1, 2, 2)
+	expectBuilderlessBlocks(mock, source, 1, 2, 2)
 	expectBuilderInsert(mock, []int64{2}, true)
-	expectBuilderlessBlocks(mock, 1, 2)
+	expectBuilderlessBlocks(mock, source, 1, 2)
 	expectBuilderWatermarkWrite(mock, 2)
 	// Window [3,4]: nothing to do, so no recheck, but the checkpoint advances.
-	expectBuilderlessBlocks(mock, 3, 4)
+	expectBuilderlessBlocks(mock, source, 3, 4)
 	expectBuilderWatermarkWrite(mock, 4)
 
 	idx.runBuilderBackfill()
@@ -155,12 +167,12 @@ func TestBuilderBackfill_FetchesBatchesConcurrentlyInBlockOrder(t *testing.T) {
 
 	expectBounds(mock, 1, 8)
 	expectMetadataRead(mock, nil)
-	expectBuilderlessBlocks(mock, 1, 8, 1, 2, 3, 5, 8)
+	expectBuilderlessBlocks(mock, source, 1, 8, 1, 2, 3, 5, 8)
 	// Five blocks in batches of three: [1,2,3] then [5,8], each written in
 	// ascending block order regardless of which worker fetched what.
 	expectBuilderInsert(mock, []int64{1, 2, 3}, true)
 	expectBuilderInsert(mock, []int64{5, 8}, true)
-	expectBuilderlessBlocks(mock, 1, 8)
+	expectBuilderlessBlocks(mock, source, 1, 8)
 	expectBuilderWatermarkWrite(mock, 8)
 
 	idx.runBuilderBackfill()
@@ -176,11 +188,11 @@ func TestBuilderBackfill_FetchesBatchesConcurrentlyInBlockOrder(t *testing.T) {
 }
 
 func TestBuilderBackfill_ResumesPastWatermark(t *testing.T) {
-	idx, mock, _ := newBuilderBackfillTestIndexer(t)
+	idx, mock, source := newBuilderBackfillTestIndexer(t)
 
 	expectBounds(mock, 1, 6)
 	expectMetadataRead(mock, "4")
-	expectBuilderlessBlocks(mock, 5, 6)
+	expectBuilderlessBlocks(mock, source, 5, 6)
 	expectBuilderWatermarkWrite(mock, 6)
 
 	idx.runBuilderBackfill()
@@ -226,10 +238,10 @@ func TestBuilderBackfill_SkipsWhenCaughtUpOrEmpty(t *testing.T) {
 	})
 
 	t.Run("unparsable watermark restarts the walk", func(t *testing.T) {
-		idx, mock, _ := newBuilderBackfillTestIndexer(t)
+		idx, mock, source := newBuilderBackfillTestIndexer(t)
 		expectBounds(mock, 1, 2)
 		expectMetadataRead(mock, "not-a-number")
-		expectBuilderlessBlocks(mock, 1, 2)
+		expectBuilderlessBlocks(mock, source, 1, 2)
 		expectBuilderWatermarkWrite(mock, 2)
 
 		idx.runBuilderBackfill()
@@ -240,10 +252,10 @@ func TestBuilderBackfill_SkipsWhenCaughtUpOrEmpty(t *testing.T) {
 	})
 
 	t.Run("watermark read fails", func(t *testing.T) {
-		idx, mock, _ := newBuilderBackfillTestIndexer(t)
+		idx, mock, source := newBuilderBackfillTestIndexer(t)
 		expectBounds(mock, 1, 2)
 		mock.ExpectQuery("SELECT value FROM indexer_metadata").WillReturnError(errors.New("down"))
-		expectBuilderlessBlocks(mock, 1, 2)
+		expectBuilderlessBlocks(mock, source, 1, 2)
 		expectBuilderWatermarkWrite(mock, 2)
 
 		idx.runBuilderBackfill()
@@ -265,12 +277,12 @@ func TestBuilderBackfill_SkipsFailingBlockAndHoldsCheckpoint(t *testing.T) {
 
 	expectBounds(mock, 1, 4)
 	expectMetadataRead(mock, nil)
-	expectBuilderlessBlocks(mock, 1, 2, 1, 2)
+	expectBuilderlessBlocks(mock, source, 1, 2, 1, 2)
 	// Block 1 lands; block 2's batch has nothing to write at all.
 	expectBuilderInsert(mock, []int64{1}, true)
-	expectBuilderlessBlocks(mock, 1, 2, 2)
+	expectBuilderlessBlocks(mock, source, 1, 2, 2)
 	// The walk continues into the next window, but the checkpoint stays put.
-	expectBuilderlessBlocks(mock, 3, 4)
+	expectBuilderlessBlocks(mock, source, 3, 4)
 
 	idx.runBuilderBackfill()
 
@@ -293,9 +305,9 @@ func TestBuilderBackfill_WritesBuilderRowWithoutBlobTransactions(t *testing.T) {
 
 	expectBounds(mock, 1, 2)
 	expectMetadataRead(mock, nil)
-	expectBuilderlessBlocks(mock, 1, 2, 1)
+	expectBuilderlessBlocks(mock, source, 1, 2, 1)
 	expectBuilderInsert(mock, []int64{1}, false)
-	expectBuilderlessBlocks(mock, 1, 2)
+	expectBuilderlessBlocks(mock, source, 1, 2)
 	expectBuilderWatermarkWrite(mock, 2)
 
 	idx.runBuilderBackfill()
@@ -311,7 +323,7 @@ func TestBuilderBackfill_RetriesWriteThenAborts(t *testing.T) {
 
 	expectBounds(mock, 1, 2)
 	expectMetadataRead(mock, nil)
-	expectBuilderlessBlocks(mock, 1, 2, 1)
+	expectBuilderlessBlocks(mock, source, 1, 2, 1)
 	for attempt := 0; attempt < builderBackfillFetchAttempts; attempt++ {
 		mock.ExpectBegin()
 		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO block_builders")).WillReturnError(errors.New("deadlock"))
@@ -344,13 +356,13 @@ func TestBuilderBackfill_RetriesListingThenAborts(t *testing.T) {
 // A checkpoint write that fails is only a repeated window next start, so the
 // walk carries on.
 func TestBuilderBackfill_ContinuesWhenCheckpointWriteFails(t *testing.T) {
-	idx, mock, _ := newBuilderBackfillTestIndexer(t)
+	idx, mock, source := newBuilderBackfillTestIndexer(t)
 
 	expectBounds(mock, 1, 4)
 	expectMetadataRead(mock, nil)
-	expectBuilderlessBlocks(mock, 1, 2)
+	expectBuilderlessBlocks(mock, source, 1, 2)
 	mock.ExpectExec("INSERT INTO indexer_metadata").WillReturnError(errors.New("down"))
-	expectBuilderlessBlocks(mock, 3, 4)
+	expectBuilderlessBlocks(mock, source, 3, 4)
 	expectBuilderWatermarkWrite(mock, 4)
 
 	idx.runBuilderBackfill()
@@ -369,10 +381,10 @@ func TestBuilderBackfill_DiscardsBatchInvalidatedByCleanup(t *testing.T) {
 
 	expectBounds(mock, 1, 2)
 	expectMetadataRead(mock, nil)
-	expectBuilderlessBlocks(mock, 1, 2, 1)
+	expectBuilderlessBlocks(mock, source, 1, 2, 1)
 	// No write is expected: the epoch moves between the listing and the
 	// write, which the fetch's stale sample detects.
-	expectBuilderlessBlocks(mock, 1, 2, 1)
+	expectBuilderlessBlocks(mock, source, 1, 2, 1)
 
 	origin := idx.builderBackfill.blockSource
 	idx.builderBackfill.blockSource = func(ctx context.Context, number uint64) (*types.Block, error) {
@@ -390,12 +402,12 @@ func TestBuilderBackfill_DiscardsBatchInvalidatedByCleanup(t *testing.T) {
 // The walk is throttled by the configured pause between windows, and the
 // pause is interruptible: canceling the indexer stops it mid-wait.
 func TestBuilderBackfill_StopsWhenIndexerStops(t *testing.T) {
-	idx, mock, _ := newBuilderBackfillTestIndexer(t)
+	idx, mock, source := newBuilderBackfillTestIndexer(t)
 	idx.builderBackfill.pause = time.Hour
 
 	expectBounds(mock, 1, 6)
 	expectMetadataRead(mock, nil)
-	expectBuilderlessBlocks(mock, 1, 2)
+	expectBuilderlessBlocks(mock, source, 1, 2)
 	expectBuilderWatermarkWrite(mock, 2)
 
 	done := make(chan struct{})
@@ -465,14 +477,14 @@ func TestBuilderBackfill_DisabledShortCircuits(t *testing.T) {
 // The configured pause is taken between windows, so the walk stays a
 // background trickle next to live indexing rather than a burst of RPC load.
 func TestBuilderBackfill_HonorsPauseBetweenWindows(t *testing.T) {
-	idx, mock, _ := newBuilderBackfillTestIndexer(t)
+	idx, mock, source := newBuilderBackfillTestIndexer(t)
 	idx.builderBackfill.pause = 80 * time.Millisecond
 
 	// Three windows of two blocks each: two pauses, no pause after the last.
 	expectBounds(mock, 1, 6)
 	expectMetadataRead(mock, nil)
 	for _, window := range [][2]int64{{1, 2}, {3, 4}, {5, 6}} {
-		expectBuilderlessBlocks(mock, window[0], window[1])
+		expectBuilderlessBlocks(mock, source, window[0], window[1])
 		expectBuilderWatermarkWrite(mock, window[1])
 	}
 
@@ -498,9 +510,9 @@ func TestBuilderBackfill_FallsBackToDefaultTuning(t *testing.T) {
 
 	expectBounds(mock, 1, 2)
 	expectMetadataRead(mock, nil)
-	expectBuilderlessBlocks(mock, 1, 2, 1, 2)
+	expectBuilderlessBlocks(mock, source, 1, 2, 1, 2)
 	expectBuilderInsert(mock, []int64{1, 2}, true)
-	expectBuilderlessBlocks(mock, 1, 2)
+	expectBuilderlessBlocks(mock, source, 1, 2)
 	expectBuilderWatermarkWrite(mock, 2)
 
 	idx.runBuilderBackfill()
@@ -578,5 +590,60 @@ func TestBuilderBackfill_RowMatchesLivePath(t *testing.T) {
 	}
 	if row.BlockNumber != 11 || row.ChainID != testIndexerChainID {
 		t.Fatalf("row = %+v", row)
+	}
+}
+
+// The backfill addresses blocks by number. When the node answers with a
+// different block than the one indexed_blocks holds for that height — a
+// reorg the live path has not cleaned up yet — the block is skipped like a
+// failed fetch: nothing is written, the window rechecks as incomplete, and
+// the checkpoint stays behind so the next start retries it.
+func TestBuilderBackfill_SkipsBlockWhoseHashDoesNotMatchTheIndexedFork(t *testing.T) {
+	idx, mock, source := newBuilderBackfillTestIndexer(t)
+	source.txs = []*types.Transaction{newSignedBlobTx(t, int64(idx.network.ChainID), 7)}
+
+	expectBounds(mock, 1, 2)
+	expectMetadataRead(mock, nil)
+	// Block 1 is listed under a hash the source never serves: the stored
+	// data for that height belongs to another fork.
+	mock.ExpectQuery(regexp.QuoteMeta("FROM indexed_blocks ib")).
+		WithArgs(testIndexerChainID, int64(1), int64(2)).
+		WillReturnRows(sqlmock.NewRows([]string{"block_number", "block_hash"}).AddRow(int64(1), "0xanotherfork"))
+	// No write transaction at all, and the recheck still finds block 1
+	// builder-less, so the checkpoint is never written.
+	mock.ExpectQuery(regexp.QuoteMeta("FROM indexed_blocks ib")).
+		WithArgs(testIndexerChainID, int64(1), int64(2)).
+		WillReturnRows(sqlmock.NewRows([]string{"block_number", "block_hash"}).AddRow(int64(1), "0xanotherfork"))
+
+	idx.runBuilderBackfill()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+	if source.count(1) != 1 {
+		t.Fatalf("expected one fetch of block 1, got %d", source.count(1))
+	}
+}
+
+// The hash comparison ignores checksum casing: indexed_blocks and a node's
+// answer are both hex, but nothing guarantees the same case.
+func TestBuilderBackfill_AcceptsAHashDifferingOnlyInCase(t *testing.T) {
+	idx, mock, source := newBuilderBackfillTestIndexer(t)
+	source.txs = []*types.Transaction{newSignedBlobTx(t, int64(idx.network.ChainID), 7)}
+
+	expectBounds(mock, 1, 2)
+	expectMetadataRead(mock, nil)
+	mock.ExpectQuery(regexp.QuoteMeta("FROM indexed_blocks ib")).
+		WithArgs(testIndexerChainID, int64(1), int64(2)).
+		WillReturnRows(sqlmock.NewRows([]string{"block_number", "block_hash"}).
+			AddRow(int64(1), strings.ToUpper(source.hashAt(1))))
+	expectBuilderInsert(mock, []int64{1}, true)
+	expectBuilderlessBlocks(mock, source, 1, 2)
+	expectBuilderWatermarkWrite(mock, 2)
+
+	idx.runBuilderBackfill()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
 	}
 }
