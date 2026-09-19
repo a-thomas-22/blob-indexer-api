@@ -41,6 +41,7 @@ Both share the same database. Production deployments run migrations with the ded
 | indexer | `internal/indexer/` | Core block/blob indexing engine (one per network) |
 | ethereum | `internal/ethereum/` | go-ethereum client wrapper (HTTP + WebSocket) |
 | attribution | `internal/attribution/` | Maps sender addresses to known rollup names |
+| builders | `internal/builders/` | Resolves a block's builder key/name from header extra data and fee recipient (registry + deterministic fallbacks; keys are API-pinned, changes trigger the relabel pass) |
 | mcpserver | `internal/mcpserver/` | Permissioned MCP server (API-key auth, per-key tool allowlists and rate limits) whose tools loop back into the public REST routes in-process |
 | logger | `internal/logger/` | Zap-based structured JSON logging |
 
@@ -49,7 +50,7 @@ Both share the same database. Production deployments run migrations with the ded
 - PostgreSQL with golang-migrate (migrations in `internal/db/migrations/`)
 - Migrations run via `cmd/migrate`, `make db-migrate`, Helm-managed migration containers, or local `database.run_migrations: true`
 - Migration authoring rules (fast DDL-only files, no explicit transaction control, idempotent, heavy backfills chunked outside schema migrations): see `internal/db/migrations/README.md`. A dirty schema left by a killed migration run is auto-recovered by `db.RunMigrations` when verifiably safe.
-- Key tables: `blobs` (confirmed only), `mempool_blobs` (pending; UNLOGGED, reconstructible from the node's mempool), `blob_replacements` (fee-bump eviction log; LOGGED, pruned after ~a week), `blob_block_streaks` (maximal runs of full/above-target blocks powering `/records`; trigger-maintained, rebuildable from `block_metrics`), `networks`, `blob_users`, `indexer_metadata`, `indexed_blocks`, `block_metrics`
+- Key tables: `blobs` (confirmed only), `mempool_blobs` (pending; UNLOGGED, reconstructible from the node's mempool), `blob_replacements` (fee-bump eviction log; LOGGED, pruned after ~a week), `blob_block_streaks` (maximal runs of full/above-target blocks powering `/records`; trigger-maintained, rebuildable from `block_metrics`), `block_builders` (per-block builder identity + proposer-payment heuristic + permanent pending-pool snapshot aggregates; live blocks only get snapshots), `blob_inclusion_candidates` (per-tx detail of pending blob txs a live block did not include, with an eligibility reason; LOGGED, pruned after `indexer.candidate_retention`), `networks`, `blob_users`, `indexer_metadata`, `indexed_blocks`, `block_metrics`
 - Connection pooling: 25 max open, 10 idle
 
 ### API Routes
