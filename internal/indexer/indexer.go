@@ -251,6 +251,11 @@ type Indexer struct {
 	// onto rows indexed before they were stored; fields so tests can shrink
 	// windows and waits. See priorityFeeBackfillSettings.
 	priorityFeeBackfill priorityFeeBackfillSettings
+	// builderBackfill tunes the startup walk that gives blocks indexed
+	// before migration 000017 a block_builders row and fills their blob
+	// rows' tx_index; fields so tests can shrink windows and waits and
+	// serve canned blocks. See builderBackfillSettings.
+	builderBackfill builderBackfillSettings
 	// candidateSnapshotMaxLag bounds how far behind the wall clock a block
 	// may be for its pending-pool snapshot to be taken; candidateMinAge is
 	// the grace period below which a pending tx is 'too_recent' to hold the
@@ -350,6 +355,7 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		streakBackfillEnabled:      true,
 		streakBackfillRetryBackoff: defaultStreakBackfillRetryBackoff,
 		priorityFeeBackfill:        newPriorityFeeBackfillSettings(cfg.Indexer),
+		builderBackfill:            newBuilderBackfillSettings(cfg.Indexer),
 		candidateSnapshotMaxLag:    durationOrDefault(cfg.Indexer.CandidateSnapshotMaxLag, defaultCandidateSnapshotMaxLag),
 		candidateMinAge:            durationOrDefault(cfg.Indexer.CandidateMinAge, defaultCandidateMinAge),
 		candidateRetention:         durationOrDefault(cfg.Indexer.CandidateRetention, defaultCandidateRetention),
@@ -619,14 +625,15 @@ func (i *Indexer) Start() error {
 	// Relabel existing builder rows when this binary's registry differs from
 	// the one that wrote them. Cheap: one distinct scan plus an UPDATE per
 	// raw (fee_recipient, extra_data) pair whose resolution changed. The
-	// historical builder backfill belongs at the end of this goroutine, after
-	// the relabel returns, so the rows it writes are labeled once, by the
-	// current registry, instead of being relabeled right behind it.
+	// historical builder backfill runs after the relabel returns, in this
+	// same goroutine, so the rows it writes are labeled once, by the current
+	// registry, instead of being relabeled right behind it.
 	if i.db != nil {
 		i.wg.Add(1)
 		go func() {
 			defer i.wg.Done()
 			i.runBuilderRelabel()
+			i.runBuilderBackfill()
 		}()
 	}
 

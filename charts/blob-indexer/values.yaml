@@ -264,8 +264,9 @@ appConfig:
     # trades detail for disk.
     candidate_retention: "168h"
     # Startup walk that adds a builder row to blocks indexed before the
-    # block_builders table existed, by refetching each such block. Resumable
-    # and non-destructive; disable to stop spending RPC calls on history.
+    # block_builders table existed, by refetching each such block, and fills
+    # those blocks' blob rows' tx_index from the same fetch. Resumable and
+    # non-destructive; disable to stop spending RPC calls on history.
     builder_backfill_enabled: true
     # Pause between builder backfill windows, which throttles the RPC load
     # that walk adds next to live indexing.

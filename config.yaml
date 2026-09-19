@@ -67,7 +67,8 @@ indexer:
   # aggregates on block_builders are permanent.
   candidate_retention: 168h
   # Startup walk that adds builder rows to blocks indexed before the table
-  # existed, refetching each block. Resumable; pause throttles RPC use.
+  # existed and fills their blob rows' tx_index, refetching each block.
+  # Resumable and non-destructive; pause throttles RPC use.
   builder_backfill_enabled: true
   builder_backfill_pause: 250ms
 
