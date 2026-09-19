@@ -1538,10 +1538,38 @@ func TestInsertPendingBlobs(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS")).
 			WithArgs(blob.ChainID, blob.TxHash).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+		// The pending rows are skipped, but the observation is still
+		// backfilled onto a confirmed row that has none.
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE blobs SET first_seen_at")).
+			WithArgs(blob.ChainID, blob.TxHash, blob.Timestamp).
+			WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectCommit()
 
 		if err := idx.insertPendingBlobs([]models.Blob{blob}); err != nil {
 			t.Fatalf("insertPendingBlobs() error = %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("expectations not met: %v", err)
+		}
+	})
+
+	t.Run("wraps the first-seen backfill error on a suppressed tx", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+		blob := newBlobFixture()
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS")).
+			WithArgs(blob.ChainID, blob.TxHash).
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE blobs SET first_seen_at")).
+			WillReturnError(errors.New("update failed"))
+		mock.ExpectRollback()
+
+		err := idx.insertPendingBlobs([]models.Blob{blob})
+		if err == nil || !strings.Contains(err.Error(), "failed to record first-seen time") {
+			t.Fatalf("expected a wrapped first-seen error, got %v", err)
 		}
 	})
 

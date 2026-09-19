@@ -86,6 +86,29 @@ func readBuilderRow(t *testing.T, idx *Indexer, blockNumber int64) builderRow {
 	return row
 }
 
+// describeBuilderRow renders a row by value, so two reads can be compared
+// without the nullable columns' pointers standing in for their contents.
+func describeBuilderRow(row builderRow) string {
+	nullableInt := func(v *int) string {
+		if v == nil {
+			return "NULL"
+		}
+		return fmt.Sprintf("%d", *v)
+	}
+	nullableText := func(v *string) string {
+		if v == nil {
+			return "NULL"
+		}
+		return *v
+	}
+	return fmt.Sprintf("key=%s name=%s fee_recipient=%s extra=%s tx_count=%d payment=%s payment_to=%s "+
+		"snapshot=%t pending=%s skipped_txs=%s skipped_blobs=%s max_tip=%s",
+		row.BuilderKey, row.BuilderName, row.FeeRecipient, row.ExtraData, row.TxCount,
+		nullableText(row.ProposerPaymentWei), nullableText(row.ProposerPaymentTo),
+		row.CandidateSnapshot, nullableInt(row.PendingCandidateTxs), nullableInt(row.EligibleSkippedTxs),
+		nullableInt(row.EligibleSkippedBlobs), nullableText(row.EligibleSkippedMaxTip))
+}
+
 // A block stores who built it alongside its metrics, in the same transaction,
 // and a reprocess overwrites every column from the freshly fetched header.
 func TestIntegrationBlockBuilderRowWritten(t *testing.T) {
@@ -307,7 +330,9 @@ func TestIntegrationPendingReplacementRecordsFeeContext(t *testing.T) {
 }
 
 // seedPendingCandidate inserts a pending blob transaction the snapshot will
-// classify.
+// classify. seenAt is the first-seen instant; last_seen is then bumped to now
+// the way every poll's liveness refresh does for a transaction the node still
+// reports, because the candidate snapshot only counts rows seen recently.
 func seedPendingCandidate(t *testing.T, idx *Indexer, txHash, sender string, nonce uint64, blobCount int, tip string, seenAt time.Time) {
 	t.Helper()
 	blobs := make([]models.Blob, 0, blobCount)
@@ -321,6 +346,18 @@ func seedPendingCandidate(t *testing.T, idx *Indexer, txHash, sender string, non
 	}
 	if err := idx.insertPendingBlobs(blobs); err != nil {
 		t.Fatalf("insertPendingBlobs(%s) error = %v", txHash, err)
+	}
+	setPendingLastSeen(t, idx, txHash, time.Now().UTC())
+}
+
+// setPendingLastSeen rewrites a tracked pending transaction's liveness
+// watermark, standing in for the poll that did (or did not) re-report it.
+func setPendingLastSeen(t *testing.T, idx *Indexer, txHash string, lastSeen time.Time) {
+	t.Helper()
+	if _, err := idx.db.ExecContext(context.Background(),
+		"UPDATE mempool_blobs SET last_seen = $3 WHERE chain_id = $1 AND tx_hash = $2",
+		integrationChainID, txHash, lastSeen); err != nil {
+		t.Fatalf("set last_seen for %s: %v", txHash, err)
 	}
 }
 
@@ -609,5 +646,297 @@ func TestIntegrationBuilderRelabel(t *testing.T) {
 	}
 	if key != "stale" {
 		t.Fatalf("expected the matching version to skip the pass, got %q", key)
+	}
+}
+
+// The polling walker and the WebSocket follower enqueue live heights
+// independently, so an ordinary live block can be processed twice while it
+// is still inside the snapshot lag. The first snapshot wins: by the second
+// pass the pool has moved on (what the block left pending may since have
+// been promoted, and new transactions have arrived), and re-snapshotting
+// would rewrite the aggregates against a pool the builder never faced while
+// the first pass's candidate rows stayed behind.
+func TestIntegrationDuplicateLiveBlockKeepsTheFirstSnapshot(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+	idx.candidateSnapshotMaxLag = time.Minute
+	idx.candidateMinAge = 6 * time.Second
+
+	blockTime := time.Now().UTC().Truncate(time.Second)
+	seenAt := blockTime.Add(-time.Minute)
+
+	seedPendingCandidate(t, idx, "0xskipped", "0xs1", 1, 2, "9", seenAt)
+
+	indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 400, BlockHash: "0xh400", ParentHash: "0xp399"}
+	builder := integrationBuilder(400, blockTime, []byte("Titan (titanbuilder.xyz)"), "0xTitan")
+	if err := idx.insertBlockData(nil, indexed, integrationBlockMetrics(400, blockTime), builder, 0); err != nil {
+		t.Fatalf("insertBlockData() first pass error = %v", err)
+	}
+
+	first := readBuilderRow(t, idx, 400)
+	if !first.CandidateSnapshot || first.PendingCandidateTxs == nil || *first.PendingCandidateTxs != 1 ||
+		first.EligibleSkippedTxs == nil || *first.EligibleSkippedTxs != 1 ||
+		first.EligibleSkippedBlobs == nil || *first.EligibleSkippedBlobs != 2 ||
+		first.EligibleSkippedMaxTip == nil || *first.EligibleSkippedMaxTip != "9" {
+		t.Fatalf("first pass did not record the pool it saw: %+v", first)
+	}
+
+	// The pool moves on: the transaction the block skipped is promoted by a
+	// later block, and a different one arrives.
+	if _, err := database.ExecContext(ctx,
+		"DELETE FROM mempool_blobs WHERE chain_id = $1 AND tx_hash = $2",
+		integrationChainID, "0xskipped"); err != nil {
+		t.Fatalf("promote away the skipped tx: %v", err)
+	}
+	seedPendingCandidate(t, idx, "0xlater", "0xs2", 1, 1, "500", blockTime.Add(-30*time.Second))
+
+	// The duplicate task for the very same height.
+	if err := idx.insertBlockData(nil, indexed, integrationBlockMetrics(400, blockTime), builder, 0); err != nil {
+		t.Fatalf("insertBlockData() duplicate pass error = %v", err)
+	}
+
+	second := readBuilderRow(t, idx, 400)
+	if describeBuilderRow(second) != describeBuilderRow(first) {
+		t.Fatalf("the duplicate pass rewrote the snapshot:\n first  = %s\n second = %s",
+			describeBuilderRow(first), describeBuilderRow(second))
+	}
+
+	var candidateHashes []string
+	if err := database.SelectContext(ctx, &candidateHashes,
+		"SELECT tx_hash FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_number = 400 ORDER BY tx_hash",
+		integrationChainID); err != nil {
+		t.Fatalf("read candidates: %v", err)
+	}
+	if len(candidateHashes) != 1 || candidateHashes[0] != "0xskipped" {
+		t.Fatalf("candidate rows = %v, want exactly [0xskipped]", candidateHashes)
+	}
+}
+
+// The upsert itself preserves a stored snapshot, so every other reprocess
+// path — the historical backfill, a manual reindex, a catch-up pass outside
+// the snapshot lag — is safe even though it never looks the row up first.
+func TestIntegrationBuilderUpsertPreservesAStoredSnapshot(t *testing.T) {
+	idx, _ := newIntegrationIndexer(t)
+	idx.candidateSnapshotMaxLag = time.Minute
+	idx.candidateMinAge = 6 * time.Second
+
+	blockTime := time.Now().UTC().Truncate(time.Second)
+	seedPendingCandidate(t, idx, "0xskipped", "0xs1", 1, 1, "42", blockTime.Add(-time.Minute))
+
+	indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 401, BlockHash: "0xh401", ParentHash: "0xp400"}
+	builder := integrationBuilder(401, blockTime, []byte("beaverbuild.org"), "0xBeaver")
+	if err := idx.insertBlockData(nil, indexed, integrationBlockMetrics(401, blockTime), builder, 0); err != nil {
+		t.Fatalf("insertBlockData() live error = %v", err)
+	}
+	live := readBuilderRow(t, idx, 401)
+	if !live.CandidateSnapshot {
+		t.Fatalf("expected a snapshot for a live block, got %+v", live)
+	}
+
+	// A later pass with no snapshot of its own (a historical replay) still
+	// re-derives the identity columns, but must not clear the observation.
+	idx.candidateSnapshotMaxLag = -1
+	replay := integrationBuilder(401, blockTime, []byte("rsync-builder"), "0xRsync")
+	replay.TxCount = 11
+	if err := idx.insertBlockData(nil, indexed, integrationBlockMetrics(401, blockTime), replay, 0); err != nil {
+		t.Fatalf("insertBlockData() replay error = %v", err)
+	}
+	after := readBuilderRow(t, idx, 401)
+	if after.BuilderKey != "rsync" || after.TxCount != 11 {
+		t.Fatalf("the replay did not re-derive the identity columns: %+v", after)
+	}
+	if !after.CandidateSnapshot || after.PendingCandidateTxs == nil || *after.PendingCandidateTxs != 1 ||
+		after.EligibleSkippedMaxTip == nil || *after.EligibleSkippedMaxTip != "42" {
+		t.Fatalf("the replay erased the stored snapshot: %+v", after)
+	}
+}
+
+// A transaction the node stopped reporting is no longer something a builder
+// could have included, whatever the far longer TTL sweep has yet to delete.
+func TestIntegrationCandidateSnapshotIgnoresStalePoolRows(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+	idx.candidateSnapshotMaxLag = time.Minute
+	idx.candidateMinAge = 6 * time.Second
+	// Liveness window: the 30s floor.
+	idx.mempoolPollingInterval = 15 * time.Second
+	idx.mempoolReconcileInterval = 15 * time.Second
+
+	blockTime := time.Now().UTC().Truncate(time.Second)
+	seenAt := blockTime.Add(-5 * time.Minute)
+
+	seedPendingCandidate(t, idx, "0xlive", "0xs1", 1, 1, "9", seenAt)
+	seedPendingCandidate(t, idx, "0xdropped", "0xs2", 1, 2, "900", seenAt)
+	// The node stopped reporting this one — a privately delivered same-nonce
+	// cancellation confirmed, say — so its liveness watermark stopped moving
+	// while the row itself lingers until the TTL sweep.
+	setPendingLastSeen(t, idx, "0xdropped", blockTime.Add(-10*time.Minute))
+
+	indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 410, BlockHash: "0xh410", ParentHash: "0xp409"}
+	builder := integrationBuilder(410, blockTime, []byte("Titan (titanbuilder.xyz)"), "0xTitan")
+	if err := idx.insertBlockData(nil, indexed, integrationBlockMetrics(410, blockTime), builder, 0); err != nil {
+		t.Fatalf("insertBlockData() error = %v", err)
+	}
+
+	row := readBuilderRow(t, idx, 410)
+	if row.PendingCandidateTxs == nil || *row.PendingCandidateTxs != 1 {
+		t.Fatalf("pending candidate txs = %v, want 1 (the dropped tx must not count)", row.PendingCandidateTxs)
+	}
+	if row.EligibleSkippedBlobs == nil || *row.EligibleSkippedBlobs != 1 {
+		t.Fatalf("eligible skipped blobs = %v, want 1", row.EligibleSkippedBlobs)
+	}
+	if row.EligibleSkippedMaxTip == nil || *row.EligibleSkippedMaxTip != "9" {
+		t.Fatalf("max tip = %v, want 9 (the dropped tx's 900 must not count)", row.EligibleSkippedMaxTip)
+	}
+
+	var hashes []string
+	if err := database.SelectContext(ctx, &hashes,
+		"SELECT tx_hash FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_number = 410",
+		integrationChainID); err != nil {
+		t.Fatalf("read candidates: %v", err)
+	}
+	if len(hashes) != 1 || hashes[0] != "0xlive" {
+		t.Fatalf("candidate rows = %v, want exactly [0xlive]", hashes)
+	}
+
+	// The stale row is still in the pool table: only the snapshot ignores it.
+	var pooled int
+	if err := database.GetContext(ctx, &pooled,
+		"SELECT COUNT(*) FROM mempool_blobs WHERE chain_id = $1 AND tx_hash = $2",
+		integrationChainID, "0xdropped"); err != nil {
+		t.Fatalf("count pooled rows: %v", err)
+	}
+	if pooled != 2 {
+		t.Fatalf("the snapshot must not delete stale pool rows, got %d", pooled)
+	}
+}
+
+// The blob slot (chain_id, block_number, blob_index) is the upsert's conflict
+// key, not the transaction. A sibling fork putting a different transaction in
+// the same slot must not inherit the previous occupant's observation, while a
+// reprocess of the same transaction must keep it.
+func TestIntegrationFirstSeenAtFollowsTheTransaction(t *testing.T) {
+	idx, _ := newIntegrationIndexer(t)
+	ctx := context.Background()
+	timestamp := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	observed := timestamp.Add(-20 * time.Second)
+
+	readFirstSeen := func(t *testing.T) (string, *time.Time) {
+		t.Helper()
+		var row struct {
+			TxHash      string     `db:"tx_hash"`
+			FirstSeenAt *time.Time `db:"first_seen_at"`
+		}
+		if err := idx.db.GetContext(ctx, &row,
+			"SELECT tx_hash, first_seen_at FROM blobs WHERE chain_id = $1 AND block_number = 500 AND blob_index = 0",
+			integrationChainID); err != nil {
+			t.Fatalf("read blob row: %v", err)
+		}
+		return row.TxHash, row.FirstSeenAt
+	}
+
+	indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 500, BlockHash: "0xh500a", ParentHash: "0xp499"}
+	first := integrationBlob(500, 0, "0xtxA", "0xs1", true)
+	first.Timestamp = timestamp
+	first.FirstSeenAt = &observed
+	if err := idx.insertBlockData([]models.Blob{first}, indexed, integrationBlockMetrics(500, timestamp), nil, 0); err != nil {
+		t.Fatalf("insertBlockData(A): %v", err)
+	}
+	if hash, seen := readFirstSeen(t); hash != "0xtxA" || seen == nil || !seen.UTC().Equal(observed) {
+		t.Fatalf("stored (%q, %v), want (0xtxA, %s)", hash, seen, observed)
+	}
+
+	// Reprocessing the same transaction with nothing left to promote keeps
+	// the stored observation.
+	same := integrationBlob(500, 0, "0xtxA", "0xs1", true)
+	same.Timestamp = timestamp
+	if err := idx.insertBlockData([]models.Blob{same}, indexed, integrationBlockMetrics(500, timestamp), nil, 0); err != nil {
+		t.Fatalf("insertBlockData(A again): %v", err)
+	}
+	if hash, seen := readFirstSeen(t); hash != "0xtxA" || seen == nil || !seen.UTC().Equal(observed) {
+		t.Fatalf("a reprocess lost the observation: (%q, %v)", hash, seen)
+	}
+
+	// A sibling block for the same height puts an unobserved transaction in
+	// the slot: it must carry NULL, not the previous occupant's timestamp.
+	sibling := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 500, BlockHash: "0xh500b", ParentHash: "0xp499"}
+	other := integrationBlob(500, 0, "0xtxB", "0xs2", true)
+	other.Timestamp = timestamp
+	if err := idx.insertBlockData([]models.Blob{other}, sibling, integrationBlockMetrics(500, timestamp), nil, 0); err != nil {
+		t.Fatalf("insertBlockData(B): %v", err)
+	}
+	hash, seen := readFirstSeen(t)
+	if hash != "0xtxB" {
+		t.Fatalf("tx_hash = %q, want 0xtxB", hash)
+	}
+	if seen != nil {
+		t.Fatalf("first_seen_at = %v, want NULL: the observation belonged to 0xtxA", seen)
+	}
+}
+
+// The pending poll can lose the writer-lock race to the block worker, which
+// then stores the confirmed blob with no first_seen_at. The poll's captured
+// observation must still land rather than being discarded with the
+// suppressed pending write.
+func TestIntegrationSuppressedPendingStillRecordsFirstSeen(t *testing.T) {
+	idx, _ := newIntegrationIndexer(t)
+	ctx := context.Background()
+	timestamp := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	observed := timestamp.Add(-15 * time.Second)
+
+	// The block worker won the lock: the confirmed row exists with no
+	// observation, because there was no pending row to promote.
+	indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 600, BlockHash: "0xh600", ParentHash: "0xp599"}
+	confirmed := integrationBlob(600, 0, "0xraced", "0xs1", true)
+	confirmed.Timestamp = timestamp
+	if err := idx.insertBlockData([]models.Blob{confirmed}, indexed, integrationBlockMetrics(600, timestamp), nil, 0); err != nil {
+		t.Fatalf("insertBlockData(): %v", err)
+	}
+
+	// The pending poll now gets the lock, finds the tx confirmed, and skips
+	// the pending write — but records what it observed.
+	pending := integrationBlob(models.PendingBlockNumber, 0, "0xraced", "0xs1", false)
+	pending.Nonce = 7
+	pending.Timestamp = observed
+	if err := idx.insertPendingBlobs([]models.Blob{pending}); err != nil {
+		t.Fatalf("insertPendingBlobs(): %v", err)
+	}
+
+	var row struct {
+		FirstSeenAt *time.Time `db:"first_seen_at"`
+	}
+	if err := idx.db.GetContext(ctx, &row,
+		"SELECT first_seen_at FROM blobs WHERE chain_id = $1 AND block_number = 600 AND blob_index = 0",
+		integrationChainID); err != nil {
+		t.Fatalf("read blob row: %v", err)
+	}
+	if row.FirstSeenAt == nil || !row.FirstSeenAt.UTC().Equal(observed) {
+		t.Fatalf("first_seen_at = %v, want the observed %s", row.FirstSeenAt, observed)
+	}
+
+	// No pending rows were created, and a later, later-timestamped poll does
+	// not move the value back.
+	var pooled int
+	if err := idx.db.GetContext(ctx, &pooled,
+		"SELECT COUNT(*) FROM mempool_blobs WHERE chain_id = $1 AND tx_hash = $2",
+		integrationChainID, "0xraced"); err != nil {
+		t.Fatalf("count pooled rows: %v", err)
+	}
+	if pooled != 0 {
+		t.Fatalf("a confirmed tx must not be resurrected into the pool, got %d rows", pooled)
+	}
+
+	late := pending
+	late.Timestamp = timestamp.Add(-time.Second)
+	if err := idx.insertPendingBlobs([]models.Blob{late}); err != nil {
+		t.Fatalf("insertPendingBlobs(late): %v", err)
+	}
+	if err := idx.db.GetContext(ctx, &row,
+		"SELECT first_seen_at FROM blobs WHERE chain_id = $1 AND block_number = 600 AND blob_index = 0",
+		integrationChainID); err != nil {
+		t.Fatalf("re-read blob row: %v", err)
+	}
+	if row.FirstSeenAt == nil || !row.FirstSeenAt.UTC().Equal(observed) {
+		t.Fatalf("a later poll overwrote the earliest observation: %v", row.FirstSeenAt)
 	}
 }

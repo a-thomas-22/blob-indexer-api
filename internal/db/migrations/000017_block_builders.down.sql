@@ -17,3 +17,10 @@ DROP TABLE IF EXISTS blob_inclusion_candidates;
 DROP INDEX IF EXISTS idx_block_builders_chain_key_timestamp;
 DROP INDEX IF EXISTS idx_block_builders_chain_timestamp;
 DROP TABLE IF EXISTS block_builders;
+
+-- The indexer's checkpoints describe rows this migration just dropped. Left
+-- behind, a roll forward would resume the builder backfill past the tip and
+-- never refill the recreated table, and the relabel pass would skip the
+-- rows it never wrote. Deleting them makes down-then-up start over.
+DELETE FROM indexer_metadata
+WHERE key IN ('block_builder_backfill_block', 'block_builder_registry_version');

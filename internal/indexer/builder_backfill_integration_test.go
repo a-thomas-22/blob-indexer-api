@@ -26,15 +26,17 @@ type backfilledBlobRow struct {
 
 // seedBuilderlessBlock records a block and its blob rows the way history
 // indexed before migration 000017 looks: an indexed block with metrics and
-// blobs, but no block_builders row and no tx_index.
-func seedBuilderlessBlock(t *testing.T, idx *Indexer, blockNumber int64, timestamp time.Time, txHash string) {
+// blobs, but no block_builders row and no tx_index. blockHash is what
+// indexed_blocks stores, which the backfill compares against the hash the
+// node answers with, so it must be the fetched block's own hash.
+func seedBuilderlessBlock(t *testing.T, idx *Indexer, blockNumber int64, timestamp time.Time, txHash, blockHash string) {
 	t.Helper()
 	blob := integrationBlob(blockNumber, 0, txHash, "0xsender", true)
 	blob.Timestamp = timestamp
 	indexed := models.IndexedBlock{
 		ChainID:     integrationChainID,
 		BlockNumber: blockNumber,
-		BlockHash:   "0xh" + txHash,
+		BlockHash:   blockHash,
 		ParentHash:  "0xp" + txHash,
 	}
 	if err := idx.insertBlockData([]models.Blob{blob}, indexed,
@@ -80,7 +82,7 @@ func TestIntegrationBuilderBackfillFillsHistory(t *testing.T) {
 	}
 
 	for _, block := range []int64{100, 101, 102} {
-		seedBuilderlessBlock(t, idx, block, timestamp, blobTx.Hash().Hex())
+		seedBuilderlessBlock(t, idx, block, timestamp, blobTx.Hash().Hex(), source.hashAt(block))
 	}
 
 	var builderRows int

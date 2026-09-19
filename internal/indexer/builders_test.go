@@ -835,6 +835,51 @@ func TestInsertBlockDataBuilderErrors(t *testing.T) {
 		return idx, mock, metrics, builder
 	}
 
+	t.Run("stored snapshot read failure aborts the block", func(t *testing.T) {
+		idx, mock, metrics, builder := newFixture(t)
+		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec("INSERT INTO block_metrics").
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectQuery("candidate_snapshot FROM block_builders").
+			WillReturnError(errors.New("snapshot probe failed"))
+		mock.ExpectRollback()
+
+		err := idx.insertBlockData(nil, models.IndexedBlock{ChainID: idx.network.ChainID, BlockNumber: 901}, metrics, builder, 0)
+		if err == nil || !strings.Contains(err.Error(), "failed to read stored candidate snapshot") {
+			t.Fatalf("expected a stored-snapshot read error, got %v", err)
+		}
+	})
+
+	t.Run("an existing snapshot skips classification entirely", func(t *testing.T) {
+		idx, mock, metrics, builder := newFixture(t)
+		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blobs WHERE")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec("INSERT INTO block_metrics").
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectQuery("candidate_snapshot FROM block_builders").
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(true))
+		// No pool read and no candidate insert: the upsert follows straight
+		// on, carrying the zero snapshot fields the stored row overrides.
+		mock.ExpectExec("INSERT INTO block_builders").
+			WithArgs(builder.ChainID, builder.BlockNumber, metrics.BlockTimestamp, builder.FeeRecipient, builder.ExtraData,
+				builder.BuilderKey, builder.BuilderName, 0, nil, nil,
+				false, nil, nil, nil, nil).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec("INSERT INTO indexed_blocks").
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectCommit()
+
+		if err := idx.insertBlockData(nil, models.IndexedBlock{ChainID: idx.network.ChainID, BlockNumber: 901}, metrics, builder, 0); err != nil {
+			t.Fatalf("insertBlockData() error = %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("expectations not met: %v", err)
+		}
+	})
+
 	t.Run("candidate select failure aborts the block", func(t *testing.T) {
 		idx, mock, metrics, builder := newFixture(t)
 		mock.ExpectBegin()
@@ -842,6 +887,8 @@ func TestInsertBlockDataBuilderErrors(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec("INSERT INTO block_metrics").
 			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectQuery("candidate_snapshot FROM block_builders").
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(false))
 		mock.ExpectQuery("FROM mempool_blobs").
 			WillReturnError(errors.New("pool read failed"))
 		mock.ExpectRollback()
@@ -859,6 +906,8 @@ func TestInsertBlockDataBuilderErrors(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec("INSERT INTO block_metrics").
 			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectQuery("candidate_snapshot FROM block_builders").
+			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(false))
 		mock.ExpectQuery("FROM mempool_blobs").
 			WillReturnRows(sqlmock.NewRows([]string{
 				"tx_hash", "from_address", "user_attribution", "nonce", "blob_count",
@@ -923,6 +972,8 @@ func TestInsertBlockDataTakesCandidateSnapshot(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("INSERT INTO block_metrics").
 		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery("candidate_snapshot FROM block_builders").
+		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(false))
 	mock.ExpectQuery("FROM mempool_blobs").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"tx_hash", "from_address", "user_attribution", "nonce", "blob_count",
@@ -1120,4 +1171,141 @@ func TestRunBuilderRelabel(t *testing.T) {
 			t.Fatalf("expectations not met: %v", err)
 		}
 	})
+}
+
+// Candidate pruning is gated on its own retention setting, not on the
+// mempool TTL that drives the other two maintenance jobs: a deployment that
+// turns the TTL off must still prune the LOGGED candidate table.
+func TestMaintenanceGating(t *testing.T) {
+	t.Run("the mempool TTL alone starts the loop", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.candidateRetention = 0
+		if !idx.mempoolCleanupDue() || !idx.maintenanceDue() {
+			t.Fatal("expected the mempool sweep to be due")
+		}
+		if got := idx.maintenanceInterval(); got != idx.mempoolCleanupInterval {
+			t.Fatalf("interval = %s, want the configured cleanup interval", got)
+		}
+	})
+
+	t.Run("candidate retention alone starts the loop", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.mempoolTTL = -time.Second
+		idx.mempoolCleanupInterval = 0
+		idx.candidateRetention = time.Hour
+		if idx.mempoolCleanupDue() {
+			t.Fatal("the mempool sweep must be off")
+		}
+		if !idx.maintenanceDue() {
+			t.Fatal("candidate retention alone must keep the maintenance loop running")
+		}
+		if got := idx.maintenanceInterval(); got != defaultCandidatePruneInterval {
+			t.Fatalf("interval = %s, want the package default %s", got, defaultCandidatePruneInterval)
+		}
+	})
+
+	t.Run("nothing configured leaves the loop unstarted", func(t *testing.T) {
+		idx := newTestIndexer()
+		idx.mempoolTTL = -time.Second
+		idx.candidateRetention = 0
+		if idx.maintenanceDue() {
+			t.Fatal("expected no maintenance job to be due")
+		}
+	})
+}
+
+// With the mempool TTL off, a maintenance tick issues the candidate prune
+// and nothing else.
+func TestRunMempoolCleanupPrunesCandidatesWithoutTheMempoolSweep(t *testing.T) {
+	idx := newTestIndexer()
+	idx.mempoolTTL = -time.Second
+	idx.mempoolCleanupInterval = 40 * time.Millisecond
+	idx.candidateRetention = time.Hour
+
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_inclusion_candidates")).
+		WithArgs(idx.network.ChainID, utcTimeArg{}).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+
+	done := make(chan struct{})
+	go func() {
+		idx.runMempoolCleanup()
+		close(done)
+	}()
+	time.Sleep(90 * time.Millisecond)
+	idx.cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runMempoolCleanup did not stop")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations not met: %v", err)
+	}
+}
+
+// A failure in either earlier maintenance step must not skip the candidate
+// prune for that tick.
+func TestRunMempoolCleanupPrunesCandidatesAfterEarlierFailures(t *testing.T) {
+	idx := newTestIndexer()
+	idx.mempoolCleanupInterval = 40 * time.Millisecond
+	idx.candidateRetention = time.Hour
+
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND COALESCE(last_seen, timestamp) < $2")).
+		WillReturnError(errors.New("pending sweep failed"))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_replacements WHERE chain_id = $1 AND replaced_at < $2")).
+		WillReturnError(errors.New("replacement prune failed"))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_inclusion_candidates")).
+		WithArgs(idx.network.ChainID, utcTimeArg{}).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	done := make(chan struct{})
+	go func() {
+		idx.runMempoolCleanup()
+		close(done)
+	}()
+	time.Sleep(90 * time.Millisecond)
+	idx.cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runMempoolCleanup did not stop")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations not met: %v", err)
+	}
+}
+
+// The candidate liveness window is derived from the configured refresh
+// cadence — two refreshes of the slower ticker, floored — rather than being
+// its own knob. Websocket mode refreshes last_seen on the reconcile ticker,
+// so that interval has to count too or every live row would read as stale.
+func TestCandidateLivenessWindow(t *testing.T) {
+	tests := []struct {
+		name      string
+		poll      time.Duration
+		reconcile time.Duration
+		want      time.Duration
+	}{
+		{"two polls when polling is the slower ticker", 45 * time.Second, 10 * time.Second, 90 * time.Second},
+		{"the reconcile ticker when it is slower", 30 * time.Second, 2 * time.Minute, 4 * time.Minute},
+		{"floored when both are fast", 5 * time.Second, 5 * time.Second, minCandidateLivenessWindow},
+		{"floored when both are unset", 0, 0, minCandidateLivenessWindow},
+		{"exactly the floor", 15 * time.Second, 0, minCandidateLivenessWindow},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			idx := newTestIndexer()
+			idx.mempoolPollingInterval = tc.poll
+			idx.mempoolReconcileInterval = tc.reconcile
+			if got := idx.candidateLivenessWindow(); got != tc.want {
+				t.Fatalf("candidateLivenessWindow() = %s, want %s", got, tc.want)
+			}
+		})
+	}
 }

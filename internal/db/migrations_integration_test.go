@@ -1513,3 +1513,92 @@ func TestBlobSlotMigration(t *testing.T) {
 		t.Fatal("mempool_blobs should not have a slot column")
 	}
 }
+
+// Rolling migration 000017 back drops block_builders and blobs.tx_index, so
+// the indexer's checkpoints for them describe rows that no longer exist. If
+// they survived the rollback, migrating forward again would recreate an
+// empty builder table while the backfill resumed past the tip and never
+// refilled it, and the relabel pass would skip rows it never wrote. The down
+// migration therefore clears both keys.
+func TestBlockBuildersDownMigrationClearsIndexerCheckpoints(t *testing.T) {
+	db, err := sqlx.Connect("postgres", integrationDBURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	resetSchema(t, db)
+
+	const blockBuildersVersion = 17
+	m := migrator(t, db)
+	if err := m.Migrate(blockBuildersVersion); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate to %d: %v", blockBuildersVersion, err)
+	}
+
+	// The checkpoints an indexer running on this schema would have written:
+	// one per network, plus the registry fingerprint.
+	if _, err := db.Exec(`
+		INSERT INTO indexer_metadata (chain_id, key, value) VALUES
+			(1, 'block_builder_backfill_block', '4'),
+			(1, 'block_builder_registry_version', 'deadbeefdeadbeef'),
+			(1, 'records_streak_backfill_block', '4')
+	`); err != nil {
+		t.Fatalf("seed checkpoints: %v", err)
+	}
+
+	if err := m.Migrate(blockBuildersVersion - 1); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate down to %d: %v", blockBuildersVersion-1, err)
+	}
+
+	var stale int
+	if err := db.Get(&stale, `
+		SELECT COUNT(*) FROM indexer_metadata
+		WHERE key IN ('block_builder_backfill_block', 'block_builder_registry_version')`); err != nil {
+		t.Fatalf("count builder checkpoints after down: %v", err)
+	}
+	if stale != 0 {
+		t.Fatalf("the down migration left %d builder checkpoint rows behind", stale)
+	}
+	// Unrelated checkpoints are none of its business.
+	var others int
+	if err := db.Get(&others,
+		`SELECT COUNT(*) FROM indexer_metadata WHERE key = 'records_streak_backfill_block'`); err != nil {
+		t.Fatalf("count unrelated checkpoints: %v", err)
+	}
+	if others != 1 {
+		t.Fatalf("the down migration touched unrelated metadata: %d rows left", others)
+	}
+
+	// Forward again: the table is back, empty, and nothing tells the backfill
+	// it has already covered history.
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate up again: %v", err)
+	}
+	if err := db.Get(&stale, `
+		SELECT COUNT(*) FROM indexer_metadata
+		WHERE key IN ('block_builder_backfill_block', 'block_builder_registry_version')`); err != nil {
+		t.Fatalf("count builder checkpoints after up: %v", err)
+	}
+	if stale != 0 {
+		t.Fatalf("expected no builder checkpoints after down/up, got %d", stale)
+	}
+	var builders int
+	if err := db.Get(&builders, `SELECT COUNT(*) FROM block_builders`); err != nil {
+		t.Fatalf("count block_builders: %v", err)
+	}
+	if builders != 0 {
+		t.Fatalf("expected an empty block_builders table, got %d rows", builders)
+	}
+
+	// Running the down migration twice is a no-op rather than an error.
+	if err := m.Migrate(blockBuildersVersion - 1); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate down again: %v", err)
+	}
+	if err := m.Migrate(blockBuildersVersion); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("migrate forward after a second rollback: %v", err)
+	}
+	if _, dirty, err := m.Version(); err != nil {
+		t.Fatalf("m.Version: %v", err)
+	} else if dirty {
+		t.Fatal("schema dirty after repeated down/up of migration 17")
+	}
+}

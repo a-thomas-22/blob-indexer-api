@@ -175,3 +175,47 @@ func TestRegistryVersion(t *testing.T) {
 		t.Fatalf("RegistryVersion() = %q after restore, want %q", restored, first)
 	}
 }
+
+// Header extra data is arbitrary bytes, and a builder's registered label can
+// sit next to one that is not printable ASCII. The registry must still match:
+// the printable-ASCII trim the fallbacks rely on rejects the whole value in
+// that case, so matching after it would silently demote a known builder to
+// the fee-recipient fallback.
+func TestResolveMatchesRegistryThroughNonASCIIExtraData(t *testing.T) {
+	tests := []struct {
+		name  string
+		extra []byte
+	}{
+		{"trailing multibyte rune", []byte("Gambit ☃")},
+		{"embedded NUL", append([]byte("beaverbuild.org"), 0x00, 0x01)},
+		{"invalid utf-8 byte", append([]byte("rsync-builder"), 0xff)},
+		{"leading control byte", append([]byte{0x02}, []byte("Titan (titanbuilder.xyz)")...)},
+	}
+	want := map[string]string{
+		"trailing multibyte rune": "gambit",
+		"embedded NUL":            "beaverbuild",
+		"invalid utf-8 byte":      "rsync",
+		"leading control byte":    "titan",
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Resolve(tc.extra, "0xfeedfacefeedfacefeedfacefeedfacefeedface")
+			if !got.Known || got.Key != want[tc.name] {
+				t.Fatalf("Resolve(%q) = %+v, want known key %q", tc.extra, got, want[tc.name])
+			}
+		})
+	}
+}
+
+// Extra data with no registered label and any non-printable byte still falls
+// through to the fee recipient: the raw-byte match must not widen what counts
+// as a usable label.
+func TestResolveStillFallsBackWithoutARegistryMatch(t *testing.T) {
+	got := Resolve([]byte("mystery\x00builder\xff"), "0xFEEDFACEFEEDFACEFEEDFACEFEEDFACEFEEDFACE")
+	if got.Known {
+		t.Fatalf("Resolve() = %+v, want an unknown builder", got)
+	}
+	if got.Key != "addr:0xfeedfacefeedfacefeedfacefeedfacefeedface" {
+		t.Fatalf("Resolve() key = %q, want the fee-recipient fallback", got.Key)
+	}
+}

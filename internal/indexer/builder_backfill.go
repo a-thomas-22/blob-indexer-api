@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -254,7 +255,7 @@ func (i *Indexer) backfillBuilderWindow(windowStart, windowEnd int64) (complete 
 			zap.String("network", i.network.Name),
 			zap.Int64("window_start", windowStart),
 			zap.Int64("window_end", windowEnd),
-			zap.Int64s("blocks", remaining))
+			zap.Int64s("blocks", missingBlockNumbers(remaining)))
 	}
 	return len(remaining) == 0, filled, inserted, indexed, nil
 }
@@ -275,9 +276,9 @@ func (i *Indexer) pauseBuilderBackfill() bool {
 
 // blocksMissingBlockBuilders lists the window's builder-less blocks, retrying
 // a transient database error a few times before giving up on the walk.
-func (i *Indexer) blocksMissingBlockBuilders(windowStart, windowEnd int64) ([]int64, error) {
+func (i *Indexer) blocksMissingBlockBuilders(windowStart, windowEnd int64) ([]db.MissingBuilderBlock, error) {
 	var (
-		blocks []int64
+		blocks []db.MissingBuilderBlock
 		err    error
 	)
 	for attempt := 1; attempt <= builderBackfillFetchAttempts; attempt++ {
@@ -296,7 +297,7 @@ func (i *Indexer) blocksMissingBlockBuilders(windowStart, windowEnd int64) ([]in
 // their builder rows and blob transaction positions, pausing between
 // batches. A block whose fetch fails every attempt is skipped (the window's
 // recheck reports it); a database failure is returned.
-func (i *Indexer) backfillBuilderBlocks(blocks []int64) (inserted, indexed int64, err error) {
+func (i *Indexer) backfillBuilderBlocks(blocks []db.MissingBuilderBlock) (inserted, indexed int64, err error) {
 	batchSize := i.builderBackfill.insertBatch
 	if batchSize <= 0 {
 		batchSize = defaultBuilderBackfillInsertBatch
@@ -328,13 +329,31 @@ func (i *Indexer) backfillBuilderBlocks(blocks []int64) (inserted, indexed int64
 	return inserted, indexed, nil
 }
 
+// missingBlockNumbers projects the block numbers out of a missing-row
+// listing, for log fields that name the blocks rather than their hashes.
+func missingBlockNumbers(blocks []db.MissingBuilderBlock) []int64 {
+	numbers := make([]int64, 0, len(blocks))
+	for _, block := range blocks {
+		numbers = append(numbers, block.BlockNumber)
+	}
+	return numbers
+}
+
 // fetchBuilderBackfillBatch fetches a batch of blocks concurrently and
 // derives their builder rows and blob transaction positions, in block order.
 // A block that fails every fetch attempt contributes nothing; it stays
 // builder-less and the window recheck holds the checkpoint on it, so the
 // batch still lands for the blocks that did fetch rather than losing them
 // all.
-func (i *Indexer) fetchBuilderBackfillBatch(blocks []int64) ([]models.BlockBuilder, []db.BlobTxIndexUpdate) {
+//
+// A block the node answers with a different hash than indexed_blocks holds
+// is treated exactly like a failed fetch. The backfill addresses blocks by
+// number, so a reorg the live path has not yet cleaned up would otherwise
+// pair one fork's builder — and its transaction positions — with another
+// fork's stored metrics and blobs. Skipping leaves the window incomplete,
+// the checkpoint where it is, and the block to the next pass, by which time
+// the live reorg handling has resolved which fork is canonical.
+func (i *Indexer) fetchBuilderBackfillBatch(blocks []db.MissingBuilderBlock) ([]models.BlockBuilder, []db.BlobTxIndexUpdate) {
 	workers := i.builderBackfill.fetchWorkers
 	if workers <= 0 {
 		workers = 1
@@ -352,14 +371,23 @@ func (i *Indexer) fetchBuilderBackfillBatch(blocks []int64) ([]models.BlockBuild
 		go func() {
 			defer wg.Done()
 			for index := range tasks {
-				block, err := i.fetchBuilderBackfillBlock(i.ctx, uint64(blocks[index]))
+				want := blocks[index]
+				block, err := i.fetchBuilderBackfillBlock(i.ctx, uint64(want.BlockNumber))
 				if err != nil {
 					if i.ctx.Err() == nil {
 						logger.Warn("Skipping block in builder backfill after repeated fetch failures",
 							zap.String("network", i.network.Name),
-							zap.Int64("block", blocks[index]),
+							zap.Int64("block", want.BlockNumber),
 							zap.Error(err))
 					}
+					continue
+				}
+				if got := block.Hash().Hex(); !strings.EqualFold(got, want.BlockHash) {
+					logger.Debug("Skipping block in builder backfill: the node answered with a different hash than the one indexed",
+						zap.String("network", i.network.Name),
+						zap.Int64("block", want.BlockNumber),
+						zap.String("indexed_hash", want.BlockHash),
+						zap.String("fetched_hash", got))
 					continue
 				}
 				rows[index] = i.blockBuilderRow(block, builderBackfillBlockTimestamp(block))
