@@ -1,0 +1,545 @@
+package indexer
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/ethereum/go-ethereum/core/types"
+	"go.uber.org/zap"
+
+	"github.com/a-thomas-22/blob-indexer-api/internal/config"
+	"github.com/a-thomas-22/blob-indexer-api/internal/db"
+	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
+	"github.com/a-thomas-22/blob-indexer-api/internal/logger"
+)
+
+const (
+	// defaultBuilderBackfillWindowBlocks is how many blocks one walk step
+	// covers. A step is one anti-join over indexed_blocks plus the fetches
+	// and inserts for whatever it finds; the checkpoint advances per step,
+	// so the width bounds how much a restart repeats.
+	defaultBuilderBackfillWindowBlocks int64 = 2000
+	// defaultBuilderBackfillInsertBatch is how many blocks one write
+	// transaction carries. Builder rows fire no triggers, but the blob
+	// tx_index update in the same transaction touches the blobs table, so
+	// batching keeps the number of statements down either way.
+	defaultBuilderBackfillInsertBatch = 100
+	// defaultBuilderBackfillFetchWorkers bounds concurrent block fetches
+	// within a batch; the RPC client's own rate limit applies on top.
+	defaultBuilderBackfillFetchWorkers = 4
+	// builderBackfillFetchAttempts is how many times one fetch or write is
+	// retried before the walk gives up on it for this process. The
+	// checkpoint means the next start resumes at the failed window.
+	builderBackfillFetchAttempts = 3
+	// defaultBuilderBackfillRetryBackoff scales the wait between retries.
+	defaultBuilderBackfillRetryBackoff = 2 * time.Second
+	// builderBackfillProgressEvery is how many windows pass between progress
+	// log lines; per-window lines would be thousands per network.
+	builderBackfillProgressEvery = 50
+)
+
+// builderBackfillSettings tunes runBuilderBackfill.
+type builderBackfillSettings struct {
+	enabled      bool
+	pause        time.Duration
+	windowBlocks int64
+	insertBatch  int
+	fetchWorkers int
+	retryBackoff time.Duration
+	// blockSource fetches one block with its transactions. A field so tests
+	// can serve canned blocks; nil means the indexer's RPC client, which is
+	// what production always uses.
+	blockSource func(context.Context, uint64) (*types.Block, error)
+}
+
+func newBuilderBackfillSettings(cfg config.IndexerConfig) builderBackfillSettings {
+	pause := cfg.BuilderBackfillPause
+	if pause < 0 {
+		pause = 0
+	}
+	return builderBackfillSettings{
+		enabled:      cfg.BuilderBackfillEnabled,
+		pause:        pause,
+		windowBlocks: defaultBuilderBackfillWindowBlocks,
+		insertBatch:  defaultBuilderBackfillInsertBatch,
+		fetchWorkers: defaultBuilderBackfillFetchWorkers,
+		retryBackoff: defaultBuilderBackfillRetryBackoff,
+	}
+}
+
+// runBuilderBackfill gives blocks indexed before migration 000017 the
+// block_builders row live indexing now writes, and fills blobs.tx_index for
+// their blob rows from the same fetch. It walks indexed history oldest first
+// in fixed block windows, lists the blocks in each window with no builder
+// row, refetches them with their transactions, and inserts.
+//
+// Nothing is deleted and no existing row is overwritten: the insert is
+// ON CONFLICT DO NOTHING, so a live insert that raced ahead keeps its
+// candidate snapshot, and the tx_index update only fills rows that have
+// none. Backfilled rows carry candidate_snapshot = false with NULL
+// aggregates, because the pending pool a historical block faced is gone —
+// "not observed" rather than "nothing was pending". The candidates table is
+// never touched.
+//
+// Progress checkpoints in indexer_metadata. The checkpoint only advances
+// over a contiguous prefix of windows proven complete: after a window is
+// processed it is listed again, and any block still without a builder row (a
+// fetch that failed every attempt, or a batch a reorg cleanup invalidated in
+// flight) leaves the window incomplete. The walk carries on through later
+// windows so one bad block cannot wedge the rest of history, but the
+// checkpoint stays at the incomplete window so the next start retries it.
+//
+// indexer.builder_backfill_enabled turns the whole walk off; the gate lives
+// here rather than at the call site because the walk is chained onto the
+// relabel pass's goroutine, which is not itself optional.
+func (i *Indexer) runBuilderBackfill() {
+	if !i.builderBackfill.enabled {
+		logger.Debug("Skipping builder backfill: disabled by configuration",
+			zap.String("network", i.network.Name))
+		return
+	}
+
+	bounds, err := i.db.IndexedBlockBounds(i.ctx, i.network.ChainID)
+	if err != nil {
+		if i.ctx.Err() == nil {
+			logger.Error("Failed to read indexed block bounds for builder backfill",
+				zap.String("network", i.network.Name),
+				zap.Error(err))
+		}
+		return
+	}
+	if !bounds.HasBlocks {
+		logger.Debug("Skipping builder backfill: no indexed blocks",
+			zap.String("network", i.network.Name))
+		return
+	}
+
+	// A zero or negative window would never advance the walk's loop
+	// variable, so unset tuning falls back to the package default.
+	windowBlocks := i.builderBackfill.windowBlocks
+	if windowBlocks <= 0 {
+		windowBlocks = defaultBuilderBackfillWindowBlocks
+	}
+
+	from := bounds.Min
+	if resume, ok := i.builderBackfillWatermark(); ok && resume >= from {
+		from = resume + 1
+	}
+	if from > bounds.Max {
+		logger.Debug("Builder backfill already covers indexed history",
+			zap.String("network", i.network.Name),
+			zap.Int64("through_block", bounds.Max))
+		return
+	}
+
+	logger.Info("Backfilling block builders",
+		zap.String("network", i.network.Name),
+		zap.Int64("from_block", from),
+		zap.Int64("to_block", bounds.Max),
+		zap.Int64("window_blocks", windowBlocks),
+		zap.Duration("pause", i.builderBackfill.pause))
+
+	began := time.Now()
+	var windows, blocksFilled, rowsInserted, blobsIndexed, incompleteWindows int64
+	checkpoint := from - 1
+	checkpointStalled := false
+	for windowStart := from; windowStart <= bounds.Max; windowStart += windowBlocks {
+		windowEnd := windowStart + windowBlocks - 1
+		if windowEnd > bounds.Max {
+			windowEnd = bounds.Max
+		}
+
+		complete, filled, inserted, indexed, err := i.backfillBuilderWindow(windowStart, windowEnd)
+		blocksFilled += filled
+		rowsInserted += inserted
+		blobsIndexed += indexed
+		if err != nil {
+			if i.ctx.Err() == nil {
+				logger.Error("Block builder backfill aborted; history stays partial until the next start",
+					zap.String("network", i.network.Name),
+					zap.Int64("window_start", windowStart),
+					zap.Int64("checkpoint", checkpoint),
+					zap.Error(err))
+			}
+			return
+		}
+		if !complete {
+			incompleteWindows++
+			if !checkpointStalled {
+				checkpointStalled = true
+				logger.Warn("Block builder backfill window left blocks without a builder row; checkpoint holds here while the walk continues",
+					zap.String("network", i.network.Name),
+					zap.Int64("window_start", windowStart),
+					zap.Int64("window_end", windowEnd))
+			}
+		}
+		if !checkpointStalled {
+			checkpoint = windowEnd
+			i.setBuilderBackfillWatermark(windowEnd)
+		}
+
+		windows++
+		if windows%builderBackfillProgressEvery == 0 {
+			logger.Info("Block builder backfill progress",
+				zap.String("network", i.network.Name),
+				zap.Int64("through_block", windowEnd),
+				zap.Int64("checkpoint", checkpoint),
+				zap.Int64("to_block", bounds.Max),
+				zap.Int64("blocks_filled", blocksFilled),
+				zap.Int64("rows_inserted", rowsInserted),
+				zap.Int64("blobs_indexed", blobsIndexed),
+				zap.Int64("incomplete_windows", incompleteWindows),
+				zap.Duration("elapsed", time.Since(began)))
+		}
+
+		if windowEnd < bounds.Max && !i.pauseBuilderBackfill() {
+			return
+		}
+	}
+
+	if incompleteWindows > 0 {
+		logger.Warn("Block builder backfill walked all indexed history but left blocks without a builder row; the next start retries from the checkpoint",
+			zap.String("network", i.network.Name),
+			zap.Int64("checkpoint", checkpoint),
+			zap.Int64("to_block", bounds.Max),
+			zap.Int64("incomplete_windows", incompleteWindows),
+			zap.Int64("blocks_filled", blocksFilled),
+			zap.Int64("rows_inserted", rowsInserted),
+			zap.Int64("blobs_indexed", blobsIndexed),
+			zap.Duration("took", time.Since(began)))
+		return
+	}
+	logger.Info("Block builder backfill complete",
+		zap.String("network", i.network.Name),
+		zap.Int64("through_block", bounds.Max),
+		zap.Int64("blocks_filled", blocksFilled),
+		zap.Int64("rows_inserted", rowsInserted),
+		zap.Int64("blobs_indexed", blobsIndexed),
+		zap.Duration("took", time.Since(began)))
+}
+
+// backfillBuilderWindow fills one window and reports whether every block in
+// it now has a builder row. A window that had nothing to fill is complete by
+// construction; one that had work is listed again afterwards, so a block
+// that could not be fetched is detected rather than assumed filled. The
+// error return is reserved for database failures, which abort the walk; RPC
+// failures only leave the window incomplete.
+func (i *Indexer) backfillBuilderWindow(windowStart, windowEnd int64) (complete bool, filled, inserted, indexed int64, err error) {
+	blocks, err := i.blocksMissingBlockBuilders(windowStart, windowEnd)
+	if err != nil {
+		return false, 0, 0, 0, err
+	}
+	if len(blocks) == 0 {
+		return true, 0, 0, 0, nil
+	}
+
+	inserted, indexed, err = i.backfillBuilderBlocks(blocks)
+	if err != nil {
+		return false, int64(len(blocks)), inserted, indexed, err
+	}
+
+	remaining, err := i.blocksMissingBlockBuilders(windowStart, windowEnd)
+	if err != nil {
+		return false, int64(len(blocks)), inserted, indexed, err
+	}
+	filled = int64(len(blocks) - len(remaining))
+	if len(remaining) > 0 {
+		logger.Warn("Block builder backfill left blocks without a builder row",
+			zap.String("network", i.network.Name),
+			zap.Int64("window_start", windowStart),
+			zap.Int64("window_end", windowEnd),
+			zap.Int64s("blocks", remaining))
+	}
+	return len(remaining) == 0, filled, inserted, indexed, nil
+}
+
+// pauseBuilderBackfill waits the configured pause, returning false when the
+// indexer stopped meanwhile.
+func (i *Indexer) pauseBuilderBackfill() bool {
+	if i.builderBackfill.pause <= 0 {
+		return i.ctx.Err() == nil
+	}
+	select {
+	case <-i.ctx.Done():
+		return false
+	case <-time.After(i.builderBackfill.pause):
+		return true
+	}
+}
+
+// blocksMissingBlockBuilders lists the window's builder-less blocks, retrying
+// a transient database error a few times before giving up on the walk.
+func (i *Indexer) blocksMissingBlockBuilders(windowStart, windowEnd int64) ([]int64, error) {
+	var (
+		blocks []int64
+		err    error
+	)
+	for attempt := 1; attempt <= builderBackfillFetchAttempts; attempt++ {
+		blocks, err = i.db.BlocksMissingBlockBuilders(i.ctx, i.network.ChainID, windowStart, windowEnd)
+		if err == nil || i.ctx.Err() != nil {
+			return blocks, err
+		}
+		if !i.waitBuilderBackfillRetry(attempt, "listing blocks without a builder row", windowStart, err) {
+			return nil, err
+		}
+	}
+	return nil, err
+}
+
+// backfillBuilderBlocks refetches the given blocks in batches and writes
+// their builder rows and blob transaction positions, pausing between
+// batches. A block whose fetch fails every attempt is skipped (the window's
+// recheck reports it); a database failure is returned.
+func (i *Indexer) backfillBuilderBlocks(blocks []int64) (inserted, indexed int64, err error) {
+	batchSize := i.builderBackfill.insertBatch
+	if batchSize <= 0 {
+		batchSize = defaultBuilderBackfillInsertBatch
+	}
+	for start := 0; start < len(blocks); start += batchSize {
+		end := start + batchSize
+		if end > len(blocks) {
+			end = len(blocks)
+		}
+		// Sample the cleanup epoch before the fetches, as processBlock does:
+		// a reorg rewind or reindex delete committing while this batch is in
+		// flight invalidates it, and the write is refused rather than
+		// resurrecting rows for an abandoned fork.
+		fetchEpoch := atomic.LoadUint64(&i.reorgEpoch)
+		rows, txIndexes := i.fetchBuilderBackfillBatch(blocks[start:end])
+		if i.ctx.Err() != nil {
+			return inserted, indexed, i.ctx.Err()
+		}
+		batchInserted, batchIndexed, writeErr := i.writeBuilderBackfillBatch(rows, txIndexes, fetchEpoch)
+		inserted += batchInserted
+		indexed += batchIndexed
+		if writeErr != nil {
+			return inserted, indexed, writeErr
+		}
+		if end < len(blocks) && !i.pauseBuilderBackfill() {
+			return inserted, indexed, i.ctx.Err()
+		}
+	}
+	return inserted, indexed, nil
+}
+
+// fetchBuilderBackfillBatch fetches a batch of blocks concurrently and
+// derives their builder rows and blob transaction positions, in block order.
+// A block that fails every fetch attempt contributes nothing; it stays
+// builder-less and the window recheck holds the checkpoint on it, so the
+// batch still lands for the blocks that did fetch rather than losing them
+// all.
+func (i *Indexer) fetchBuilderBackfillBatch(blocks []int64) ([]models.BlockBuilder, []db.BlobTxIndexUpdate) {
+	workers := i.builderBackfill.fetchWorkers
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > len(blocks) {
+		workers = len(blocks)
+	}
+
+	rows := make([]*models.BlockBuilder, len(blocks))
+	positions := make([][]db.BlobTxIndexUpdate, len(blocks))
+	tasks := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range tasks {
+				block, err := i.fetchBuilderBackfillBlock(i.ctx, uint64(blocks[index]))
+				if err != nil {
+					if i.ctx.Err() == nil {
+						logger.Warn("Skipping block in builder backfill after repeated fetch failures",
+							zap.String("network", i.network.Name),
+							zap.Int64("block", blocks[index]),
+							zap.Error(err))
+					}
+					continue
+				}
+				rows[index] = i.blockBuilderRow(block, builderBackfillBlockTimestamp(block))
+				positions[index] = blobTxIndexUpdates(block)
+			}
+		}()
+	}
+	for index := range blocks {
+		select {
+		case tasks <- index:
+		case <-i.ctx.Done():
+		}
+	}
+	close(tasks)
+	wg.Wait()
+
+	builderRows := make([]models.BlockBuilder, 0, len(blocks))
+	var txIndexes []db.BlobTxIndexUpdate
+	for index, row := range rows {
+		if row == nil {
+			continue
+		}
+		builderRows = append(builderRows, *row)
+		txIndexes = append(txIndexes, positions[index]...)
+	}
+	return builderRows, txIndexes
+}
+
+// fetchBuilderBackfillBlock fetches one block with its transactions,
+// retrying transient failures. The full block is needed, not just the
+// header: the proposer payment heuristic reads the last transaction and its
+// recovered sender, and tx_index needs every transaction's position.
+func (i *Indexer) fetchBuilderBackfillBlock(ctx context.Context, blockNumber uint64) (*types.Block, error) {
+	fetch := i.builderBackfill.blockSource
+	if fetch == nil {
+		fetch = i.ethClient.GetBlockByNumber
+	}
+	var (
+		block *types.Block
+		err   error
+	)
+	for attempt := 1; attempt <= builderBackfillFetchAttempts; attempt++ {
+		block, err = fetch(ctx, blockNumber)
+		if err == nil || ctx.Err() != nil {
+			break
+		}
+		if !i.waitBuilderBackfillRetry(attempt, "fetching block", int64(blockNumber), err) {
+			break
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch block %d for builder backfill: %w", blockNumber, err)
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if block == nil {
+		return nil, fmt.Errorf("block %d returned no body for builder backfill", blockNumber)
+	}
+	return block, nil
+}
+
+// builderBackfillBlockTimestamp renders a block's time the way
+// ethereum.Client.GetBlockTimestamp does, without needing a client: the
+// backfill's block source is injectable, so a test can run the whole walk
+// with no RPC endpoint at all.
+func builderBackfillBlockTimestamp(block *types.Block) time.Time {
+	return time.Unix(int64(block.Time()), 0).UTC()
+}
+
+// blobTxIndexUpdates records the position of every blob transaction in the
+// block. Only blob transactions have blobs rows to update; the predicate
+// matches ethereum.Client.IsBlobTransaction, with the same empty-hash guard
+// the fee backfill applies.
+func blobTxIndexUpdates(block *types.Block) []db.BlobTxIndexUpdate {
+	number := block.Number().Int64()
+	var updates []db.BlobTxIndexUpdate
+	for index, tx := range block.Transactions() {
+		if tx.Type() != types.BlobTxType || len(tx.BlobHashes()) == 0 {
+			continue
+		}
+		updates = append(updates, db.BlobTxIndexUpdate{
+			BlockNumber: number,
+			TxHash:      tx.Hash().Hex(),
+			TxIndex:     index,
+		})
+	}
+	return updates
+}
+
+// writeBuilderBackfillBatch applies one batch under the network write lock,
+// like every other write path, so the blobs update cannot interleave with
+// this indexer's own block inserts. A batch the epoch check rejects is
+// dropped without error: the window recheck sees those blocks again and
+// holds the checkpoint on them.
+func (i *Indexer) writeBuilderBackfillBatch(rows []models.BlockBuilder, txIndexes []db.BlobTxIndexUpdate, fetchEpoch uint64) (inserted, indexed int64, err error) {
+	if len(rows) == 0 {
+		return 0, 0, nil
+	}
+	for attempt := 1; attempt <= builderBackfillFetchAttempts; attempt++ {
+		unlockWrites := i.lockDBWrites()
+		if atomic.LoadUint64(&i.reorgEpoch) != fetchEpoch {
+			unlockWrites()
+			logger.Warn("Discarding builder backfill batch invalidated by a reorg cleanup",
+				zap.String("network", i.network.Name),
+				zap.Int64("first_block", rows[0].BlockNumber),
+				zap.Int("blocks", len(rows)))
+			return 0, 0, nil
+		}
+		inserted, indexed, err = i.db.InsertBackfilledBlockBuilders(i.ctx, i.network.ChainID, rows, txIndexes)
+		unlockWrites()
+		if err == nil {
+			return inserted, indexed, nil
+		}
+		if i.ctx.Err() != nil {
+			return 0, 0, err
+		}
+		if !i.waitBuilderBackfillRetry(attempt, "writing builder rows", rows[0].BlockNumber, err) {
+			break
+		}
+	}
+	return 0, 0, err
+}
+
+// waitBuilderBackfillRetry logs a failed attempt and waits before the next
+// one. It returns false when no attempt remains or the indexer is stopping.
+func (i *Indexer) waitBuilderBackfillRetry(attempt int, step string, block int64, err error) bool {
+	if attempt >= builderBackfillFetchAttempts {
+		return false
+	}
+	logger.Warn("Retrying builder backfill step",
+		zap.String("network", i.network.Name),
+		zap.String("step", step),
+		zap.Int64("block", block),
+		zap.Int("attempt", attempt),
+		zap.Error(err))
+	select {
+	case <-i.ctx.Done():
+		return false
+	case <-time.After(time.Duration(attempt) * i.builderBackfill.retryBackoff):
+		return true
+	}
+}
+
+// builderBackfillWatermark reads the highest block a previous run completed.
+// Absent or unparsable means "start from the beginning", which repeats cheap
+// window scans but never leaves blocks behind.
+func (i *Indexer) builderBackfillWatermark() (int64, bool) {
+	value, err := i.db.GetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataBlockBuilderBackfillBlock)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) && i.ctx.Err() == nil {
+			logger.Warn("Failed to read builder backfill watermark; walking from the earliest indexed block",
+				zap.String("network", i.network.Name),
+				zap.Error(err))
+		}
+		return 0, false
+	}
+	block, parseErr := strconv.ParseInt(value, 10, 64)
+	if parseErr != nil {
+		logger.Warn("Ignoring unparsable builder backfill watermark",
+			zap.String("network", i.network.Name),
+			zap.String("value", value),
+			zap.Error(parseErr))
+		return 0, false
+	}
+	return block, true
+}
+
+// setBuilderBackfillWatermark checkpoints a completed window. A failed write
+// only costs a repeated window on the next start.
+func (i *Indexer) setBuilderBackfillWatermark(block int64) {
+	// Under Indexer.mu like every other metadata write.
+	i.mu.Lock()
+	err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID,
+		models.MetadataBlockBuilderBackfillBlock, strconv.FormatInt(block, 10))
+	i.mu.Unlock()
+	if err != nil && i.ctx.Err() == nil {
+		logger.Warn("Failed to checkpoint builder backfill; the next start repeats this window",
+			zap.String("network", i.network.Name),
+			zap.Int64("block", block),
+			zap.Error(err))
+	}
+}
