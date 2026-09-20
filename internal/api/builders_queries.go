@@ -23,6 +23,19 @@ import "fmt"
 // values reach 1e18 wei, past the 2^53 boundary where a double detour would
 // round, and a discrete median is an actually-observed payment.
 
+// The requested window is spliced into every predicate as the bare parameter
+// placeholders rather than read out of a one-row `bounds` CTE. A CTE
+// referenced more than once is materialized by default (Postgres only
+// considers inlining a CTE with a single reference), and a materialized CTE
+// is an optimization fence: the planner never sees the timestamp values, so
+// it falls back to its default range selectivity and estimated millions of
+// matching blobs rows, which bought a sequential scan of the whole blobs
+// table with the window applied as a join filter. With the placeholders in
+// the predicates the planner has the actual bounds at plan time and reaches
+// blobs through idx_blobs_chain_timestamp_chart_cover. NOT MATERIALIZED
+// would also defeat the fence, but inline parameters are immune to the
+// planning rules entirely — see HL-38.
+//
 // block_metrics is joined by block number but bounded by the window's
 // timestamps as well. Its primary key (chain_id, block_number) and
 // idx_block_metrics_chain_timestamp_cover (chain_id, block_timestamp DESC,
@@ -52,28 +65,32 @@ import "fmt"
 // window), which at 30d underestimated the metrics side about forty-fold
 // and made the hash join resize and spill to a second batch.
 const builderMetricsWindowSQL = `
-			AND bm.block_timestamp >= $2
-			AND bm.block_timestamp < $3`
+			AND bm.block_timestamp >= $2::timestamp
+			AND bm.block_timestamp < $3::timestamp`
 
 // builderTxSourceSQL collapses the range's confirmed blob rows to one row per
 // transaction — the unit tips and inclusion latency are measured in — keyed
 // by block so the callers can attach the builder. The columns are constant
 // across a transaction's blob rows, so MIN() is just a group-by-compatible
 // pick rather than an aggregate with meaning.
-const builderTxSourceSQL = `
+//
+// The caller passes its own placeholders for the chain id and the window so
+// the bounds land in the predicate as literals the planner can use.
+func builderTxSourceSQL(chain, rangeStart, rangeEnd string) string {
+	return fmt.Sprintf(`
 	SELECT
 		bl.block_number,
 		bl.tx_hash,
 		MIN(bl.priority_fee_per_gas) AS priority_fee,
 		MIN(bl.first_seen_at) AS first_seen_at,
 		COUNT(*)::bigint AS blob_count
-	FROM bounds b
-	JOIN blobs bl
-		ON bl.chain_id = $1
-		AND bl.timestamp >= b.range_start
-		AND bl.timestamp < b.range_end
+	FROM blobs bl
+	WHERE bl.chain_id = %[1]s
+		AND bl.timestamp >= %[2]s::timestamp
+		AND bl.timestamp < %[3]s::timestamp
 	GROUP BY bl.block_number, bl.tx_hash
-`
+`, chain, rangeStart, rangeEnd)
+}
 
 // queryBuilderAggregates is the leaderboard body shared by /builders and the
 // aggregate half of /builders/{key}. $4 is the builder key filter: the empty
@@ -83,10 +100,7 @@ const builderTxSourceSQL = `
 //
 // Args: $1 chain id, $2 range start, $3 range end, $4 builder key, empty string for every builder.
 var queryBuilderAggregates = `
-	WITH bounds AS (
-		SELECT $2::timestamp AS range_start, $3::timestamp AS range_end
-	),
-	range_builder_blocks AS MATERIALIZED (
+	WITH range_builder_blocks AS MATERIALIZED (
 		SELECT
 			bb.block_number,
 			bb.block_timestamp,
@@ -98,11 +112,10 @@ var queryBuilderAggregates = `
 			bb.eligible_skipped_txs,
 			bb.eligible_skipped_blobs,
 			bb.eligible_skipped_max_tip
-		FROM bounds b
-		JOIN block_builders bb
-			ON bb.chain_id = $1
-			AND bb.block_timestamp >= b.range_start
-			AND bb.block_timestamp < b.range_end
+		FROM block_builders bb
+		WHERE bb.chain_id = $1
+			AND bb.block_timestamp >= $2::timestamp
+			AND bb.block_timestamp < $3::timestamp
 	),
 	range_blocks AS MATERIALIZED (
 		SELECT
@@ -168,7 +181,7 @@ var queryBuilderAggregates = `
 		WHERE rn <= 3
 		GROUP BY builder_key
 	),
-	range_txs AS MATERIALIZED (` + builderTxSourceSQL + `),
+	range_txs AS MATERIALIZED (` + builderTxSourceSQL("$1", "$2", "$3") + `),
 	builder_txs AS (
 		SELECT
 			sb.builder_key,
@@ -260,8 +273,10 @@ func builderAddressAttributionSQL(source string) string {
 // entity using the /users group=entity rule: the sender's window-wide
 // attribution (builderAddressAttributionSQL) decides the key, an attributed
 // sender collapses into its entity slug, and an unattributed one stays keyed
-// by its own address. It expects a bounds CTE and produces keyed_txs.
-var builderEntityKeyedTxsSQL = `
+// by its own address. The caller passes the chain and window placeholders so
+// the bounds reach the blobs predicate directly. It produces keyed_txs.
+func builderEntityKeyedTxsSQL(chain, rangeStart, rangeEnd string) string {
+	return fmt.Sprintf(`
 	range_blob_rows AS MATERIALIZED (
 		SELECT
 			bl.block_number,
@@ -271,16 +286,15 @@ var builderEntityKeyedTxsSQL = `
 			ku.name AS known_name,
 			bl.priority_fee_per_gas,
 			bl.first_seen_at
-		FROM bounds b
-		JOIN blobs bl
-			ON bl.chain_id = $1
-			AND bl.timestamp >= b.range_start
-			AND bl.timestamp < b.range_end
+		FROM blobs bl
 		LEFT JOIN blob_users ku
 			ON ku.chain_id = bl.chain_id
 			AND LOWER(ku.address) = LOWER(bl.from_address)
+		WHERE bl.chain_id = %[1]s
+			AND bl.timestamp >= %[2]s::timestamp
+			AND bl.timestamp < %[3]s::timestamp
 	),
-	` + builderAddressAttributionSQL("range_blob_rows") + `,
+	`+builderAddressAttributionSQL("range_blob_rows")+`,
 	range_txs AS (
 		SELECT
 			block_number,
@@ -305,10 +319,11 @@ var builderEntityKeyedTxsSQL = `
 		FROM range_txs t
 		JOIN address_attribution a ON a.from_address = t.from_address
 		CROSS JOIN LATERAL (
-			SELECT COALESCE(NULLIF(` + entityKeySQL("a.attribution") + `, ''), '') AS entity_slug
+			SELECT COALESCE(NULLIF(`+entityKeySQL("a.attribution")+`, ''), '') AS entity_slug
 		) slug
 	)
-`
+`, chain, rangeStart, rangeEnd)
+}
 
 // queryBuilderUsers breaks one builder's included blob transactions down by
 // attribution entity and compares each entity's share within the builder
@@ -318,10 +333,7 @@ var builderEntityKeyedTxsSQL = `
 //
 // Args: $1 chain id, $2 range start, $3 range end, $4 builder key.
 var queryBuilderUsers = `
-	WITH bounds AS (
-		SELECT $2::timestamp AS range_start, $3::timestamp AS range_end
-	),
-	` + builderEntityKeyedTxsSQL + `,
+	WITH ` + builderEntityKeyedTxsSQL("$1", "$2", "$3") + `,
 	range_totals AS (
 		SELECT COALESCE(SUM(blob_count), 0)::bigint AS total_blobs FROM keyed_txs
 	),
@@ -330,12 +342,11 @@ var queryBuilderUsers = `
 	),
 	builder_blocks AS (
 		SELECT bb.block_number, bb.block_timestamp
-		FROM bounds b
-		JOIN block_builders bb
-			ON bb.chain_id = $1
+		FROM block_builders bb
+		WHERE bb.chain_id = $1
 			AND bb.builder_key = $4
-			AND bb.block_timestamp >= b.range_start
-			AND bb.block_timestamp < b.range_end
+			AND bb.block_timestamp >= $2::timestamp
+			AND bb.block_timestamp < $3::timestamp
 	),
 	builder_txs AS (
 		SELECT k.*, bb.block_timestamp
@@ -400,17 +411,13 @@ var queryBuilderUsers = `
 //
 // Args: $1 chain id, $2 range start, $3 range end, $4 builder key.
 var queryBuilderSkipped = `
-	WITH bounds AS (
-		SELECT $2::timestamp AS range_start, $3::timestamp AS range_end
-	),
-	builder_blocks AS (
+	WITH builder_blocks AS (
 		SELECT bb.block_number
-		FROM bounds b
-		JOIN block_builders bb
-			ON bb.chain_id = $1
+		FROM block_builders bb
+		WHERE bb.chain_id = $1
 			AND bb.builder_key = $4
-			AND bb.block_timestamp >= b.range_start
-			AND bb.block_timestamp < b.range_end
+			AND bb.block_timestamp >= $2::timestamp
+			AND bb.block_timestamp < $3::timestamp
 	),
 	candidates AS MATERIALIZED (
 		SELECT
@@ -420,16 +427,15 @@ var queryBuilderSkipped = `
 			ku.name AS known_name,
 			c.blob_count,
 			c.max_priority_fee_per_gas
-		FROM bounds b
-		JOIN blob_inclusion_candidates c
-			ON c.chain_id = $1
-			AND c.block_timestamp >= b.range_start
-			AND c.block_timestamp < b.range_end
-			AND c.reason = 'eligible'
+		FROM blob_inclusion_candidates c
 		JOIN builder_blocks bb ON bb.block_number = c.block_number
 		LEFT JOIN blob_users ku
 			ON ku.chain_id = $1
 			AND LOWER(ku.address) = LOWER(c.from_address)
+		WHERE c.chain_id = $1
+			AND c.block_timestamp >= $2::timestamp
+			AND c.block_timestamp < $3::timestamp
+			AND c.reason = 'eligible'
 	),
 	` + builderAddressAttributionSQL("candidates") + `,
 	keyed AS (
@@ -656,18 +662,17 @@ const builderShareSelectSQL = `
 // Args: $1 chain id, $2 range start, $3 range end, $4 bucket seconds,
 // $5 series limit.
 var queryBuilderShareTimeChart = `
-	WITH bounds AS (
-		SELECT $2::timestamp AS range_start, $3::timestamp AS range_end
-	),
-	buckets AS (
-		SELECT g.bucket_start, b.range_start, b.range_end
-		FROM bounds b
-		CROSS JOIN LATERAL generate_series(
-			b.range_start,
-			b.range_end - ($4::bigint * INTERVAL '1 second'),
+	WITH buckets AS (
+		SELECT
+			g.bucket_start,
+			$2::timestamp AS range_start,
+			$3::timestamp AS range_end
+		FROM generate_series(
+			$2::timestamp,
+			$3::timestamp - ($4::bigint * INTERVAL '1 second'),
 			$4::bigint * INTERVAL '1 second'
 		) AS g(bucket_start)
-		WHERE b.range_end > b.range_start
+		WHERE $3::timestamp > $2::timestamp
 	),
 	range_builder_blocks AS MATERIALIZED (
 		SELECT
@@ -679,11 +684,10 @@ var queryBuilderShareTimeChart = `
 			bb.block_number,
 			bb.builder_key,
 			bb.builder_name
-		FROM bounds b
-		JOIN block_builders bb
-			ON bb.chain_id = $1
-			AND bb.block_timestamp >= b.range_start
-			AND bb.block_timestamp < b.range_end
+		FROM block_builders bb
+		WHERE bb.chain_id = $1
+			AND bb.block_timestamp >= $2::timestamp
+			AND bb.block_timestamp < $3::timestamp
 	),
 	builder_rows AS MATERIALIZED (
 		SELECT
@@ -703,22 +707,18 @@ var queryBuilderShareTimeChart = `
 //
 // Args: $1 chain id, $2 range start, $3 range end, $4 series limit.
 var queryBuilderShareBlockChart = `
-	WITH bounds AS (
-		SELECT $2::timestamp AS range_start, $3::timestamp AS range_end
-	),
-	range_builder_blocks AS MATERIALIZED (
+	WITH range_builder_blocks AS MATERIALIZED (
 		SELECT
 			bb.block_number,
 			bb.block_timestamp AS bucket_start,
 			bb.builder_key,
 			bb.builder_name,
-			b.range_start,
-			b.range_end
-		FROM bounds b
-		JOIN block_builders bb
-			ON bb.chain_id = $1
-			AND bb.block_timestamp >= b.range_start
-			AND bb.block_timestamp < b.range_end
+			$2::timestamp AS range_start,
+			$3::timestamp AS range_end
+		FROM block_builders bb
+		WHERE bb.chain_id = $1
+			AND bb.block_timestamp >= $2::timestamp
+			AND bb.block_timestamp < $3::timestamp
 	),
 	-- One bucket per block, and each block's builder already came out of the
 	-- scan above: re-joining block_builders by block number here would only
