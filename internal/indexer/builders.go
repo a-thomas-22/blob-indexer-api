@@ -543,36 +543,96 @@ func (i *Indexer) runBuilderRelabel() {
 		zap.Int64("rows_updated", updated))
 }
 
+// relabelBatchPairs is how many changed (fee_recipient, extra_data) pairs one
+// relabel UPDATE carries. Each statement is one scan of the chain's
+// block_builders rows hash-joined against the pairs, so the pass costs one
+// scan per batch however many pairs changed; four parameters per pair keeps
+// a full batch far below Postgres's 65535-parameter limit.
+const relabelBatchPairs = 500
+
 // relabelBlockBuilders resolves every distinct (fee_recipient, extra_data)
-// pair on this chain and rewrites the labels of the rows whose resolution
-// changed. Rows already carrying the right labels are left untouched, so a
-// registry change that affects nothing writes nothing.
+// pair on this chain against the current registry and rewrites the labels of
+// the rows whose resolution changed. The distinct scan also returns the
+// labels the rows carry now, so the pairs that already resolve to what they
+// hold cost nothing more than that scan: a registry change that affects
+// nothing writes nothing, and one that relabels a builder issues a single
+// UPDATE per relabelBatchPairs changed pairs. Mainnet carries ~11k distinct
+// pairs; one UPDATE per pair, each a scan of the whole table, took the
+// production database's CPU for the better part of an hour after every
+// registry change (0.20.0).
 func (i *Indexer) relabelBlockBuilders() (int64, error) {
-	type rawPair struct {
+	type labeledPair struct {
 		FeeRecipient string `db:"fee_recipient"`
 		ExtraData    string `db:"extra_data"`
+		BuilderKey   string `db:"builder_key"`
+		BuilderName  string `db:"builder_name"`
 	}
-	var pairs []rawPair
-	if err := i.db.SelectContext(i.ctx, &pairs,
-		"SELECT DISTINCT fee_recipient, extra_data FROM block_builders WHERE chain_id = $1",
+	var rows []labeledPair
+	if err := i.db.SelectContext(i.ctx, &rows, `
+		SELECT DISTINCT fee_recipient, extra_data, builder_key, builder_name
+		FROM block_builders
+		WHERE chain_id = $1
+		ORDER BY fee_recipient, extra_data`,
 		i.network.ChainID); err != nil {
 		return 0, fmt.Errorf("failed to list builder label pairs: %w", err)
 	}
 
+	// A pair appears once per label it carries; resolve it once and queue
+	// it if any of its rows hold something else.
+	type pairKey struct{ feeRecipient, extraData string }
+	resolvedFor := make(map[pairKey]builders.Builder, len(rows))
+	queued := make(map[pairKey]bool, len(rows))
+	var changed []labeledPair
+	for _, row := range rows {
+		key := pairKey{row.FeeRecipient, row.ExtraData}
+		resolved, ok := resolvedFor[key]
+		if !ok {
+			resolved = builders.Resolve(decodeExtraData(row.ExtraData), row.FeeRecipient)
+			resolvedFor[key] = resolved
+		}
+		if queued[key] || (row.BuilderKey == resolved.Key && row.BuilderName == resolved.Name) {
+			continue
+		}
+		queued[key] = true
+		changed = append(changed, labeledPair{
+			FeeRecipient: row.FeeRecipient,
+			ExtraData:    row.ExtraData,
+			BuilderKey:   resolved.Key,
+			BuilderName:  resolved.Name,
+		})
+	}
+
 	var updated int64
-	for _, pair := range pairs {
+	for len(changed) > 0 {
 		if i.ctx.Err() != nil {
 			return updated, i.ctx.Err()
 		}
-		resolved := builders.Resolve(decodeExtraData(pair.ExtraData), pair.FeeRecipient)
+		batch := changed
+		if len(batch) > relabelBatchPairs {
+			batch = batch[:relabelBatchPairs]
+		}
+		changed = changed[len(batch):]
+
+		args := make([]interface{}, 0, 1+4*len(batch))
+		args = append(args, i.network.ChainID)
+		values := make([]string, 0, len(batch))
+		for _, pair := range batch {
+			n := len(args)
+			values = append(values, fmt.Sprintf("($%d::text, $%d::text, $%d::text, $%d::text)", n+1, n+2, n+3, n+4))
+			args = append(args, pair.FeeRecipient, pair.ExtraData, pair.BuilderKey, pair.BuilderName)
+		}
 
 		unlockWrites := i.lockDBWrites()
 		res, err := i.db.ExecContext(i.ctx, `
-			UPDATE block_builders
-			SET builder_key = $4, builder_name = $5
-			WHERE chain_id = $1 AND fee_recipient = $2 AND extra_data = $3
-				AND (builder_key <> $4 OR builder_name <> $5)
-		`, i.network.ChainID, pair.FeeRecipient, pair.ExtraData, resolved.Key, resolved.Name)
+			UPDATE block_builders AS bb
+			SET builder_key = v.builder_key, builder_name = v.builder_name
+			FROM (VALUES `+strings.Join(values, ", ")+`)
+				AS v(fee_recipient, extra_data, builder_key, builder_name)
+			WHERE bb.chain_id = $1
+				AND bb.fee_recipient = v.fee_recipient
+				AND bb.extra_data = v.extra_data
+				AND (bb.builder_key <> v.builder_key OR bb.builder_name <> v.builder_name)
+		`, args...)
 		unlockWrites()
 		if err != nil {
 			return updated, fmt.Errorf("failed to relabel builder rows: %w", err)

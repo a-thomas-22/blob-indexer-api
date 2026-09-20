@@ -167,6 +167,11 @@ type BlockPricingResponse struct {
 	IsFull             bool    `json:"is_full"`
 	IsAboveTarget      bool    `json:"is_above_target"`
 	UpdateFraction     int64   `json:"update_fraction"`
+	// Builder is who built the block, filled on /blob/pricing recent_blocks
+	// only. The pricing object embedded in a WebSocket block leaves it out
+	// because that payload carries its own top-level builder. Omitted when
+	// the builder backfill has not reached the block.
+	Builder *BlockBuilderResponse `json:"builder,omitempty"`
 }
 
 // BlobParamsResponse holds the current fork's blob parameters
@@ -1055,7 +1060,7 @@ func (a *API) GetBlobByVersionedHash(w http.ResponseWriter, r *http.Request) {
 
 // GetBlobPricing godoc
 // @Summary Get blob pricing data
-// @Description Retrieve current and historical blob pricing with utilization metrics and fork parameters. recent_blocks holds the N most recently indexed blocks, newest first, zero-blob blocks included (they still carry a blob base fee); gaps appear only for missed slots or blocks not yet indexed. market_pressure is computed over the same requested window.
+// @Description Retrieve current and historical blob pricing with utilization metrics and fork parameters. recent_blocks holds the N most recently indexed blocks, newest first, zero-blob blocks included (they still carry a blob base fee); gaps appear only for missed slots or blocks not yet indexed. Each entry carries its builder attribution when the block has one. market_pressure is computed over the same requested window.
 // @Tags blobs
 // @Accept json
 // @Produce json
@@ -1152,10 +1157,31 @@ func (a *API) queryBlobPricing(ctx context.Context, network config.NetworkConfig
 		return PricingResponse{}, err
 	}
 
+	// blob-flow builds its block list from this window plus the blob feed,
+	// neither of which names a builder, so the pricing row carries it. The
+	// read is skipped when there are no blocks; a missing row just means the
+	// builder backfill has not reached that height.
+	buildersByBlock := map[int64]BlockBuilderResponse{}
+	if len(metrics) > 0 {
+		blockNumbers := make([]int64, len(metrics))
+		for i, m := range metrics {
+			blockNumbers[i] = m.BlockNumber
+		}
+		var builders []models.BlockBuilder
+		if err := a.db.SelectContext(queryCtx, &builders, queryBlockBuildersByBlockNumbers, network.ChainID, pq.Array(blockNumbers)); err != nil {
+			return PricingResponse{}, err
+		}
+		buildersByBlock = blockBuildersByNumber(builders)
+	}
+
 	// Build response
 	recentBlocks := make([]BlockPricingResponse, 0, len(metrics))
 	for _, m := range metrics {
-		recentBlocks = append(recentBlocks, toBlockPricingResponse(m))
+		block := toBlockPricingResponse(m)
+		if builder, ok := buildersByBlock[m.BlockNumber]; ok {
+			block.Builder = &builder
+		}
+		recentBlocks = append(recentBlocks, block)
 	}
 
 	cfg := a.chainConfigForNetwork(queryCtx, network.ChainID)

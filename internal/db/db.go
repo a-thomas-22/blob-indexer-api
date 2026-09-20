@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"log"
@@ -12,7 +14,7 @@ import (
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file" // file source driver for migrations
 	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq" // PostgreSQL driver
+	"github.com/lib/pq"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 )
@@ -23,12 +25,55 @@ type DB struct {
 	*sqlx.DB
 }
 
+// sessionSettings is applied to every connection the pool opens.
+//
+// JIT is off because nothing this service runs is a query JIT pays for.
+// Postgres compiles a query's expressions once its estimated cost passes
+// jit_above_cost (100000 by default), and the builder and chart aggregates
+// over a day or more of blobs clear that easily — but the compile is paid
+// again on every execution, and on the production database it measured
+// 1.8-2.7 seconds of a 5-second aggregate budget (87 functions, inlined and
+// optimized) to save a few hundred milliseconds of expression evaluation.
+// The API's timeouts make any query long enough to amortize that a failed
+// request already; the indexer's writes and backfill reads never reach the
+// threshold. Set per session rather than in the server configuration so
+// every deployment gets it, not only the ones whose Postgres is tuned.
+var sessionSettings = []string{"SET jit = off"}
+
+// sessionConnector wraps the driver's connector and applies sessionSettings
+// to each new connection before the pool hands it out, so the settings hold
+// for the connection's whole life without touching every query site.
+type sessionConnector struct {
+	driver.Connector
+	settings []string
+}
+
+func (c sessionConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := c.Connector.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	execer, ok := conn.(driver.ExecerContext)
+	if !ok {
+		_ = conn.Close()
+		return nil, errors.New("database driver does not support ExecContext; cannot apply session settings")
+	}
+	for _, stmt := range c.settings {
+		if _, err := execer.ExecContext(ctx, stmt, nil); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("failed to apply session setting %q: %w", stmt, err)
+		}
+	}
+	return conn, nil
+}
+
 // Connect establishes a connection to the database with pool configuration
 func Connect(ctx context.Context, dbCfg config.DatabaseConfig) (*DB, error) {
-	db, err := sqlx.ConnectContext(ctx, "postgres", dbCfg.URL)
+	connector, err := pq.NewConnector(dbCfg.URL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to database: %w", err)
+		return nil, fmt.Errorf("failed to parse database URL: %w", err)
 	}
+	db := sqlx.NewDb(sql.OpenDB(sessionConnector{Connector: connector, settings: sessionSettings}), "postgres")
 
 	// Configure connection pool from config (defaults match previous hardcoded values)
 	db.SetMaxOpenConns(dbCfg.MaxOpenConns)
@@ -58,7 +103,7 @@ func RunMigrations(dbURL string) error {
 	}
 
 	// Create a new migrate instance
-	driver, err := postgres.WithInstance(db.DB, &postgres.Config{})
+	migrateDriver, err := postgres.WithInstance(db.DB, &postgres.Config{})
 	if err != nil {
 		return fmt.Errorf("failed to create migration driver: %w", err)
 	}
@@ -66,7 +111,7 @@ func RunMigrations(dbURL string) error {
 	m, err := migrate.NewWithDatabaseInstance(
 		fmt.Sprintf("file://%s", migrationsPath),
 		"postgres",
-		driver,
+		migrateDriver,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create migration instance: %w", err)
