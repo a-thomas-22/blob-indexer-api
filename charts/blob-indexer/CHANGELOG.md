@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.2](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.8.1...blob-indexer-chart-v0.8.2) (2026-09-20)
+
+
+### Bug Fixes
+
+* **helm:** update chart app version to 0.21.0 ([134257c](https://github.com/a-thomas-22/blob-indexer-api/commit/134257cc5fab4c0b78ae4973aab0f65b0c83ada1))
+
+
+### Performance Improvements
+
+* **indexer:** run the block builder backfill newest first ([#349](https://github.com/a-thomas-22/blob-indexer-api/issues/349)) ([e84e083](https://github.com/a-thomas-22/blob-indexer-api/commit/e84e0831d99e7d947a0f1749fe44e5be96a05e17))
+
 ## [0.8.1](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.8.0...blob-indexer-chart-v0.8.1) (2026-09-20)
 
 
