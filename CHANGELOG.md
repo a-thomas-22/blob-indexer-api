@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.1](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.21.0...blob-indexer-api-v0.21.1) (2026-09-20)
+
+
+### Bug Fixes
+
+* **indexer:** keep pending-pool snapshots honest across out-of-order block commits ([#352](https://github.com/a-thomas-22/blob-indexer-api/issues/352)) ([69320e0](https://github.com/a-thomas-22/blob-indexer-api/commit/69320e0cea8e2d45803fc8b46f4ce405034516b8))
+
 ## [0.21.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.20.0...blob-indexer-api-v0.21.0) (2026-09-20)
 
 
