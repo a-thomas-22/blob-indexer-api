@@ -19,8 +19,9 @@ DROP INDEX IF EXISTS idx_block_builders_chain_timestamp;
 DROP TABLE IF EXISTS block_builders;
 
 -- The indexer's checkpoints describe rows this migration just dropped. Left
--- behind, a roll forward would resume the builder backfill past the tip and
--- never refill the recreated table, and the relabel pass would skip the
+-- behind, a roll forward would resume the builder backfill below its floor
+-- (or, for the oldest-first checkpoint earlier releases kept, past the tip)
+-- and never refill the recreated table, and the relabel pass would skip the
 -- rows it never wrote. Deleting them makes down-then-up start over.
 DELETE FROM indexer_metadata
-WHERE key IN ('block_builder_backfill_block', 'block_builder_registry_version');
+WHERE key IN ('block_builder_backfill_floor', 'block_builder_backfill_block', 'block_builder_registry_version');

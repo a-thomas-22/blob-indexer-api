@@ -197,6 +197,65 @@ func TestSetNetworkMetadata(t *testing.T) {
 	})
 }
 
+func TestDeleteNetworkMetadata(t *testing.T) {
+	t.Run("reports a deleted row", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexer_metadata WHERE chain_id = $1 AND key = $2")).
+			WithArgs(1, "k").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		deleted, err := db.DeleteNetworkMetadata(context.Background(), 1, "k")
+		if err != nil {
+			t.Fatalf("DeleteNetworkMetadata() error = %v", err)
+		}
+		if !deleted {
+			t.Fatal("expected the delete to report a row")
+		}
+	})
+
+	t.Run("an absent key is not an error", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexer_metadata WHERE chain_id = $1 AND key = $2")).
+			WithArgs(1, "k").
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		deleted, err := db.DeleteNetworkMetadata(context.Background(), 1, "k")
+		if err != nil {
+			t.Fatalf("DeleteNetworkMetadata() error = %v", err)
+		}
+		if deleted {
+			t.Fatal("expected no row to be reported")
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexer_metadata WHERE chain_id = $1 AND key = $2")).
+			WithArgs(1, "k").
+			WillReturnError(errors.New("write failed"))
+
+		_, err := db.DeleteNetworkMetadata(context.Background(), 1, "k")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "failed to delete metadata for key k and network 1") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("rows affected unavailable", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM indexer_metadata WHERE chain_id = $1 AND key = $2")).
+			WithArgs(1, "k").
+			WillReturnResult(sqlmock.NewErrorResult(errors.New("no count")))
+
+		_, err := db.DeleteNetworkMetadata(context.Background(), 1, "k")
+		if err == nil || !strings.Contains(err.Error(), "failed to read metadata delete count") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
 func TestSetNetworkMetadataBatch(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		db, mock := newMockDB(t)

@@ -217,9 +217,11 @@ indexer:
   candidate_retention: 168h
   # Startup walk that adds builder rows to blocks indexed before the table
   # existed, by refetching each block, and fills those blocks' blob rows'
-  # tx_index from the same fetch. Resumable and non-destructive: an existing
-  # builder row is never overwritten and nothing is deleted. The pause
-  # throttles the RPC load it adds next to live indexing.
+  # tx_index from the same fetch. Walks newest first so the recent windows
+  # /builders serves fill before older history. Resumable and
+  # non-destructive: an existing builder row is never overwritten and
+  # nothing is deleted. The pause throttles the RPC load it adds next to
+  # live indexing.
   builder_backfill_enabled: true
   builder_backfill_pause: 250ms
 
