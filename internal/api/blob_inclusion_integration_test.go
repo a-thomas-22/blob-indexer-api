@@ -33,19 +33,22 @@ import (
 //	2003   titan        no        yes      (none: indexed from history)  ← includes 0xnever
 //	2004   beaverbuild  yes       no       0xwait priced_out_blob_fee
 //	2005   titan        yes       yes      0xpend nonce_gap              ← includes 0xwait
-//	2006   (no block)                      0xwait eligible (reorg leftover past inclusion)
+//	2006   (none)       -         yes      0xwait eligible (reorg leftover past inclusion)
 //
 // 0xwait was first seen 2s after block 2000's timestamp and landed in 2005;
 // 0xpend is still in the mempool, first seen 2s before block 2005; 0xnever
 // was indexed from history with no first-seen time; 0xfresh is pending, first
-// seen 3s after block 2005, and no block has recorded it yet.
+// seen 3s after block 2005, and no block has recorded it yet — block 2006,
+// the only block since, has no builder row, which the window boundary must
+// see through.
 // The handler validates the path hash as a 32-byte hex string, so the seeded
 // hashes must be real ones.
 var (
-	inclusionTxWait  = "0x" + strings.Repeat("a1", 32)
-	inclusionTxPend  = "0x" + strings.Repeat("b2", 32)
-	inclusionTxNever = "0x" + strings.Repeat("c3", 32)
-	inclusionTxFresh = "0x" + strings.Repeat("d4", 32)
+	inclusionTxWait   = "0x" + strings.Repeat("a1", 32)
+	inclusionTxPend   = "0x" + strings.Repeat("b2", 32)
+	inclusionTxNever  = "0x" + strings.Repeat("c3", 32)
+	inclusionTxFresh  = "0x" + strings.Repeat("d4", 32)
+	inclusionTxNewest = "0x" + strings.Repeat("e5", 32)
 )
 
 func seedInclusionFixtures(t *testing.T, sqlxDB *sqlx.DB, base time.Time) {
@@ -58,8 +61,9 @@ func seedInclusionFixtures(t *testing.T, sqlxDB *sqlx.DB, base time.Time) {
 			(1, 2001, $2, 3, 6, 1500000000),
 			(1, 2002, $3, 6, 6, 200),
 			(1, 2003, $4, 1, 6, 300),
-			(1, 2005, $5, 4, 6, 400)
-	`, at(2000), at(2001), at(2002), at(2003), at(2005)); err != nil {
+			(1, 2005, $5, 4, 6, 400),
+			(1, 2006, $6, 0, 6, 500)
+	`, at(2000), at(2001), at(2002), at(2003), at(2005), at(2006)); err != nil {
 		t.Fatalf("seed block_metrics: %v", err)
 	}
 	if _, err := sqlxDB.Exec(`
@@ -125,9 +129,9 @@ func seedInclusionFixtures(t *testing.T, sqlxDB *sqlx.DB, base time.Time) {
 			(1, 2001, $2, $10, $6, 'Fancy Rollup', 7, 1, 1000000000, 60000000000, 12, $8, 'eligible'),
 			(1, 2002, $3, $10, $6, 'Fancy Rollup', 7, 1, 1000000000, 60000000000, 12, $8, 'no_room'),
 			(1, 2004, $4, $10, $6, 'Fancy Rollup', 7, 1, 1000000000, 60000000000, 12, $8, 'priced_out_blob_fee'),
-			(1, 2006, $5, $10, $6, 'Fancy Rollup', 7, 1, 1000000000, 60000000000, 12, $8, 'eligible'),
+			(1, 2006, $12, $10, $6, 'Fancy Rollup', 7, 1, 1000000000, 60000000000, 12, $8, 'eligible'),
 			(1, 2005, $5, $11, $7, NULL, 9, 1, 1000000000, 60000000000, 12, $9, 'nonce_gap')
-	`, at(2000), at(2001), at(2002), at(2004), at(2005), buildAddrFancy, buildAddrSolo, waitSeen, pendSeen, inclusionTxWait, inclusionTxPend); err != nil {
+	`, at(2000), at(2001), at(2002), at(2004), at(2005), buildAddrFancy, buildAddrSolo, waitSeen, pendSeen, inclusionTxWait, inclusionTxPend, at(2006)); err != nil {
 		t.Fatalf("seed blob_inclusion_candidates: %v", err)
 	}
 }
@@ -237,9 +241,10 @@ func TestBlobInclusionAgainstRealPostgres(t *testing.T) {
 			t.Fatal("pending rows project their own first-seen time")
 		}
 		// From LEAST(first block at/after first seen = 2005, first candidate
-		// = 2005) to the chain's newest builder row.
-		if got.Window == nil || got.Window.FromBlock != 2005 || got.Window.ToBlock != 2005 || got.Window.Blocks != 1 || got.Window.SnapshotBlocks != 1 {
-			t.Errorf("window = %+v, want 2005..2005 with one snapshot block", got.Window)
+		// = 2005) to the newest indexed block, 2006, which has no builder
+		// row and so counts as waited through but not as a snapshot.
+		if got.Window == nil || got.Window.FromBlock != 2005 || got.Window.ToBlock != 2006 || got.Window.Blocks != 2 || got.Window.SnapshotBlocks != 1 {
+			t.Errorf("window = %+v, want 2005..2006 with one snapshot block", got.Window)
 		}
 		if got.SkippedBlocks != 1 || got.EligibleSkippedBlocks != 0 || len(got.Skipped) != 1 || got.Skipped[0].Reason != "nonce_gap" {
 			t.Errorf("skipped = %d/%d %+v, want one nonce_gap entry", got.SkippedBlocks, got.EligibleSkippedBlocks, got.Skipped)
@@ -252,19 +257,39 @@ func TestBlobInclusionAgainstRealPostgres(t *testing.T) {
 		}
 	})
 
-	t.Run("FreshPendingTransactionHasEmptyWindow", func(t *testing.T) {
+	t.Run("FreshPendingTransactionSeesBuilderlessBlock", func(t *testing.T) {
 		_, got := getInclusion(t, a, inclusionTxFresh)
 		if got.Confirmed || got.Included != nil || got.FirstSeenAt == nil {
 			t.Fatalf("expected a pending transaction with a first-seen time: %+v", got)
 		}
-		// No block since first seen and no candidate row, but first_seen_at
-		// bounds the wait: the window is the empty span past the newest
-		// indexed block, not null.
-		if got.Window == nil || got.Window.FromBlock != 2006 || got.Window.ToBlock != 2005 || got.Window.Blocks != 0 || got.Window.SnapshotBlocks != 0 {
-			t.Errorf("window = %+v, want the empty span 2006..2005", got.Window)
+		// The only block since first seen, 2006, has a metrics row but no
+		// builder row: the boundary must still find it (a builder-only probe
+		// would see no block at all and report the empty span 2007..2006),
+		// and it counts as waited through without a snapshot.
+		if got.Window == nil || got.Window.FromBlock != 2006 || got.Window.ToBlock != 2006 || got.Window.Blocks != 1 || got.Window.SnapshotBlocks != 0 {
+			t.Errorf("window = %+v, want 2006..2006 with no snapshot block", got.Window)
 		}
 		if got.SkippedBlocks != 0 || len(got.Skipped) != 0 || got.SkippedTruncated {
 			t.Errorf("expected no skipped blocks, got %d %+v", got.SkippedBlocks, got.Skipped)
+		}
+	})
+
+	t.Run("PendingPastEveryIndexedBlockHasEmptySpan", func(t *testing.T) {
+		// First seen after the newest indexed block: first_seen_at bounds
+		// the wait but no block has been produced in it, so the window is
+		// the empty span past the newest block, not null.
+		if _, err := sqlxDB.Exec(`
+			INSERT INTO mempool_blobs (
+				chain_id, tx_hash, blob_index, from_address, user_attribution,
+				blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+				timestamp, max_fee_per_blob_gas, blob_gas_used
+			) VALUES (1, $1, 0, $2, '', 131072, 10, 2, 1310720, $3, 12, 131072)
+		`, inclusionTxNewest, buildAddrSolo, base.Add(6*12*time.Second+5*time.Second)); err != nil {
+			t.Fatalf("seed mempool blob: %v", err)
+		}
+		_, got := getInclusion(t, a, inclusionTxNewest)
+		if got.Window == nil || got.Window.FromBlock != 2007 || got.Window.ToBlock != 2006 || got.Window.Blocks != 0 || got.Window.SnapshotBlocks != 0 {
+			t.Errorf("window = %+v, want the empty span 2007..2006", got.Window)
 		}
 	})
 

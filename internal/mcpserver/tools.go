@@ -471,7 +471,7 @@ var toolSpecs = []toolSpec{
 	{
 		name:        toolGetBlobInclusion,
 		title:       "Blob inclusion timeline",
-		description: "How long a blob transaction waited between our node first seeing it pending and a block including it, and which blocks arrived in between without including it: each with its builder, blob occupancy and the reason (only 'eligible' reflects a builder choice). Detail exists only for blocks indexed live within the last week.",
+		description: "How long a blob transaction waited between our node first seeing it pending and a block including it, and which blocks arrived in between without including it: each with its builder, blob occupancy and the reason (only 'eligible' reflects a builder choice). Per-block detail exists only for blocks indexed live and is pruned after the indexer's candidate retention window (a week by default); the window field says how many blocks in the wait could carry it.",
 		register: registerTool(func(in txHashInput) (string, url.Values, error) {
 			hash, err := requirePathValue("tx_hash", in.TxHash)
 			if err != nil {

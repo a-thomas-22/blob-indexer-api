@@ -30,12 +30,21 @@ const blobInclusionSkippedLimit = 500
 // reads block_metrics, the table every indexed block has a row in, so a
 // block whose builder row is missing still counts as waited through.
 //
+// The first block at or after first_seen_at is resolved against
+// block_metrics, the table every indexed block has a row in, so a block the
+// builder backfill has not reached cannot shift the boundary. block_metrics
+// has no timestamp index, so the probe is bracketed by the nearest builder
+// rows on either side of first_seen_at (idx_block_builders_chain_timestamp
+// serves both) and walks the block_metrics primary key only between them:
+// a single block when the builder rows are contiguous, the gap's width
+// otherwise.
+//
 // Plans: the candidate aggregates are one probe on
-// idx_blob_inclusion_candidates_chain_tx_block; the first block after a
-// timestamp is an ordered probe on idx_block_builders_chain_timestamp; the
-// newest block and the window counts are ranges on the block_metrics and
-// block_builders primary keys. Every subquery is bounded by the wait, never
-// by the chain's history.
+// idx_blob_inclusion_candidates_chain_tx_block; the bracketing builder rows
+// are ordered probes on idx_block_builders_chain_timestamp; the boundary,
+// the newest block and the window counts are ranges on the block_metrics
+// and block_builders primary keys. Every subquery is bounded by the wait,
+// never by the chain's history.
 //
 // Args: $1 chain id, $2 tx hash, $3 first_seen_at (NULL when unknown; the
 // timestamp bound then contributes nothing), $4 the including block number
@@ -55,10 +64,20 @@ var queryBlobInclusionSummary = `
 			c.skipped_blocks,
 			c.eligible_skipped_blocks,
 			LEAST(
-				(SELECT block_number FROM block_builders
-				 WHERE chain_id = $1 AND block_timestamp >= $3::timestamp
-				 ORDER BY block_timestamp ASC
-				 LIMIT 1),
+				(SELECT MIN(bm.block_number) FROM block_metrics bm
+				 WHERE bm.chain_id = $1
+				   AND bm.block_timestamp >= $3::timestamp
+				   AND bm.block_number > COALESCE(
+					(SELECT block_number FROM block_builders
+					 WHERE chain_id = $1 AND block_timestamp < $3::timestamp
+					 ORDER BY block_timestamp DESC
+					 LIMIT 1), 0)
+				   AND bm.block_number <= COALESCE(
+					(SELECT block_number FROM block_builders
+					 WHERE chain_id = $1 AND block_timestamp >= $3::timestamp
+					 ORDER BY block_timestamp ASC
+					 LIMIT 1),
+					(SELECT MAX(block_number) FROM block_metrics WHERE chain_id = $1))),
 				c.first_candidate_block
 			) AS seen_from_block,
 			COALESCE(
