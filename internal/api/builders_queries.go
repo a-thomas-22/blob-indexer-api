@@ -39,6 +39,10 @@ import "fmt"
 // (the builder-share charts), a heap-backed index scan where blob_params_max
 // is also read (the leaderboard), which is not in the INCLUDE list.
 //
+// queryBuilderRecentBlocks is the exception: it is LIMIT-driven, so a
+// nested loop of primary-key lookups from the few builder rows it returns
+// is the right shape, and it joins by (chain_id, block_number) alone.
+//
 // This replaced an earlier scheme that derived MIN/MAX block_number from the
 // builder rows in a CTE and fed them back as InitPlan scalars, which bounded
 // the primary key instead. On the 1M-block fixture the timestamp bound scans
