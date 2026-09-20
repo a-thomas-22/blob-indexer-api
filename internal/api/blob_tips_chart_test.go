@@ -109,8 +109,11 @@ func TestGetBlobTipsChart_SuccessAndZeroFill(t *testing.T) {
 			if !strings.Contains(query, "AND bl.priority_fee_per_gas IS NOT NULL") || !strings.Contains(query, "FROM range_blocks rb") {
 				t.Fatalf("expected the blob scan to cover only priced rows and the total to come from block_metrics: %s", query)
 			}
-			if !strings.Contains(query, "generate_series") || strings.Contains(query, "FROM block_metrics") {
+			if !strings.Contains(query, "generate_series") || strings.Contains(query, "bl.block_number = bu.block_number") {
 				t.Fatalf("expected the time-bucketed query: %s", query)
+			}
+			if strings.Contains(query, "bounds") {
+				t.Fatalf("expected the window to be bound inline, not through a bounds CTE: %s", query)
 			}
 			if len(args) != 5 {
 				t.Fatalf("expected 5 args, got %d", len(args))

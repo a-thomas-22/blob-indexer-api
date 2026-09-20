@@ -502,32 +502,34 @@ const blobTipsSelectSQL = `
 // partial covering index (idx_blobs_chain_timestamp_priced_cover); the
 // unpriced remainder is only ever counted, and that count comes from
 // block_metrics, one row per block rather than one per blob.
+//
+// The window is spliced into every predicate as the bare $2/$3 placeholders
+// rather than read out of a one-row `bounds` CTE. A CTE referenced from
+// more than one place is materialized, and a materialized CTE is an
+// optimization fence: the planner never sees the timestamps, falls back to
+// its default range selectivity, and can plan a scan of the whole blobs
+// table with the window demoted to a join filter — the pathology that made
+// /builders take 86s in production (HL-38). Tips have no rollup, so this
+// query reads blobs directly and is exposed to exactly that.
 var queryBlobTipsTimeChart = `
-	WITH bounds AS (
-		SELECT
-			$2::timestamp AS range_start,
-			$3::timestamp AS range_end
-	),
-	buckets AS (
+	WITH buckets AS (
 		SELECT
 			g.bucket_start,
-			b.range_start,
-			b.range_end
-		FROM bounds b
-		CROSS JOIN LATERAL generate_series(
-			b.range_start,
-			b.range_end - ($4::bigint * INTERVAL '1 second'),
+			$2::timestamp AS range_start,
+			$3::timestamp AS range_end
+		FROM generate_series(
+			$2::timestamp,
+			$3::timestamp - ($4::bigint * INTERVAL '1 second'),
 			$4::bigint * INTERVAL '1 second'
 		) AS g(bucket_start)
-		WHERE b.range_end > b.range_start
+		WHERE $3::timestamp > $2::timestamp
 	),
 	range_blocks AS (
 		SELECT COALESCE(SUM(bm.blob_count), 0)::int AS total_blobs
-		FROM bounds b
-		LEFT JOIN block_metrics bm
-			ON bm.chain_id = $1
-			AND bm.block_timestamp >= b.range_start
-			AND bm.block_timestamp < b.range_end
+		FROM block_metrics bm
+		WHERE bm.chain_id = $1
+			AND bm.block_timestamp >= $2::timestamp
+			AND bm.block_timestamp < $3::timestamp
 	),
 	tip_source AS MATERIALIZED (
 		SELECT
@@ -540,35 +542,34 @@ var queryBlobTipsTimeChart = `
 			bl.priority_fee_per_gas::numeric AS priority_fee,
 			COALESCE(NULLIF(BTRIM(bl.user_attribution), ''), NULLIF(BTRIM(known.name), ''), '') AS raw_name,
 			COALESCE(NULLIF(BTRIM(known.category), ''), '') AS raw_category
-		FROM bounds b
-		JOIN blobs bl
-			ON bl.chain_id = $1
-			AND bl.timestamp >= b.range_start
-			AND bl.timestamp < b.range_end
-			AND bl.priority_fee_per_gas IS NOT NULL
+		FROM blobs bl
 		LEFT JOIN blob_users known
 			ON known.chain_id = bl.chain_id
 			AND LOWER(known.address) = LOWER(bl.from_address)
+		WHERE bl.chain_id = $1
+			AND bl.timestamp >= $2::timestamp
+			AND bl.timestamp < $3::timestamp
+			AND bl.priority_fee_per_gas IS NOT NULL
 	),
 ` + blobTipsSeriesSQL("$5") + fmt.Sprintf(blobTipsSelectSQL, "NULL::bigint", "b.bucket_start ASC")
 
 // queryBlobTipsBlockChart buckets blob priority fees per indexed block.
 // Args: chain id, range start, range end, series limit.
+//
+// Blobs are reached by block number here, so the window only bounds
+// block_metrics, but it is still spliced in as the bare placeholders for
+// the reason given on queryBlobTipsTimeChart.
 var queryBlobTipsBlockChart = `
-	WITH bounds AS (
-		SELECT $2::timestamp AS range_start, $3::timestamp AS range_end
-	),
-	buckets AS (
+	WITH buckets AS (
 		SELECT
 			bm.block_number,
 			bm.block_timestamp AS bucket_start,
-			b.range_start,
-			b.range_end
+			$2::timestamp AS range_start,
+			$3::timestamp AS range_end
 		FROM block_metrics bm
-		CROSS JOIN bounds b
 		WHERE bm.chain_id = $1
-			AND bm.block_timestamp >= b.range_start
-			AND bm.block_timestamp < b.range_end
+			AND bm.block_timestamp >= $2::timestamp
+			AND bm.block_timestamp < $3::timestamp
 	),
 	range_blocks AS (
 		SELECT COALESCE(SUM(bm.blob_count), 0)::int AS total_blobs

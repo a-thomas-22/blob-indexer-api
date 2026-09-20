@@ -60,6 +60,7 @@ Canonical routes are under `/api/v1`. Legacy `/api/*` paths redirect to `/api/v1
 - `/api/v1/ws` — WebSocket updates
 - `/api/v1/networks`, `/api/v1/networks/{chainId}` — network listing and status
 - `/api/v1/blob/latest`, `/api/v1/blob/mempool`, `/api/v1/blob/pricing`, `/api/v1/blob/replacements`, `/api/v1/blob/by-hash/{versionedHash}`, `/api/v1/blob/{txHash}` — blob queries
+- `/api/v1/blob/{txHash}/inclusion` — the transaction's inclusion timeline: `first_seen_at`/`time_to_inclusion_ms`, the `included` block (builder + blob occupancy; null while pending), `window` (blocks waited through and how many took a pending-pool snapshot), and `skipped` — the blocks that recorded the tx in `blob_inclusion_candidates` and left it out, oldest first, with builder, occupancy, `waited_ms` and `reason`. Served by `idx_blob_inclusion_candidates_chain_tx_block` (migration 000018); the list is capped at 500 newest entries (`skipped_truncated`) while `skipped_blocks`/`eligible_skipped_blocks` count everything retained; the handler is three reads (blob, summary, one UNION of skipped blocks + the included block)
 - `/api/v1/block/{number}` — single indexed block with its blobs, pricing and `builder` (shared fields match the WebSocket `new_block` payload), plus a REST-only `candidates` list from `blob_inclusion_candidates`
 - `/api/v1/users` — top blob users
 - `/api/v1/entities/{key}` — attributed entity detail (aggregates + per-address breakdown; key shared with `/charts/attribution-usage` shares). `/blob/latest` and `/blob/mempool` accept `entity={key}` to filter across the entity's addresses
@@ -70,7 +71,7 @@ Canonical routes are under `/api/v1`. Legacy `/api/*` paths redirect to `/api/v1
 - `/api/v1/status` — indexer status
 - `/api/v1/dev/*` — development/debug endpoints (metrics, dashboard, logs, queries), gated by `server.dev_mode` and optional `server.dev_api_key`
 - `/swagger/*` — Swagger UI
-- `/mcp` (outside `/api/v1`; path from `mcp.path`) — streamable-HTTP MCP endpoint for LLM clients, mounted only when `mcp.enabled`. Fails closed: Bearer/X-API-Key must match a configured `mcp.keys` entry; each key may carry a tool allowlist. Tools dispatch to the REST handlers through `API.loopbackHandler()` (no edge middleware; the loopback clears the inherited chi route context), so they return the exact REST payloads. Tool catalogue (including `get_builders`, `get_builder`, `get_builder_share_chart`) lives in `internal/mcpserver/tools.go`; `cmd/api` validates allowlists against it at startup
+- `/mcp` (outside `/api/v1`; path from `mcp.path`) — streamable-HTTP MCP endpoint for LLM clients, mounted only when `mcp.enabled`. Fails closed: Bearer/X-API-Key must match a configured `mcp.keys` entry; each key may carry a tool allowlist. Tools dispatch to the REST handlers through `API.loopbackHandler()` (no edge middleware; the loopback clears the inherited chi route context), so they return the exact REST payloads. Tool catalogue (including `get_builders`, `get_builder`, `get_builder_share_chart`, `get_blob_inclusion`) lives in `internal/mcpserver/tools.go`; `cmd/api` validates allowlists against it at startup
 
 ### Configuration
 

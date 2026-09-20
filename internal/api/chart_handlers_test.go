@@ -181,8 +181,11 @@ func TestGetAttributionUsageChart_SuccessAndZeroFill(t *testing.T) {
 			if !strings.Contains(query, "LIMIT $7") || !strings.Contains(query, "bucketed_usage") {
 				t.Fatalf("unexpected attribution query: %s", query)
 			}
-			if !strings.Contains(query, "FLOOR(EXTRACT(EPOCH FROM bl.timestamp)") || !strings.Contains(query, "FROM bounds b") {
+			if !strings.Contains(query, "FLOOR(EXTRACT(EPOCH FROM bl.timestamp)") || !strings.Contains(query, "AND bl.timestamp < $4::timestamp") {
 				t.Fatalf("expected raw attribution query to bucket one bounded blob scan: %s", query)
+			}
+			if strings.Contains(query, "bounds") {
+				t.Fatalf("expected raw attribution query to bind its window inline, not through a bounds CTE: %s", query)
 			}
 			if strings.Contains(query, "FROM buckets bu") {
 				t.Fatalf("expected raw attribution query not to join blobs once per bucket: %s", query)
