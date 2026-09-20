@@ -143,13 +143,20 @@ func expectBuilderFloorWrite(mock sqlmock.Sqlmock, block int64) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 }
 
-// expectNoFloor queues the floor lookup finding nothing, followed by the
-// one-time delete of the oldest-first checkpoint earlier releases kept,
-// which a network without a floor always attempts. Pass legacyRows=1 to
-// simulate a network that still carried that checkpoint.
+// expectNoFloor queues the delete of the oldest-first checkpoint earlier
+// releases kept, which every start attempts, followed by the floor lookup
+// finding nothing. Pass legacyRows=1 to simulate a network that still
+// carried that checkpoint.
 func expectNoFloor(mock sqlmock.Sqlmock, legacyRows int64) {
-	expectMetadataRead(mock, nil)
 	expectLegacyCheckpointRetired(mock, legacyRows)
+	expectMetadataRead(mock, nil)
+}
+
+// expectFloor queues the same delete followed by a floor lookup that finds
+// the given value.
+func expectFloor(mock sqlmock.Sqlmock, value string) {
+	expectLegacyCheckpointRetired(mock, 0)
+	expectMetadataRead(mock, value)
 }
 
 func expectLegacyCheckpointRetired(mock sqlmock.Sqlmock, legacyRows int64) {
@@ -263,7 +270,7 @@ func TestBuilderBackfill_ResumesBelowFloor(t *testing.T) {
 	idx, mock, source := newBuilderBackfillTestIndexer(t)
 
 	expectBounds(mock, 1, 6)
-	expectMetadataRead(mock, "3")
+	expectFloor(mock, "3")
 	expectBuilderlessBlocks(mock, source, 1, 2)
 	expectBuilderFloorWrite(mock, 1)
 
@@ -283,7 +290,7 @@ func TestBuilderBackfill_RestartsFromTipWhenFloorIsAboveIt(t *testing.T) {
 	idx, mock, source := newBuilderBackfillTestIndexer(t)
 
 	expectBounds(mock, 1, 4)
-	expectMetadataRead(mock, "9")
+	expectFloor(mock, "9")
 	expectBuilderlessBlocks(mock, source, 3, 4)
 	expectBuilderFloorWrite(mock, 3)
 	expectBuilderlessBlocks(mock, source, 1, 2)
@@ -297,9 +304,9 @@ func TestBuilderBackfill_RestartsFromTipWhenFloorIsAboveIt(t *testing.T) {
 }
 
 // The oldest-first checkpoint earlier releases kept means the opposite of
-// the floor. A network that still carries it and has no floor yet has that
-// key deleted and walks from the tip; the prefix the old walk covered is
-// listed again (cheaply, every block there has its row) rather than trusted.
+// the floor. It is deleted on every start, never trusted: a network that
+// still carries it walks from the tip, and the prefix the old walk covered
+// is listed again (cheaply, every block there has its row).
 func TestBuilderBackfill_RetiresAscendingCheckpoint(t *testing.T) {
 	t.Run("deletes the old key and walks from the tip", func(t *testing.T) {
 		idx, mock, source := newBuilderBackfillTestIndexer(t)
@@ -322,10 +329,10 @@ func TestBuilderBackfill_RetiresAscendingCheckpoint(t *testing.T) {
 		idx, mock, source := newBuilderBackfillTestIndexer(t)
 
 		expectBounds(mock, 1, 2)
-		expectMetadataRead(mock, nil)
 		mock.ExpectExec("DELETE FROM indexer_metadata").
 			WithArgs(testIndexerChainID, models.MetadataBlockBuilderBackfillBlock).
 			WillReturnError(errors.New("down"))
+		expectMetadataRead(mock, nil)
 		expectBuilderlessBlocks(mock, source, 1, 2)
 		expectBuilderFloorWrite(mock, 1)
 
@@ -336,10 +343,13 @@ func TestBuilderBackfill_RetiresAscendingCheckpoint(t *testing.T) {
 		}
 	})
 
-	t.Run("a network with a floor never touches the old key", func(t *testing.T) {
+	// A delete that failed on the start that first wrote the floor must not
+	// leave the key behind for good: the next start, floor and all, retries.
+	t.Run("a network with a floor still retires the old key", func(t *testing.T) {
 		idx, mock, source := newBuilderBackfillTestIndexer(t)
 
 		expectBounds(mock, 1, 4)
+		expectLegacyCheckpointRetired(mock, 1)
 		expectMetadataRead(mock, "3")
 		expectBuilderlessBlocks(mock, source, 1, 2)
 		expectBuilderFloorWrite(mock, 1)
@@ -356,7 +366,7 @@ func TestBuilderBackfill_SkipsWhenCaughtUpOrEmpty(t *testing.T) {
 	t.Run("floor at the earliest indexed block", func(t *testing.T) {
 		idx, mock, _ := newBuilderBackfillTestIndexer(t)
 		expectBounds(mock, 1, 6)
-		expectMetadataRead(mock, "1")
+		expectFloor(mock, "1")
 
 		idx.runBuilderBackfill()
 
@@ -390,8 +400,7 @@ func TestBuilderBackfill_SkipsWhenCaughtUpOrEmpty(t *testing.T) {
 	t.Run("unparsable floor restarts the walk", func(t *testing.T) {
 		idx, mock, source := newBuilderBackfillTestIndexer(t)
 		expectBounds(mock, 1, 2)
-		expectMetadataRead(mock, "not-a-number")
-		expectLegacyCheckpointRetired(mock, 0)
+		expectFloor(mock, "not-a-number")
 		expectBuilderlessBlocks(mock, source, 1, 2)
 		expectBuilderFloorWrite(mock, 1)
 
@@ -402,18 +411,22 @@ func TestBuilderBackfill_SkipsWhenCaughtUpOrEmpty(t *testing.T) {
 		}
 	})
 
+	// A floor read that fails outright skips the run: walking from the tip
+	// would overwrite a floor that may sit millions of blocks lower with
+	// the first window's start, and the next start can simply read again.
 	t.Run("floor read fails", func(t *testing.T) {
 		idx, mock, source := newBuilderBackfillTestIndexer(t)
 		expectBounds(mock, 1, 2)
-		mock.ExpectQuery("SELECT value FROM indexer_metadata").WillReturnError(errors.New("down"))
 		expectLegacyCheckpointRetired(mock, 0)
-		expectBuilderlessBlocks(mock, source, 1, 2)
-		expectBuilderFloorWrite(mock, 1)
+		mock.ExpectQuery("SELECT value FROM indexer_metadata").WillReturnError(errors.New("down"))
 
 		idx.runBuilderBackfill()
 
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("expectations: %v", err)
+		}
+		if len(source.fetched) != 0 {
+			t.Fatalf("expected no fetches after a failed floor read, got %v", source.fetched)
 		}
 	})
 }

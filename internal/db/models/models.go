@@ -356,10 +356,10 @@ const (
 	MetadataBlockBuilderBackfillFloor = "block_builder_backfill_floor"
 	// MetadataBlockBuilderBackfillBlock was the checkpoint of the oldest-first
 	// builder backfill earlier releases ran: the highest block of a complete
-	// prefix of history, the opposite of the floor. The backfill deletes it
-	// when it finds a network without a floor, so the two are never confused;
-	// the constant remains so that cleanup and the 000017 down migration name
-	// the same key.
+	// prefix of history, the opposite of the floor. The backfill deletes it on
+	// every start so the two are never confused; the constant remains for
+	// that cleanup. The 000017 down migration deletes the same key by its
+	// literal name, so the two spellings must be kept in sync by hand.
 	MetadataBlockBuilderBackfillBlock = "block_builder_backfill_block"
 	// MetadataBlockBuilderRegistryVersion fingerprints the builder registry
 	// the block_builders labels were resolved with. When the running

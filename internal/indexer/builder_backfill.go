@@ -111,9 +111,9 @@ func newBuilderBackfillSettings(cfg config.IndexerConfig) builderBackfillSetting
 //
 // The floor is a different metadata key from the checkpoint the oldest-first
 // walk of earlier releases kept (the highest block of a complete prefix).
-// The two mean opposite things, so the old key is deleted the first time a
-// network starts without a floor rather than reinterpreted; the prefix it
-// covered is walked again at one empty listing per window.
+// The two mean opposite things, so the old key is deleted rather than
+// reinterpreted — on every start, so a failed delete is simply retried — and
+// the prefix it covered is walked again at one empty listing per window.
 //
 // indexer.builder_backfill_enabled turns the whole walk off; the gate lives
 // here rather than at the call site because the walk is chained onto the
@@ -147,15 +147,25 @@ func (i *Indexer) runBuilderBackfill() {
 		windowBlocks = defaultBuilderBackfillWindowBlocks
 	}
 
-	top := bounds.Max
-	if floor, ok := i.builderBackfillFloor(); ok {
-		// A floor above the tip describes history a reindex has since
-		// removed; the walk starts over from the tip and lowers it.
-		if floor <= bounds.Max {
-			top = floor - 1
+	i.retireAscendingBuilderBackfillCheckpoint()
+
+	floor, found, err := i.builderBackfillFloor()
+	if err != nil {
+		// Walking from the tip on a transient read error would overwrite
+		// the floor with a much higher one and forget the verified history
+		// below it; the next start reads it again instead.
+		if i.ctx.Err() == nil {
+			logger.Error("Failed to read builder backfill floor; skipping the walk until the next start",
+				zap.String("network", i.network.Name),
+				zap.Error(err))
 		}
-	} else {
-		i.retireAscendingBuilderBackfillCheckpoint()
+		return
+	}
+	top := bounds.Max
+	// A floor above the tip describes history a reindex has since removed;
+	// the walk starts over from the tip and lowers it.
+	if found && floor <= bounds.Max {
+		top = floor - 1
 	}
 	if top < bounds.Min {
 		logger.Debug("Builder backfill already covers indexed history",
@@ -173,7 +183,7 @@ func (i *Indexer) runBuilderBackfill() {
 
 	began := time.Now()
 	var windows, blocksFilled, rowsInserted, blobsIndexed, incompleteWindows int64
-	floor := top + 1
+	floor = top + 1
 	floorStalled := false
 	for windowEnd := top; windowEnd >= bounds.Min; windowEnd -= windowBlocks {
 		windowStart := windowEnd - windowBlocks + 1
@@ -560,16 +570,17 @@ func (i *Indexer) waitBuilderBackfillRetry(attempt int, step string, block int64
 // builderBackfillFloor reads the lowest block a previous run verified,
 // together with everything above it. Absent or unparsable means "start from
 // the tip", which repeats cheap window listings but never leaves blocks
-// behind.
-func (i *Indexer) builderBackfillFloor() (int64, bool) {
+// behind. A read that fails outright is returned as an error rather than
+// treated as absent: the caller must not walk from the tip on a transient
+// failure, because the first window it completes would overwrite a floor that
+// may be millions of blocks lower.
+func (i *Indexer) builderBackfillFloor() (floor int64, found bool, err error) {
 	value, err := i.db.GetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataBlockBuilderBackfillFloor)
 	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) && i.ctx.Err() == nil {
-			logger.Warn("Failed to read builder backfill floor; walking from the newest indexed block",
-				zap.String("network", i.network.Name),
-				zap.Error(err))
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, false, nil
 		}
-		return 0, false
+		return 0, false, err
 	}
 	block, parseErr := strconv.ParseInt(value, 10, 64)
 	if parseErr != nil {
@@ -577,9 +588,9 @@ func (i *Indexer) builderBackfillFloor() (int64, bool) {
 			zap.String("network", i.network.Name),
 			zap.String("value", value),
 			zap.Error(parseErr))
-		return 0, false
+		return 0, false, nil
 	}
-	return block, true
+	return block, true, nil
 }
 
 // setBuilderBackfillFloor checkpoints a completed window by its lowest
@@ -601,9 +612,11 @@ func (i *Indexer) setBuilderBackfillFloor(block int64) {
 // retireAscendingBuilderBackfillCheckpoint deletes the checkpoint the
 // oldest-first walk of earlier releases kept. That key recorded the highest
 // block of a complete prefix of history — the opposite of the floor — so it
-// cannot seed the descending walk and must not be mistaken for it. It is
-// only consulted when no floor exists yet, so a network pays the delete
-// once; a failure is logged and the stale key is retried next start.
+// cannot seed the descending walk and must not be mistaken for it. The
+// delete runs on every start: it is one idempotent statement per network,
+// and gating it on "no floor yet" would let a single failed delete leave the
+// stale key behind forever once the same run writes a floor. A failure is
+// logged and the next start retries.
 func (i *Indexer) retireAscendingBuilderBackfillCheckpoint() {
 	i.mu.Lock()
 	deleted, err := i.db.DeleteNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataBlockBuilderBackfillBlock)

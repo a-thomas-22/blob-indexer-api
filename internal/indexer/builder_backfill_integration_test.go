@@ -200,8 +200,17 @@ func TestIntegrationBuilderBackfillResumesBelowFloor(t *testing.T) {
 	if err := database.SetNetworkMetadata(ctx, integrationChainID, models.MetadataBlockBuilderBackfillFloor, "204"); err != nil {
 		t.Fatalf("seed floor: %v", err)
 	}
+	// A legacy checkpoint whose delete failed on the start that wrote the
+	// floor: this start must still remove it.
+	if err := database.SetNetworkMetadata(ctx, integrationChainID, models.MetadataBlockBuilderBackfillBlock, "150"); err != nil {
+		t.Fatalf("seed legacy checkpoint: %v", err)
+	}
 
 	idx.runBuilderBackfill()
+
+	if _, err := database.GetNetworkMetadata(ctx, integrationChainID, models.MetadataBlockBuilderBackfillBlock); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected the oldest-first checkpoint to be retired even with a floor present, got err = %v", err)
+	}
 
 	for _, block := range []int64{200, 201, 202, 203} {
 		if row := readBuilderRow(t, idx, block); row.BuilderKey != "beaverbuild" {
