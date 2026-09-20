@@ -427,6 +427,7 @@ func TestToolDispatch(t *testing.T) {
 		{"get_blob_replacements", map[string]any{"tx_hash": "0x01", "limit": 7, "offset": 1}, "/api/v1/blob/replacements", url.Values{"tx_hash": {"0x01"}, "limit": {"7"}, "offset": {"1"}}},
 		{"get_block", map[string]any{"number": 123456, "network": "mainnet"}, "/api/v1/block/123456", url.Values{"network": {"mainnet"}}},
 		{"get_blob_by_tx_hash", map[string]any{"tx_hash": "0xdead"}, "/api/v1/blob/0xdead", url.Values{}},
+		{"get_blob_inclusion", map[string]any{"tx_hash": "0xdead", "network": "mainnet"}, "/api/v1/blob/0xdead/inclusion", url.Values{"network": {"mainnet"}}},
 		{"get_blob_by_versioned_hash", map[string]any{"versioned_hash": "0x01beef"}, "/api/v1/blob/by-hash/0x01beef", url.Values{}},
 		{"search", map[string]any{"query": "arbitrum", "network": "mainnet"}, "/api/v1/search", url.Values{"q": {"arbitrum"}, "network": {"mainnet"}}},
 	}
@@ -469,6 +470,7 @@ func TestToolInputValidationErrors(t *testing.T) {
 	}{
 		{"get_entity", map[string]any{"key": "  "}, "key is required"},
 		{"get_blob_by_tx_hash", map[string]any{"tx_hash": ""}, "tx_hash is required"},
+		{"get_blob_inclusion", map[string]any{"tx_hash": ""}, "tx_hash is required"},
 		{"get_blob_by_versioned_hash", map[string]any{"versioned_hash": " "}, "versioned_hash is required"},
 		{"search", map[string]any{"query": ""}, "query is required"},
 	}
