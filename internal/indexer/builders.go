@@ -449,6 +449,35 @@ func (i *Indexer) insertCandidates(tx *sqlx.Tx, candidates []models.BlobInclusio
 	return nil
 }
 
+// repairIncludedCandidates removes candidate rows for transactions that a
+// block below the recording one had already included or superseded, and
+// recomputes the aggregates those rows fed. Start runs it once
+// unconditionally; the maintenance loop runs it on every tick, ahead of the
+// prune that would delete its evidence. The commit-order wait and the
+// snapshot gate (commit_order.go) make such rows rare; this is the backstop
+// for what still slips past them, and for rows an earlier binary wrote. A
+// non-zero repair is logged at Warn because it means the gate let something
+// through.
+func (i *Indexer) repairIncludedCandidates(ctx context.Context) {
+	unlockWrites := i.lockDBWrites()
+	removed, blocks, err := i.db.RepairIncludedBlobInclusionCandidates(ctx, i.network.ChainID)
+	unlockWrites()
+	if err != nil {
+		if ctx.Err() == nil {
+			logger.Error("Failed to repair blob inclusion candidates",
+				zap.String("network", i.network.Name),
+				zap.Error(err))
+		}
+		return
+	}
+	if removed > 0 {
+		logger.Warn("Removed candidate rows for transactions included before the block that recorded them",
+			zap.String("network", i.network.Name),
+			zap.Int64("removed_rows", removed),
+			zap.Int("blocks", len(blocks)))
+	}
+}
+
 // upsertBlockBuilder writes the block's builder row. The identity columns are
 // overwritten on conflict, like block_metrics: a reprocessed block re-derives
 // all of them from the header it just fetched.

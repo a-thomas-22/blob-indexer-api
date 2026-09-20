@@ -890,6 +890,7 @@ func TestInsertBlockDataBuilderErrors(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectQuery("candidate_snapshot FROM block_builders").
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(false))
+		expectPredecessorsCommitted(mock, idx, 901, true)
 		mock.ExpectQuery("FROM mempool_blobs").
 			WillReturnError(errors.New("pool read failed"))
 		mock.ExpectRollback()
@@ -909,6 +910,7 @@ func TestInsertBlockDataBuilderErrors(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectQuery("candidate_snapshot FROM block_builders").
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(false))
+		expectPredecessorsCommitted(mock, idx, 901, true)
 		mock.ExpectQuery("FROM mempool_blobs").
 			WillReturnRows(sqlmock.NewRows([]string{
 				"tx_hash", "from_address", "user_attribution", "nonce", "blob_count",
@@ -975,6 +977,7 @@ func TestInsertBlockDataTakesCandidateSnapshot(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery("candidate_snapshot FROM block_builders").
 		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(false))
+	expectPredecessorsCommitted(mock, idx, 902, true)
 	mock.ExpectQuery("FROM mempool_blobs").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"tx_hash", "from_address", "user_attribution", "nonce", "blob_count",
@@ -1302,7 +1305,8 @@ func TestRunMempoolCleanupPrunesCandidatesWithoutTheMempoolSweep(t *testing.T) {
 	idxDB, mock := newMockIndexerDB(t)
 	idx.db = idxDB
 
-	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_inclusion_candidates")).
+	expectCandidateRepair(mock, idx, nil)
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_timestamp < $2")).
 		WithArgs(idx.network.ChainID, utcTimeArg{}).
 		WillReturnResult(sqlmock.NewResult(0, 3))
 
@@ -1337,7 +1341,13 @@ func TestRunMempoolCleanupPrunesCandidatesAfterEarlierFailures(t *testing.T) {
 		WillReturnError(errors.New("pending sweep failed"))
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_replacements WHERE chain_id = $1 AND replaced_at < $2")).
 		WillReturnError(errors.New("replacement prune failed"))
-	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_inclusion_candidates")).
+	// The repair runs before the prune, so a stale row is never pruned
+	// unrepaired, and a repair failure does not skip the prune.
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("DELETE FROM blob_inclusion_candidates c")).
+		WillReturnError(errors.New("repair failed"))
+	mock.ExpectRollback()
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_timestamp < $2")).
 		WithArgs(idx.network.ChainID, utcTimeArg{}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
