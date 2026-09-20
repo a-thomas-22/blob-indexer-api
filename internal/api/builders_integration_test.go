@@ -722,31 +722,34 @@ func newBlockRequestForChain(number string) *http.Request {
 	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 }
 
-// TestBuilderQueryPlansStayOnRangeIndexes seeds enough history that a 24h
-// window is a small fraction of it, then asserts the planner reaches the
-// builder rows and their blobs through the (chain_id, timestamp) indexes.
-// A sequential scan of blobs here would mean every builder request reads the
-// whole table, which is exactly what capping the range at 30d is meant to
-// avoid.
-func TestBuilderQueryPlansStayOnRangeIndexes(t *testing.T) {
-	sqlxDB, _ := resetBuilderSchema(t, "api_builders_explain")
+// Fixture shape for the plan test. blobsPerBlock is what makes the blobs
+// table big enough to matter: the 60d history holds ~280k blob rows, past
+// the point where a sequential scan is cheap, so a query that hides the
+// window from the planner (a materialized `bounds` CTE, HL-38) really does
+// plan as `Seq Scan on blobs` with the window demoted to a join filter. A
+// one-blob-per-block fixture is small enough that the planner picks an
+// index either way and the assertions below prove nothing.
+const (
+	planDays           = 60
+	planBlocksPerDay   = 120
+	planTotalBlocks    = planDays * planBlocksPerDay
+	planSecondsPerStep = 86400 / planBlocksPerDay
+	planBlobsPerBlock  = 39
+)
 
-	const (
-		days           = 60
-		blocksPerDay   = 120
-		totalBlocks    = days * blocksPerDay
-		secondsPerStep = 86400 / blocksPerDay
-	)
-	now := time.Now().UTC().Truncate(time.Hour)
-	oldest := now.Add(-days * 24 * time.Hour)
+// seedBuilderPlanFixture lays 60 days of blocks, builders, blobs and
+// inclusion candidates down with one INSERT ... SELECT generate_series per
+// table: the statement-level triggers on blobs make anything row-by-row far
+// too slow at this size.
+func seedBuilderPlanFixture(t *testing.T, sqlxDB *sqlx.DB, now time.Time) {
+	t.Helper()
+	oldest := now.Add(-planDays * 24 * time.Hour)
 
-	// generate_series keeps the seed to three statements; the per-row
-	// triggers on blobs make a row-by-row insert far too slow here.
 	if _, err := sqlxDB.Exec(`
 		INSERT INTO block_metrics (chain_id, block_number, block_timestamp, blob_count, blob_params_max)
 		SELECT 1, g, $1::timestamp + (g * $2 * INTERVAL '1 second'), 3, 6
 		FROM generate_series(1, $3) AS g
-	`, oldest, secondsPerStep, totalBlocks); err != nil {
+	`, oldest, planSecondsPerStep, planTotalBlocks); err != nil {
 		t.Fatalf("seed block_metrics: %v", err)
 	}
 	if _, err := sqlxDB.Exec(`
@@ -757,7 +760,7 @@ func TestBuilderQueryPlansStayOnRangeIndexes(t *testing.T) {
 		SELECT 1, g, $1::timestamp + (g * $2 * INTERVAL '1 second'), '0xBuilder' || (g % 5),
 			'0x67657468', 'builder-' || (g % 5), 'Builder ' || (g % 5), 100, FALSE
 		FROM generate_series(1, $3) AS g
-	`, oldest, secondsPerStep, totalBlocks); err != nil {
+	`, oldest, planSecondsPerStep, planTotalBlocks); err != nil {
 		t.Fatalf("seed block_builders: %v", err)
 	}
 	if _, err := sqlxDB.Exec(`
@@ -767,17 +770,25 @@ func TestBuilderQueryPlansStayOnRangeIndexes(t *testing.T) {
 			timestamp, max_fee_per_blob_gas, blob_gas_used,
 			max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas, first_seen_at, tx_index
 		)
-		SELECT 1, g, 0, '0xtx' || g, '0xsender' || (g % 7), '', 131072, 10, 2, 1310720,
+		SELECT 1, g, i, '0xtx' || g || '_' || i, '0xsender' || (g % 7), '', 131072, 10, 2, 1310720,
 			$1::timestamp + (g * $2 * INTERVAL '1 second'), 12, 131072,
 			1000000000, 60000000000, 1000000000,
-			$1::timestamp + (g * $2 * INTERVAL '1 second') - INTERVAL '3 seconds', 1
+			$1::timestamp + (g * $2 * INTERVAL '1 second') - INTERVAL '3 seconds', i
 		FROM generate_series(1, $3) AS g
-	`, oldest, secondsPerStep, totalBlocks); err != nil {
+		CROSS JOIN generate_series(0, $4) AS i
+		-- Scramble the physical order so ANALYZE records a near-zero
+		-- correlation between blobs.timestamp and the heap, which is what
+		-- production looks like after in-place backfills have rewritten
+		-- rows. With a perfectly correlated heap the planner can still
+		-- reach a hidden window through a bitmap scan and the plan
+		-- assertions below stop discriminating. md5 keeps it deterministic.
+		ORDER BY md5((g * 1000 + i)::text)
+	`, oldest, planSecondsPerStep, planTotalBlocks, planBlobsPerBlock); err != nil {
 		t.Fatalf("seed blobs: %v", err)
 	}
 	// blob_inclusion_candidates needs rows too: an empty table is always
-	// sequentially scanned, which would make the plan assertion below
-	// vacuous rather than a real check that the window bound reaches the
+	// sequentially scanned, which would make the plan assertions vacuous
+	// rather than a real check that the window bound reaches the
 	// (chain_id, block_timestamp) index.
 	if _, err := sqlxDB.Exec(`
 		INSERT INTO blob_inclusion_candidates (
@@ -789,12 +800,24 @@ func TestBuilderQueryPlansStayOnRangeIndexes(t *testing.T) {
 			'0xsender' || (g % 7), NULL, g, 1, 1000000000, 60000000000, 20,
 			$1::timestamp + (g * $2 * INTERVAL '1 second') - INTERVAL '3 seconds', 'eligible'
 		FROM generate_series(1, $3) AS g
-	`, oldest, secondsPerStep, totalBlocks); err != nil {
+	`, oldest, planSecondsPerStep, planTotalBlocks); err != nil {
 		t.Fatalf("seed blob_inclusion_candidates: %v", err)
 	}
 	if _, err := sqlxDB.Exec("ANALYZE"); err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
+}
+
+// TestBuilderQueryPlansStayOnRangeIndexes seeds enough history that a 24h
+// window is a small fraction of it, then asserts the planner reaches the
+// builder rows and their blobs through the (chain_id, timestamp) indexes.
+// A sequential scan of blobs here would mean every builder request reads the
+// whole table, which is exactly what capping the range at 30d is meant to
+// avoid.
+func TestBuilderQueryPlansStayOnRangeIndexes(t *testing.T) {
+	sqlxDB, _ := resetBuilderSchema(t, "api_builders_explain")
+	now := time.Now().UTC().Truncate(time.Hour)
+	seedBuilderPlanFixture(t, sqlxDB, now)
 
 	end := now
 	start := end.Add(-24 * time.Hour)
@@ -836,29 +859,52 @@ func TestBuilderQueryPlansStayOnRangeIndexes(t *testing.T) {
 		}
 	}
 
+	// HL-38: a one-row `bounds` CTE holding the window is referenced from
+	// more than one place in every builder query, which makes Postgres
+	// materialize it. A materialized CTE is an optimization fence: the
+	// timestamps never reach the predicates at plan time, the blobs range
+	// is estimated at the default 1/3 * 1/3 of the table instead of the
+	// handful of hours it really is, and production planned the whole
+	// 86M-row table. The window is spliced in as the bare parameters now,
+	// so no plan may contain a bounds CTE at all.
+	assertNoBoundsCTE := func(name, plan string) {
+		t.Helper()
+		for _, node := range []string{"CTE bounds", "CTE Scan on bounds"} {
+			if strings.Contains(plan, node) {
+				t.Errorf("%s: plan still materializes the bounds CTE (%q):\n%s", name, node, plan)
+			}
+		}
+	}
+
+	assertPlan := func(name, plan string, tables ...string) {
+		t.Helper()
+		assertNoSeqScan(name, plan, tables...)
+		assertNoBoundsCTE(name, plan)
+	}
+
 	plan := explain("builders 24h", queryBuilderAggregates, 1, start, end, "")
-	assertNoSeqScan("builders 24h", plan, "blobs", "block_builders", "block_metrics")
+	assertPlan("builders 24h", plan, "blobs", "block_builders", "block_metrics")
 
 	plan = explain("builder detail 24h", queryBuilderAggregates, 1, start, end, "builder-1")
-	assertNoSeqScan("builder detail 24h", plan, "blobs", "block_builders", "block_metrics")
+	assertPlan("builder detail 24h", plan, "blobs", "block_builders", "block_metrics")
 
 	plan = explain("builder users 24h", queryBuilderUsers, 1, start, end, "builder-1")
-	assertNoSeqScan("builder users 24h", plan, "blobs", "block_builders")
+	assertPlan("builder users 24h", plan, "blobs", "block_builders")
 
 	plan = explain("builder skipped 24h", queryBuilderSkipped, 1, start, end, "builder-1")
-	assertNoSeqScan("builder skipped 24h", plan, "block_builders", "blob_inclusion_candidates")
+	assertPlan("builder skipped 24h", plan, "block_builders", "blob_inclusion_candidates")
 
 	plan = explain("builder recent blocks", queryBuilderRecentBlocks, 1, start, end, "builder-1", builderRecentBlockLimit)
-	assertNoSeqScan("builder recent blocks", plan, "block_builders", "block_metrics")
+	assertPlan("builder recent blocks", plan, "block_builders", "block_metrics")
 
 	plan = explain("builder-share chart 24h", queryBuilderShareTimeChart, 1, start, end, int64(3600), defaultBuilderSeriesLimit)
-	assertNoSeqScan("builder-share chart 24h", plan, "block_builders", "block_metrics")
+	assertPlan("builder-share chart 24h", plan, "block_builders", "block_metrics")
 
 	plan = explain("builder-share chart by block", queryBuilderShareBlockChart, 1, start, end, defaultBuilderSeriesLimit)
-	assertNoSeqScan("builder-share chart by block", plan, "block_builders", "block_metrics")
+	assertPlan("builder-share chart by block", plan, "block_builders", "block_metrics")
 
 	plan = explain("builder skipped detail coverage", queryBuilderSkippedDetailFrom, 1, start, end)
-	assertNoSeqScan("builder skipped detail coverage", plan, "blob_inclusion_candidates")
+	assertPlan("builder skipped detail coverage", plan, "blob_inclusion_candidates")
 
 	// Sanity: the seeded window really is a small slice of the table, so the
 	// plans above were a meaningful test of selectivity.
@@ -872,5 +918,15 @@ func TestBuilderQueryPlansStayOnRangeIndexes(t *testing.T) {
 	if inWindow == 0 || total < inWindow*10 {
 		t.Fatalf("seeded history is not selective enough: %d of %d rows in the window", inWindow, total)
 	}
-	fmt.Printf("builder EXPLAIN fixture: %d of %d block_builders rows in the 24h window\n", inWindow, total)
+	// And that blobs is big enough for the access path to be a real choice:
+	// below roughly a hundred thousand rows every path costs the same and
+	// the assertions above stop discriminating between them.
+	var totalBlobs int
+	if err := sqlxDB.Get(&totalBlobs, `SELECT COUNT(*) FROM blobs WHERE chain_id = 1`); err != nil {
+		t.Fatalf("count blobs: %v", err)
+	}
+	if totalBlobs < 100000 {
+		t.Fatalf("seeded blobs table is too small to make the plan assertions meaningful: %d rows", totalBlobs)
+	}
+	fmt.Printf("builder EXPLAIN fixture: %d of %d block_builders rows in the 24h window, %d blob rows\n", inWindow, total, totalBlobs)
 }
