@@ -1156,24 +1156,62 @@ func formatRatDecimal(value *big.Rat, precision int) string {
 	return text
 }
 
+// Every chart query splices the requested window into each predicate as the
+// bare parameter placeholders rather than reading it out of a one-row
+// `bounds` CTE. A CTE referenced from more than one place is materialized
+// (Postgres only considers inlining a CTE with a single reference), and a
+// materialized CTE is an optimization fence: the planner never sees the
+// timestamp values, falls back to its default range selectivity, and can
+// plan a scan of the whole blobs table with the window demoted to a join
+// filter — the pathology that made /builders take 86s in production
+// (HL-38). The raw (blobs-backed) and rollup-backed variants are both
+// affected, since the fine rollups grow with every sender-minute. With the
+// placeholders in the predicates the planner has the actual bounds at plan
+// time and reaches blobs through its (chain_id, timestamp) covering indexes.
+//
+// rawChartRangeStartSQL is the window start of the raw time charts that
+// accept range=all (chartTimeArgs numbering: $1 chain, $2 range label, $3
+// start, $4 end, $6 truncation unit): the requested start for a bounded
+// range, or the network's earliest blob timestamp truncated to the display
+// unit for range=all. For a bounded range the label is a plan-time constant,
+// so the CASE folds to the bare start placeholder and the MIN sub-select
+// disappears; for range=all the sub-select runs once as an InitPlan through
+// the (chain_id, timestamp) index.
+const rawChartRangeStartSQL = `CASE
+			WHEN $2::text = 'all' THEN date_trunc($6::text, COALESCE((
+				SELECT MIN(earliest.timestamp)
+				FROM blobs earliest
+				WHERE earliest.chain_id = $1
+			), $4::timestamp))
+			ELSE $3::timestamp
+		END`
+
+// rollupChartRangeStartSQL is rawChartRangeStartSQL's counterpart for the
+// rollup-backed time charts (chartRollupTimeArgs numbering: $1 chain, $2
+// range label, $3 start, $4 end, $7 source bucket seconds): range=all
+// resolves its start from the earliest rollup bucket of the source size,
+// which is already aligned.
+const rollupChartRangeStartSQL = `CASE
+			WHEN $2::text = 'all' THEN COALESCE((
+				SELECT MIN(r.bucket_start)
+				FROM blob_chart_rollups r
+				WHERE r.chain_id = $1 AND r.bucket_seconds = $7::int
+			), $4::timestamp)
+			ELSE $3::timestamp
+		END`
+
 const queryBlobMarketTimeChart = `
-	WITH bounds AS (
-		SELECT
-			$2::timestamp AS range_start,
-			$3::timestamp AS range_end
-	),
-	buckets AS (
+	WITH buckets AS (
 		SELECT
 			g.bucket_start,
-			b.range_start,
-			b.range_end
-		FROM bounds b
-		CROSS JOIN LATERAL generate_series(
-			b.range_start,
-			b.range_end - ($4::bigint * INTERVAL '1 second'),
+			$2::timestamp AS range_start,
+			$3::timestamp AS range_end
+		FROM generate_series(
+			$2::timestamp,
+			$3::timestamp - ($4::bigint * INTERVAL '1 second'),
 			$4::bigint * INTERVAL '1 second'
 		) AS g(bucket_start)
-		WHERE b.range_end > b.range_start
+		WHERE $3::timestamp > $2::timestamp
 	),
 	selected_metrics AS MATERIALIZED (
 		SELECT
@@ -1183,10 +1221,9 @@ const queryBlobMarketTimeChart = `
 				* ($4::bigint * INTERVAL '1 second')
 			) AS bucket_start
 		FROM block_metrics bm
-		CROSS JOIN bounds b
 		WHERE bm.chain_id = $1
-			AND bm.block_timestamp >= b.range_start
-			AND bm.block_timestamp < b.range_end
+			AND bm.block_timestamp >= $2::timestamp
+			AND bm.block_timestamp < $3::timestamp
 	),
 	bucket_metrics AS (
 		SELECT
@@ -1212,10 +1249,9 @@ const queryBlobMarketTimeChart = `
 				* ($4::bigint * INTERVAL '1 second')
 			) AS bucket_start
 		FROM blobs bl
-		CROSS JOIN bounds b
 		WHERE bl.chain_id = $1
-			AND bl.timestamp >= b.range_start
-			AND bl.timestamp < b.range_end
+			AND bl.timestamp >= $2::timestamp
+			AND bl.timestamp < $3::timestamp
 	),
 	bucket_blobs AS (
 		SELECT
@@ -1284,16 +1320,12 @@ const queryBlobMarketTimeChart = `
 `
 
 const queryBlobMarketBlockChart = `
-	WITH bounds AS (
-		SELECT $2::timestamp AS range_start, $3::timestamp AS range_end
-	),
-	selected_blocks AS (
+	WITH selected_blocks AS (
 		SELECT bm.*
 		FROM block_metrics bm
-		CROSS JOIN bounds b
 		WHERE bm.chain_id = $1
-			AND bm.block_timestamp >= b.range_start
-			AND bm.block_timestamp < b.range_end
+			AND bm.block_timestamp >= $2::timestamp
+			AND bm.block_timestamp < $3::timestamp
 	),
 	block_blobs AS (
 		SELECT
@@ -1320,11 +1352,10 @@ const queryBlobMarketBlockChart = `
 		SELECT
 			COALESCE(SUM(bl.total_cost_wei::numeric), 0)::text AS total_cost_wei,
 			COUNT(DISTINCT bl.from_address)::int AS unique_senders
-		FROM bounds b
-		LEFT JOIN blobs bl
-			ON bl.chain_id = $1
-			AND bl.timestamp >= b.range_start
-			AND bl.timestamp < b.range_end
+		FROM blobs bl
+		WHERE bl.chain_id = $1
+			AND bl.timestamp >= $2::timestamp
+			AND bl.timestamp < $3::timestamp
 	),
 	latest_metric AS (
 		SELECT COALESCE((
@@ -1337,8 +1368,8 @@ const queryBlobMarketBlockChart = `
 	)
 	SELECT
 		sb.block_timestamp AS timestamp,
-		b.range_start,
-		b.range_end,
+		$2::timestamp AS range_start,
+		$3::timestamp AS range_end,
 		sb.block_number AS start_block,
 		sb.block_number AS end_block,
 		sb.blob_base_fee::text AS average_blob_base_fee_wei,
@@ -1360,7 +1391,6 @@ const queryBlobMarketBlockChart = `
 		sbl.total_cost_wei AS summary_total_cost_wei,
 		sbl.unique_senders AS summary_unique_senders
 	FROM selected_blocks sb
-	CROSS JOIN bounds b
 	JOIN block_blobs bb ON bb.block_number = sb.block_number
 	CROSS JOIN summary_metrics sm
 	CROSS JOIN summary_blobs sbl
@@ -1380,28 +1410,17 @@ const queryBlobMarketBlockChart = `
 // exactly; the sub-wei pricing error this trades away is at most half a wei
 // per gas.
 const queryCostComparisonTimeChart = `
-	WITH bounds AS (
-		SELECT
-			CASE
-				WHEN $2::text = 'all' THEN date_trunc($6::text, COALESCE(MIN(timestamp), $4::timestamp))
-				ELSE $3::timestamp
-			END AS range_start,
-			$4::timestamp AS range_end
-		FROM blobs
-		WHERE chain_id = $1
-	),
-	buckets AS (
+	WITH buckets AS (
 		SELECT
 			g.bucket_start,
-			b.range_start,
-			b.range_end
-		FROM bounds b
-		CROSS JOIN LATERAL generate_series(
-			b.range_start,
-			b.range_end - ($5::bigint * INTERVAL '1 second'),
+			` + rawChartRangeStartSQL + ` AS range_start,
+			$4::timestamp AS range_end
+		FROM generate_series(
+			` + rawChartRangeStartSQL + `,
+			$4::timestamp - ($5::bigint * INTERVAL '1 second'),
 			$5::bigint * INTERVAL '1 second'
 		) AS g(bucket_start)
-		WHERE b.range_end > b.range_start
+		WHERE $4::timestamp > ` + rawChartRangeStartSQL + `
 	),
 	range_blobs AS MATERIALIZED (
 		SELECT
@@ -1413,11 +1432,10 @@ const queryCostComparisonTimeChart = `
 			bl.blob_size_bytes,
 			bl.total_cost_wei,
 			bl.base_fee_per_blob_gas
-		FROM bounds b
-		JOIN blobs bl
-			ON bl.chain_id = $1
-			AND bl.timestamp >= b.range_start
-			AND bl.timestamp < b.range_end
+		FROM blobs bl
+		WHERE bl.chain_id = $1
+			AND bl.timestamp >= ` + rawChartRangeStartSQL + `
+			AND bl.timestamp < $4::timestamp
 	),
 	bucket_costs AS (
 		SELECT
@@ -1438,11 +1456,10 @@ const queryCostComparisonTimeChart = `
 			) AS bucket_start,
 			SUM(bm.base_fee_wei::numeric) AS sum_base_fee_wei,
 			COUNT(*) FILTER (WHERE bm.base_fee_wei::numeric > 0) AS base_fee_block_count
-		FROM bounds b
-		JOIN block_metrics bm
-			ON bm.chain_id = $1
-			AND bm.block_timestamp >= b.range_start
-			AND bm.block_timestamp < b.range_end
+		FROM block_metrics bm
+		WHERE bm.chain_id = $1
+			AND bm.block_timestamp >= ` + rawChartRangeStartSQL + `
+			AND bm.block_timestamp < $4::timestamp
 		GROUP BY 1
 	),
 	priced_buckets AS (
@@ -1501,16 +1518,12 @@ const queryCostComparisonTimeChart = `
 `
 
 const queryCostComparisonBlockChart = `
-	WITH bounds AS (
-		SELECT $2::timestamp AS range_start, $3::timestamp AS range_end
-	),
-	selected_blocks AS (
+	WITH selected_blocks AS (
 		SELECT bm.block_number, bm.block_timestamp, bm.base_fee_wei
 		FROM block_metrics bm
-		CROSS JOIN bounds b
 		WHERE bm.chain_id = $1
-			AND bm.block_timestamp >= b.range_start
-			AND bm.block_timestamp < b.range_end
+			AND bm.block_timestamp >= $2::timestamp
+			AND bm.block_timestamp < $3::timestamp
 	),
 	block_costs AS (
 		SELECT
@@ -1540,19 +1553,18 @@ const queryCostComparisonBlockChart = `
 					ELSE bl.blob_size_bytes::numeric * $4::numeric * bl.base_fee_per_blob_gas::numeric
 				END
 			), 0) AS calldata_equivalent_cost_wei
-		FROM bounds b
-		LEFT JOIN blobs bl
-			ON bl.chain_id = $1
-			AND bl.timestamp >= b.range_start
-			AND bl.timestamp < b.range_end
+		FROM blobs bl
 		LEFT JOIN block_metrics bm
 			ON bm.chain_id = $1
 			AND bm.block_number = bl.block_number
+		WHERE bl.chain_id = $1
+			AND bl.timestamp >= $2::timestamp
+			AND bl.timestamp < $3::timestamp
 	)
 	SELECT
 		sb.block_timestamp AS timestamp,
-		b.range_start,
-		b.range_end,
+		$2::timestamp AS range_start,
+		$3::timestamp AS range_end,
 		bc.blob_count,
 		bc.blob_bytes,
 		bc.blob_cost_wei::text AS blob_cost_wei,
@@ -1573,7 +1585,6 @@ const queryCostComparisonBlockChart = `
 			ELSE 0
 		END AS summary_savings_percent
 	FROM selected_blocks sb
-	CROSS JOIN bounds b
 	JOIN block_costs bc ON bc.block_number = sb.block_number
 	CROSS JOIN summary_costs sc
 	ORDER BY sb.block_number ASC
@@ -1675,28 +1686,17 @@ func attributionEntityBaseSQL(limitPlaceholder string) string {
 }
 
 var queryAttributionUsageTimeChart = `
-	WITH bounds AS (
-		SELECT
-			CASE
-				WHEN $2::text = 'all' THEN date_trunc($6::text, COALESCE(MIN(timestamp), $4::timestamp))
-				ELSE $3::timestamp
-			END AS range_start,
-			$4::timestamp AS range_end
-		FROM blobs
-		WHERE chain_id = $1
-	),
-	buckets AS (
+	WITH buckets AS (
 		SELECT
 			g.bucket_start,
-			b.range_start,
-			b.range_end
-		FROM bounds b
-		CROSS JOIN LATERAL generate_series(
-			b.range_start,
-			b.range_end - ($5::bigint * INTERVAL '1 second'),
+			` + rawChartRangeStartSQL + ` AS range_start,
+			$4::timestamp AS range_end
+		FROM generate_series(
+			` + rawChartRangeStartSQL + `,
+			$4::timestamp - ($5::bigint * INTERVAL '1 second'),
 			$5::bigint * INTERVAL '1 second'
 		) AS g(bucket_start)
-		WHERE b.range_end > b.range_start
+		WHERE $4::timestamp > ` + rawChartRangeStartSQL + `
 	),
 	attribution_source AS MATERIALIZED (
 		SELECT
@@ -1711,14 +1711,13 @@ var queryAttributionUsageTimeChart = `
 			COALESCE(bl.blob_gas_used, 0)::bigint AS blob_gas_used,
 			COALESCE(NULLIF(BTRIM(bl.user_attribution), ''), NULLIF(BTRIM(known.name), ''), '') AS raw_name,
 			COALESCE(NULLIF(BTRIM(known.category), ''), '') AS raw_category
-		FROM bounds b
-		JOIN blobs bl
-			ON bl.chain_id = $1
-			AND bl.timestamp >= b.range_start
-			AND bl.timestamp < b.range_end
+		FROM blobs bl
 		LEFT JOIN blob_users known
 			ON known.chain_id = bl.chain_id
 			AND LOWER(known.address) = LOWER(bl.from_address)
+		WHERE bl.chain_id = $1
+			AND bl.timestamp >= ` + rawChartRangeStartSQL + `
+			AND bl.timestamp < $4::timestamp
 	),
 ` + attributionEntityBaseSQL("$7") + `
 	SELECT
@@ -1739,20 +1738,16 @@ var queryAttributionUsageTimeChart = `
 `
 
 var queryAttributionUsageBlockChart = `
-	WITH bounds AS (
-		SELECT $2::timestamp AS range_start, $3::timestamp AS range_end
-	),
-	buckets AS (
+	WITH buckets AS (
 		SELECT
 			bm.block_number,
 			bm.block_timestamp AS bucket_start,
-			b.range_start,
-			b.range_end
+			$2::timestamp AS range_start,
+			$3::timestamp AS range_end
 		FROM block_metrics bm
-		CROSS JOIN bounds b
 		WHERE bm.chain_id = $1
-			AND bm.block_timestamp >= b.range_start
-			AND bm.block_timestamp < b.range_end
+			AND bm.block_timestamp >= $2::timestamp
+			AND bm.block_timestamp < $3::timestamp
 	),
 	attribution_source AS MATERIALIZED (
 		SELECT
@@ -1799,23 +1794,17 @@ var queryAttributionUsageBlockChart = `
 // accept. Args: $1 network, $2 start, $3 end, $4 display bucket seconds,
 // $5 source bucket seconds.
 const queryBlobMarketTimeChartRollup = `
-	WITH bounds AS (
-		SELECT
-			$2::timestamp AS range_start,
-			$3::timestamp AS range_end
-	),
-	buckets AS (
+	WITH buckets AS (
 		SELECT
 			g.bucket_start,
-			b.range_start,
-			b.range_end
-		FROM bounds b
-		CROSS JOIN LATERAL generate_series(
-			b.range_start,
-			b.range_end - ($4::bigint * INTERVAL '1 second'),
+			$2::timestamp AS range_start,
+			$3::timestamp AS range_end
+		FROM generate_series(
+			$2::timestamp,
+			$3::timestamp - ($4::bigint * INTERVAL '1 second'),
 			$4::bigint * INTERVAL '1 second'
 		) AS g(bucket_start)
-		WHERE b.range_end > b.range_start
+		WHERE $3::timestamp > $2::timestamp
 	),
 	source_metrics AS (
 		SELECT
@@ -1825,11 +1814,10 @@ const queryBlobMarketTimeChartRollup = `
 			) AS display_bucket_start,
 			r.*
 		FROM block_metrics_rollups r
-		CROSS JOIN bounds b
 		WHERE r.chain_id = $1
 			AND r.bucket_seconds = $5::int
-			AND r.bucket_start >= b.range_start
-			AND r.bucket_start < b.range_end
+			AND r.bucket_start >= $2::timestamp
+			AND r.bucket_start < $3::timestamp
 	),
 	bucket_metrics AS (
 		SELECT
@@ -1869,11 +1857,10 @@ const queryBlobMarketTimeChartRollup = `
 			r.from_address,
 			r.total_cost_wei
 		FROM blob_chart_rollups r
-		CROSS JOIN bounds b
 		WHERE r.chain_id = $1
 			AND r.bucket_seconds = $5::int
-			AND r.bucket_start >= b.range_start
-			AND r.bucket_start < b.range_end
+			AND r.bucket_start >= $2::timestamp
+			AND r.bucket_start < $3::timestamp
 	),
 	bucket_blobs AS (
 		SELECT
@@ -1914,22 +1901,20 @@ const queryBlobMarketTimeChartRollup = `
 				ELSE '0'
 			END AS average_utilization
 		FROM block_metrics_rollups r
-		CROSS JOIN bounds b
 		WHERE r.chain_id = $1
 			AND r.bucket_seconds = LEAST($5::int, 3600)
-			AND r.bucket_start >= b.range_start
-			AND r.bucket_start < b.range_end
+			AND r.bucket_start >= $2::timestamp
+			AND r.bucket_start < $3::timestamp
 	),
 	summary_blobs AS (
 		SELECT
 			COALESCE(SUM(r.total_cost_wei), 0)::text AS total_cost_wei,
 			COUNT(DISTINCT r.from_address)::int AS unique_senders
 		FROM blob_chart_rollups r
-		CROSS JOIN bounds b
 		WHERE r.chain_id = $1
 			AND r.bucket_seconds = LEAST($5::int, 3600)
-			AND r.bucket_start >= b.range_start
-			AND r.bucket_start < b.range_end
+			AND r.bucket_start >= $2::timestamp
+			AND r.bucket_start < $3::timestamp
 	),
 	latest_metric AS (
 		SELECT COALESCE((
@@ -1984,30 +1969,17 @@ const queryBlobMarketTimeChartRollup = `
 // bucket seconds. range=all resolves its start from the earliest rollup
 // bucket, which is already day-aligned.
 const queryCostComparisonTimeChartRollup = `
-	WITH bounds AS (
-		SELECT
-			CASE
-				WHEN $2::text = 'all' THEN COALESCE((
-					SELECT MIN(r.bucket_start)
-					FROM blob_chart_rollups r
-					WHERE r.chain_id = $1 AND r.bucket_seconds = $7::int
-				), $4::timestamp)
-				ELSE $3::timestamp
-			END AS range_start,
-			$4::timestamp AS range_end
-	),
-	buckets AS (
+	WITH buckets AS (
 		SELECT
 			g.bucket_start,
-			b.range_start,
-			b.range_end
-		FROM bounds b
-		CROSS JOIN LATERAL generate_series(
-			b.range_start,
-			b.range_end - ($5::bigint * INTERVAL '1 second'),
+			` + rollupChartRangeStartSQL + ` AS range_start,
+			$4::timestamp AS range_end
+		FROM generate_series(
+			` + rollupChartRangeStartSQL + `,
+			$4::timestamp - ($5::bigint * INTERVAL '1 second'),
 			$5::bigint * INTERVAL '1 second'
 		) AS g(bucket_start)
-		WHERE b.range_end > b.range_start
+		WHERE $4::timestamp > ` + rollupChartRangeStartSQL + `
 	),
 	source_costs AS (
 		SELECT
@@ -2020,11 +1992,10 @@ const queryCostComparisonTimeChartRollup = `
 			r.total_cost_wei,
 			r.sum_size_base_fee
 		FROM blob_chart_rollups r
-		CROSS JOIN bounds b
 		WHERE r.chain_id = $1
 			AND r.bucket_seconds = $7::int
-			AND r.bucket_start >= b.range_start
-			AND r.bucket_start < b.range_end
+			AND r.bucket_start >= ` + rollupChartRangeStartSQL + `
+			AND r.bucket_start < $4::timestamp
 	),
 	bucket_costs AS (
 		SELECT
@@ -2045,11 +2016,10 @@ const queryCostComparisonTimeChartRollup = `
 			SUM(r.sum_base_fee_wei) AS sum_base_fee_wei,
 			SUM(r.base_fee_block_count) AS base_fee_block_count
 		FROM block_metrics_rollups r
-		CROSS JOIN bounds b
 		WHERE r.chain_id = $1
 			AND r.bucket_seconds = $7::int
-			AND r.bucket_start >= b.range_start
-			AND r.bucket_start < b.range_end
+			AND r.bucket_start >= ` + rollupChartRangeStartSQL + `
+			AND r.bucket_start < $4::timestamp
 		GROUP BY 1
 	),
 	priced_buckets AS (
@@ -2114,30 +2084,17 @@ const queryCostComparisonTimeChartRollup = `
 // $3 start, $4 end, $5 display bucket seconds, $6 series limit, $7 source
 // bucket seconds.
 var queryAttributionUsageTimeChartRollup = `
-	WITH bounds AS (
-		SELECT
-			CASE
-				WHEN $2::text = 'all' THEN COALESCE((
-					SELECT MIN(r.bucket_start)
-					FROM blob_chart_rollups r
-					WHERE r.chain_id = $1 AND r.bucket_seconds = $7::int
-				), $4::timestamp)
-				ELSE $3::timestamp
-			END AS range_start,
-			$4::timestamp AS range_end
-	),
-	buckets AS (
+	WITH buckets AS (
 		SELECT
 			g.bucket_start,
-			b.range_start,
-			b.range_end
-		FROM bounds b
-		CROSS JOIN LATERAL generate_series(
-			b.range_start,
-			b.range_end - ($5::bigint * INTERVAL '1 second'),
+			` + rollupChartRangeStartSQL + ` AS range_start,
+			$4::timestamp AS range_end
+		FROM generate_series(
+			` + rollupChartRangeStartSQL + `,
+			$4::timestamp - ($5::bigint * INTERVAL '1 second'),
 			$5::bigint * INTERVAL '1 second'
 		) AS g(bucket_start)
-		WHERE b.range_end > b.range_start
+		WHERE $4::timestamp > ` + rollupChartRangeStartSQL + `
 	),
 	attribution_source AS MATERIALIZED (
 		SELECT
@@ -2152,14 +2109,13 @@ var queryAttributionUsageTimeChartRollup = `
 			COALESCE(NULLIF(BTRIM(r.user_attribution), ''), NULLIF(BTRIM(known.name), ''), '') AS raw_name,
 			COALESCE(NULLIF(BTRIM(known.category), ''), '') AS raw_category
 		FROM blob_chart_rollups r
-		CROSS JOIN bounds b
 		LEFT JOIN blob_users known
 			ON known.chain_id = r.chain_id
 			AND LOWER(known.address) = LOWER(r.from_address)
 		WHERE r.chain_id = $1
 			AND r.bucket_seconds = $7::int
-			AND r.bucket_start >= b.range_start
-			AND r.bucket_start < b.range_end
+			AND r.bucket_start >= ` + rollupChartRangeStartSQL + `
+			AND r.bucket_start < $4::timestamp
 	),
 ` + attributionEntityBaseSQL("$6") + `
 	SELECT
