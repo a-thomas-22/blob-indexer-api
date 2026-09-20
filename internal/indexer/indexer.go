@@ -266,22 +266,29 @@ type Indexer struct {
 	candidateSnapshotMaxLag time.Duration
 	candidateMinAge         time.Duration
 	candidateRetention      time.Duration
-	ctx                     context.Context
-	cancel                  context.CancelFunc
-	wg                      sync.WaitGroup
-	lastIndexedBlock        uint64 // accessed with sync/atomic
-	indexerVersion          string
-	mu                      sync.Mutex // protects DB metadata writes
-	dbWriteMu               sync.Mutex // serializes same-network writes that fire summary rollup triggers
-	blockTaskCh             chan BlockTask
-	useWebsocket            bool
-	blockSub                *ethereum.BlockSubscription
-	pendingTxSub            *ethereum.PendingTxSubscription
-	mempoolPollingStarted   uint32
-	failedBlocks            map[uint64]int // block number -> cumulative failure count
-	failedBlockNextRetry    map[uint64]time.Time
-	failedBlocksMu          sync.Mutex
-	reorgDetected           uint32 // atomic flag: 1 = reorg detected, main loop should reset
+	// predecessorWait bounds how long a live block waits for the in-flight
+	// blocks below it to commit before it proceeds (see commit_order.go);
+	// zero disables the wait. inFlight counts queued-but-unfinished block
+	// tasks by height, the set that wait consults.
+	predecessorWait       time.Duration
+	inFlightMu            sync.Mutex
+	inFlight              map[uint64]int
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	wg                    sync.WaitGroup
+	lastIndexedBlock      uint64 // accessed with sync/atomic
+	indexerVersion        string
+	mu                    sync.Mutex // protects DB metadata writes
+	dbWriteMu             sync.Mutex // serializes same-network writes that fire summary rollup triggers
+	blockTaskCh           chan BlockTask
+	useWebsocket          bool
+	blockSub              *ethereum.BlockSubscription
+	pendingTxSub          *ethereum.PendingTxSubscription
+	mempoolPollingStarted uint32
+	failedBlocks          map[uint64]int // block number -> cumulative failure count
+	failedBlockNextRetry  map[uint64]time.Time
+	failedBlocksMu        sync.Mutex
+	reorgDetected         uint32 // atomic flag: 1 = reorg detected, main loop should reset
 	// reorgRangeMu guards reorgRewindFrom/reorgInvalidatedThrough, which are
 	// only meaningful while reorgDetected == 1. Reorgs signaled before the main
 	// loop consumes the flag merge into the widest invalidated range.
@@ -359,6 +366,7 @@ func New(ctx context.Context, database *db.DB, ethClient *ethereum.Client, cfg *
 		candidateSnapshotMaxLag:    durationOrDefault(cfg.Indexer.CandidateSnapshotMaxLag, defaultCandidateSnapshotMaxLag),
 		candidateMinAge:            durationOrDefault(cfg.Indexer.CandidateMinAge, defaultCandidateMinAge),
 		candidateRetention:         durationOrDefault(cfg.Indexer.CandidateRetention, defaultCandidateRetention),
+		predecessorWait:            defaultPredecessorWait,
 		ctx:                        indexerCtx,
 		cancel:                     cancel,
 		indexerVersion:             cfg.Indexer.Version,
@@ -648,10 +656,20 @@ func (i *Indexer) Start() error {
 		}()
 	}
 
+	// Repair candidate rows an earlier run wrote out of order (see
+	// commit_order.go) once on every start, whatever the maintenance
+	// settings: the corrupted rows and aggregates are already there and
+	// must not depend on a sweep being configured to get fixed.
+	i.wg.Add(1)
+	go func() {
+		defer i.wg.Done()
+		i.repairIncludedCandidates(i.ctx)
+	}()
+
 	// Start periodic maintenance: the stale pending blob sweep and the
 	// replacement-log prune (both gated on the mempool TTL) plus the
-	// candidate detail prune, which is gated only on its own retention
-	// setting and therefore keeps the loop alive on its own.
+	// candidate repair and detail prune; the prune is gated only on its own
+	// retention setting and therefore keeps the loop alive on its own.
 	if i.maintenanceDue() {
 		i.wg.Add(1)
 		go func() {
@@ -1047,6 +1065,7 @@ func (i *Indexer) blockProcessingWorker(workerID int) {
 			return
 		case task := <-i.blockTaskCh:
 			func(task BlockTask) {
+				defer i.finishBlock(task.BlockNumber)
 				defer func() {
 					if recovered := recover(); recovered != nil {
 						logger.Error("Recovered panic in block processing worker",
@@ -1290,10 +1309,8 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 					zap.Uint64("rewind_from", rewindFrom),
 					zap.Uint64("invalidated_through", invalidatedThrough))
 				for blockNumber := rewindFrom; blockNumber <= invalidatedThrough; blockNumber++ {
-					select {
-					case <-i.ctx.Done():
+					if !i.enqueueBlock(blockNumber) {
 						return
-					case i.blockTaskCh <- BlockTask{BlockNumber: blockNumber}:
 					}
 				}
 			}
@@ -1347,10 +1364,8 @@ func (i *Indexer) runBlockIndexer(startBlock uint64) {
 
 		// Queue blocks for processing — blocks on send until channel has space
 		for blockNumber := currentBlock; blockNumber <= endBlock; blockNumber++ {
-			select {
-			case <-i.ctx.Done():
+			if !i.enqueueBlock(blockNumber) {
 				return
-			case i.blockTaskCh <- BlockTask{BlockNumber: blockNumber}:
 			}
 		}
 
@@ -1398,14 +1413,12 @@ func (i *Indexer) handleNewBlockSubscription() {
 			current := atomic.LoadUint64(&i.lastIndexedBlock)
 			if blockNumber > current {
 				// Block instead of dropping when channel is full
-				select {
-				case i.blockTaskCh <- BlockTask{BlockNumber: blockNumber}:
-					logger.Debug("Queued new block from subscription",
-						zap.String("network", i.network.Name),
-						zap.Uint64("block", blockNumber))
-				case <-i.ctx.Done():
+				if !i.enqueueBlock(blockNumber) {
 					return
 				}
+				logger.Debug("Queued new block from subscription",
+					zap.String("network", i.network.Name),
+					zap.Uint64("block", blockNumber))
 			}
 		}
 	}
@@ -1620,6 +1633,13 @@ func (i *Indexer) processBlock(blockNumber uint64) error {
 	block, err := i.ethClient.GetBlockByNumber(i.ctx, blockNumber)
 	if err != nil {
 		return fmt.Errorf("failed to get block %d: %w", blockNumber, err)
+	}
+
+	// A block that just arrived commits after the in-flight blocks below it
+	// (bounded wait), so its pending-pool snapshot and its parent-hash check
+	// see those blocks' writes. Historical blocks are not ordered.
+	if i.candidateSnapshotDue(i.ethClient.GetBlockTimestamp(block)) {
+		i.awaitPredecessors(blockNumber)
 	}
 
 	// Check for chain reorganization by comparing parent hash
@@ -2575,8 +2595,22 @@ func (i *Indexer) insertBlockData(blobs []models.Blob, indexedBlock models.Index
 				logger.Debug("Keeping the first candidate snapshot for a reprocessed block",
 					zap.String("network", i.network.Name),
 					zap.Int64("block", indexedBlock.BlockNumber))
-			} else if err := i.snapshotBlockCandidates(tx, indexedBlock, blockMetrics, &builderRow); err != nil {
-				return err
+			} else {
+				// The pool read below only excludes what committed blocks
+				// promoted. With an earlier block still uncommitted, the
+				// transactions it included would be blamed on this builder,
+				// so the block keeps its identity and no snapshot.
+				ordered, err := i.predecessorsCommitted(i.ctx, tx, indexedBlock.BlockNumber)
+				if err != nil {
+					return fmt.Errorf("failed to check committed predecessors (block: %d): %w", indexedBlock.BlockNumber, err)
+				}
+				if !ordered {
+					logger.Warn("Skipping candidate snapshot: an earlier block is not committed yet",
+						zap.String("network", i.network.Name),
+						zap.Int64("block", indexedBlock.BlockNumber))
+				} else if err := i.snapshotBlockCandidates(tx, indexedBlock, blockMetrics, &builderRow); err != nil {
+					return err
+				}
 			}
 		}
 		if err := i.upsertBlockBuilder(tx, &builderRow); err != nil {
@@ -2804,14 +2838,18 @@ func (i *Indexer) maintenanceInterval() time.Duration {
 }
 
 // runMempoolCleanup periodically removes pending blobs that have exceeded
-// the configured TTL, prunes the blob_replacements eviction log, and prunes
-// per-transaction blob inclusion candidate detail past its retention window.
+// the configured TTL, prunes the blob_replacements eviction log, repairs
+// blob inclusion candidate rows written out of order, and prunes
+// per-transaction candidate detail past its retention window.
 //
-// The three jobs are independent. The first two are gated on the mempool
-// TTL; candidate pruning is gated only on indexer.candidate_retention and
-// runs on every tick regardless, including after either of the others
-// failed — a deployment that turns the mempool TTL off must not silently
-// leave the LOGGED candidate table growing forever.
+// The mempool sweep and the two prunes are gated on the mempool TTL and on
+// indexer.candidate_retention respectively, and a failed sweep never skips
+// the candidate prune — a deployment that turns the mempool TTL off must not
+// silently leave the LOGGED candidate table growing forever. The repair
+// runs first on every tick and, when it fails, both prunes are held back
+// for that tick: the replacement log and the per-transaction detail are the
+// evidence the repair needs to find the blocks whose permanent aggregates it
+// must recompute, so a stale row must never age out unrepaired.
 func (i *Indexer) runMempoolCleanup() {
 	logger.Info("Indexer maintenance starting",
 		zap.String("network", i.network.Name),
@@ -2828,11 +2866,16 @@ func (i *Indexer) runMempoolCleanup() {
 			logger.Info("Indexer maintenance stopped", zap.String("network", i.network.Name))
 			return
 		case <-ticker.C:
+			repaired := i.repairIncludedCandidates(i.ctx)
 			if i.mempoolCleanupDue() {
 				i.cleanupStalePendingBlobs()
-				i.pruneStaleBlobReplacements()
+				if repaired {
+					i.pruneStaleBlobReplacements()
+				}
 			}
-			i.pruneStaleCandidates(i.ctx)
+			if repaired {
+				i.pruneStaleCandidates(i.ctx)
+			}
 		}
 	}
 }
@@ -3101,11 +3144,8 @@ func (i *Indexer) processBlockRange(startBlock, endBlock uint64) error {
 
 	// Queue blocks for processing
 	for blockNumber := startBlock; blockNumber <= endBlock; blockNumber++ {
-		select {
-		case <-i.ctx.Done():
+		if !i.enqueueBlock(blockNumber) {
 			return i.ctx.Err()
-		case i.blockTaskCh <- BlockTask{BlockNumber: blockNumber}:
-			// Block successfully queued
 		}
 	}
 
@@ -3522,10 +3562,8 @@ func (i *Indexer) retryFailedBlocks() {
 		zap.Int("deferred_count", deferredCount))
 
 	for _, blockNum := range toRetry {
-		select {
-		case <-i.ctx.Done():
+		if !i.enqueueBlock(blockNum) {
 			return
-		case i.blockTaskCh <- BlockTask{BlockNumber: blockNum}:
 		}
 	}
 }

@@ -361,6 +361,26 @@ func setPendingLastSeen(t *testing.T, idx *Indexer, txHash string, lastSeen time
 	}
 }
 
+// seedCommittedPredecessors records every block in blockNumber's snapshot
+// window as indexed, standing in for the in-order commits a live block
+// normally follows. Without them the snapshot gate would (rightly) refuse
+// to take the snapshot.
+func seedCommittedPredecessors(t *testing.T, idx *Indexer, blockNumber int64) {
+	t.Helper()
+	from, to, ok := idx.snapshotPredecessorRange(blockNumber)
+	if !ok {
+		return
+	}
+	for block := from; block <= to; block++ {
+		if _, err := idx.db.ExecContext(context.Background(), `
+			INSERT INTO indexed_blocks (chain_id, block_number, block_hash, parent_hash)
+			VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+			integrationChainID, block, fmt.Sprintf("0xh%d", block), fmt.Sprintf("0xh%d", block-1)); err != nil {
+			t.Fatalf("seed indexed block %d: %v", block, err)
+		}
+	}
+}
+
 // A live block classifies and stores the pending pool it left behind; a block
 // indexed long after the fact stores no snapshot at all.
 func TestIntegrationCandidateSnapshot(t *testing.T) {
@@ -386,6 +406,7 @@ func TestIntegrationCandidateSnapshot(t *testing.T) {
 	confirmed.Timestamp = blockTime
 	seedPendingCandidate(t, idx, "0xincluded", "0xs4", 2, 1, "1", seenAt)
 
+	seedCommittedPredecessors(t, idx, 300)
 	indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 300, BlockHash: "0xh300", ParentHash: "0xp299"}
 	builder := integrationBuilder(300, blockTime, []byte("rsync-builder"), "0xRsync")
 	if err := idx.insertBlockData([]models.Blob{confirmed}, indexed, integrationBlockMetrics(300, blockTime), builder, 0); err != nil {
@@ -667,6 +688,7 @@ func TestIntegrationDuplicateLiveBlockKeepsTheFirstSnapshot(t *testing.T) {
 
 	seedPendingCandidate(t, idx, "0xskipped", "0xs1", 1, 2, "9", seenAt)
 
+	seedCommittedPredecessors(t, idx, 400)
 	indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 400, BlockHash: "0xh400", ParentHash: "0xp399"}
 	builder := integrationBuilder(400, blockTime, []byte("Titan (titanbuilder.xyz)"), "0xTitan")
 	if err := idx.insertBlockData(nil, indexed, integrationBlockMetrics(400, blockTime), builder, 0); err != nil {
@@ -723,6 +745,7 @@ func TestIntegrationBuilderUpsertPreservesAStoredSnapshot(t *testing.T) {
 	blockTime := time.Now().UTC().Truncate(time.Second)
 	seedPendingCandidate(t, idx, "0xskipped", "0xs1", 1, 1, "42", blockTime.Add(-time.Minute))
 
+	seedCommittedPredecessors(t, idx, 401)
 	indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 401, BlockHash: "0xh401", ParentHash: "0xp400"}
 	builder := integrationBuilder(401, blockTime, []byte("beaverbuild.org"), "0xBeaver")
 	if err := idx.insertBlockData(nil, indexed, integrationBlockMetrics(401, blockTime), builder, 0); err != nil {
@@ -772,6 +795,7 @@ func TestIntegrationCandidateSnapshotIgnoresStalePoolRows(t *testing.T) {
 	// while the row itself lingers until the TTL sweep.
 	setPendingLastSeen(t, idx, "0xdropped", blockTime.Add(-10*time.Minute))
 
+	seedCommittedPredecessors(t, idx, 410)
 	indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 410, BlockHash: "0xh410", ParentHash: "0xp409"}
 	builder := integrationBuilder(410, blockTime, []byte("Titan (titanbuilder.xyz)"), "0xTitan")
 	if err := idx.insertBlockData(nil, indexed, integrationBlockMetrics(410, blockTime), builder, 0); err != nil {
@@ -938,5 +962,301 @@ func TestIntegrationSuppressedPendingStillRecordsFirstSeen(t *testing.T) {
 	}
 	if row.FirstSeenAt == nil || !row.FirstSeenAt.UTC().Equal(observed) {
 		t.Fatalf("a later poll overwrote the earliest observation: %v", row.FirstSeenAt)
+	}
+}
+
+// A live block that commits before an earlier block in its window (mainnet
+// 26020403 landed 67ms before 26020402) must not snapshot the pool: the
+// earlier block's transactions are still in it and would be blamed on this
+// builder. The block keeps its identity with candidate_snapshot = false, and
+// the earlier block, whose own window is complete, snapshots normally.
+func TestIntegrationOutOfOrderCommitSkipsTheSnapshot(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+	idx.candidateSnapshotMaxLag = time.Minute
+	idx.candidateMinAge = 6 * time.Second
+
+	blockTime := time.Now().UTC().Truncate(time.Second)
+	seenAt := blockTime.Add(-time.Minute)
+
+	// Everything below 501 is committed; 502 arrives before 501 does.
+	seedCommittedPredecessors(t, idx, 501)
+	seedPendingCandidate(t, idx, "0xincluded-by-501", "0xs1", 1, 2, "9", seenAt)
+	seedPendingCandidate(t, idx, "0xskipped-by-both", "0xs2", 1, 1, "30", seenAt)
+
+	late := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 502, BlockHash: "0xh502", ParentHash: "0xh501"}
+	lateBuilder := integrationBuilder(502, blockTime, []byte("Titan (titanbuilder.xyz)"), "0xTitan")
+	if err := idx.insertBlockData(nil, late, integrationBlockMetrics(502, blockTime), lateBuilder, 0); err != nil {
+		t.Fatalf("insertBlockData(502) error = %v", err)
+	}
+	lateRow := readBuilderRow(t, idx, 502)
+	if lateRow.BuilderKey != "titan" {
+		t.Fatalf("the builder identity must be stored regardless, got %+v", lateRow)
+	}
+	if lateRow.CandidateSnapshot || lateRow.PendingCandidateTxs != nil || lateRow.EligibleSkippedTxs != nil {
+		t.Fatalf("expected no snapshot for a block whose predecessor is uncommitted, got %+v", lateRow)
+	}
+	var lateCandidates int
+	if err := database.GetContext(ctx, &lateCandidates,
+		"SELECT COUNT(*) FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_number = 502", integrationChainID); err != nil {
+		t.Fatalf("count candidates: %v", err)
+	}
+	if lateCandidates != 0 {
+		t.Fatalf("expected no candidate rows for 502, got %d", lateCandidates)
+	}
+
+	// Now 501 commits, including one of the pending transactions.
+	confirmed := integrationBlob(501, 0, "0xincluded-by-501", "0xs1", true)
+	confirmed.Nonce = 1
+	confirmed.Timestamp = blockTime.Add(-12 * time.Second)
+	early := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 501, BlockHash: "0xh501", ParentHash: "0xh500"}
+	earlyBuilder := integrationBuilder(501, confirmed.Timestamp, []byte("beaverbuild.org"), "0xBeaver")
+	if err := idx.insertBlockData([]models.Blob{confirmed}, early, integrationBlockMetrics(501, confirmed.Timestamp), earlyBuilder, 0); err != nil {
+		t.Fatalf("insertBlockData(501) error = %v", err)
+	}
+	earlyRow := readBuilderRow(t, idx, 501)
+	if !earlyRow.CandidateSnapshot || earlyRow.PendingCandidateTxs == nil || *earlyRow.PendingCandidateTxs != 1 ||
+		earlyRow.EligibleSkippedTxs == nil || *earlyRow.EligibleSkippedTxs != 1 ||
+		earlyRow.EligibleSkippedMaxTip == nil || *earlyRow.EligibleSkippedMaxTip != "30" {
+		t.Fatalf("501's window is complete, so it must snapshot the pool it left: %+v", earlyRow)
+	}
+	var earlyHashes []string
+	if err := database.SelectContext(ctx, &earlyHashes,
+		"SELECT tx_hash FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_number = 501", integrationChainID); err != nil {
+		t.Fatalf("read candidates: %v", err)
+	}
+	if len(earlyHashes) != 1 || earlyHashes[0] != "0xskipped-by-both" {
+		t.Fatalf("501 candidate rows = %v, want exactly [0xskipped-by-both]", earlyHashes)
+	}
+
+	// A second live pass over 502 (the walker and the WebSocket follower
+	// both queue the tip) now finds its window complete. The first pass
+	// stored no snapshot, so nothing is overwritten, and the pool it reads
+	// is the pool after 501 — the one 502's builder faced — so it snapshots.
+	if err := idx.insertBlockData(nil, late, integrationBlockMetrics(502, blockTime), lateBuilder, 0); err != nil {
+		t.Fatalf("insertBlockData(502) second pass error = %v", err)
+	}
+	if again := readBuilderRow(t, idx, 502); !again.CandidateSnapshot || again.PendingCandidateTxs == nil || *again.PendingCandidateTxs != 1 {
+		t.Fatalf("a later live pass with a complete window must snapshot: %+v", again)
+	}
+}
+
+// The maintenance repair removes candidate rows an earlier binary wrote for
+// transactions a lower block had already included, and recomputes the
+// aggregates from the rows that remain.
+func TestIntegrationRepairIncludedCandidates(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+	idx.candidateSnapshotMaxLag = time.Minute
+	idx.candidateMinAge = 6 * time.Second
+
+	blockTime := time.Now().UTC().Truncate(time.Second)
+	seenAt := blockTime.Add(-time.Minute)
+
+	// 600's window reads as committed (the rows exist) although 599's blobs
+	// have not been written yet — the pre-gate binary's situation.
+	seedCommittedPredecessors(t, idx, 600)
+	seedCommittedPredecessors(t, idx, 599)
+	seedPendingCandidate(t, idx, "0xstale-eligible", "0xs1", 1, 2, "900", seenAt)
+	seedPendingCandidate(t, idx, "0xstale-gap", "0xs1", 2, 1, "5", seenAt)
+	seedPendingCandidate(t, idx, "0xreal", "0xs2", 1, 3, "40", seenAt)
+
+	indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 600, BlockHash: "0xh600", ParentHash: "0xh599"}
+	builder := integrationBuilder(600, blockTime, []byte("Titan (titanbuilder.xyz)"), "0xTitan")
+	if err := idx.insertBlockData(nil, indexed, integrationBlockMetrics(600, blockTime), builder, 0); err != nil {
+		t.Fatalf("insertBlockData(600) error = %v", err)
+	}
+	before := readBuilderRow(t, idx, 600)
+	if before.PendingCandidateTxs == nil || *before.PendingCandidateTxs != 3 ||
+		before.EligibleSkippedTxs == nil || *before.EligibleSkippedTxs != 2 ||
+		before.EligibleSkippedMaxTip == nil || *before.EligibleSkippedMaxTip != "900" {
+		t.Fatalf("unexpected snapshot before the repair: %+v", before)
+	}
+
+	// 599 lands afterwards and confirms the first sender's nonce-1 tx.
+	confirmed := integrationBlob(599, 0, "0xstale-eligible", "0xs1", true)
+	confirmed.Nonce = 1
+	confirmed.Timestamp = blockTime.Add(-12 * time.Second)
+	early := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 599, BlockHash: "0xh599", ParentHash: "0xh598"}
+	if err := idx.insertBlockData([]models.Blob{confirmed}, early, integrationBlockMetrics(599, confirmed.Timestamp),
+		integrationBuilder(599, confirmed.Timestamp, []byte("beaverbuild.org"), "0xBeaver"), 0); err != nil {
+		t.Fatalf("insertBlockData(599) error = %v", err)
+	}
+
+	// Nothing to repair before the stale row exists is a no-op; with it, the
+	// row goes and the aggregates follow the remaining rows.
+	idx.repairIncludedCandidates(ctx)
+
+	after := readBuilderRow(t, idx, 600)
+	if !after.CandidateSnapshot || after.PendingCandidateTxs == nil || *after.PendingCandidateTxs != 2 ||
+		after.EligibleSkippedTxs == nil || *after.EligibleSkippedTxs != 1 ||
+		after.EligibleSkippedBlobs == nil || *after.EligibleSkippedBlobs != 3 ||
+		after.EligibleSkippedMaxTip == nil || *after.EligibleSkippedMaxTip != "40" {
+		t.Fatalf("aggregates after the repair = %s, want pending=2 skipped_txs=1 skipped_blobs=3 max_tip=40", describeBuilderRow(after))
+	}
+
+	type candidateRow struct {
+		TxHash string `db:"tx_hash"`
+		Reason string `db:"reason"`
+	}
+	var remaining []candidateRow
+	if err := database.SelectContext(ctx, &remaining,
+		"SELECT tx_hash, reason FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_number = 600 ORDER BY tx_hash",
+		integrationChainID); err != nil {
+		t.Fatalf("read candidates: %v", err)
+	}
+	if len(remaining) != 2 || remaining[0].TxHash != "0xreal" || remaining[1].TxHash != "0xstale-gap" {
+		t.Fatalf("remaining candidate rows = %+v, want [0xreal 0xstale-gap]", remaining)
+	}
+	// The nonce-gap row keeps its reason: the repair does not reclassify.
+	if remaining[1].Reason != models.CandidateNonceGap {
+		t.Fatalf("0xstale-gap reason = %q, want it left as %q", remaining[1].Reason, models.CandidateNonceGap)
+	}
+
+	// A second run finds nothing and changes nothing.
+	idx.repairIncludedCandidates(ctx)
+	if again := readBuilderRow(t, idx, 600); describeBuilderRow(again) != describeBuilderRow(after) {
+		t.Fatalf("an idle repair changed the row:\n before = %s\n after  = %s", describeBuilderRow(after), describeBuilderRow(again))
+	}
+
+	// 599 itself snapshotted the pool it left (its window was complete) and
+	// is untouched by the repair: no row of its own names a lower block.
+	if early := readBuilderRow(t, idx, 599); !early.CandidateSnapshot || early.PendingCandidateTxs == nil || *early.PendingCandidateTxs != 2 {
+		t.Fatalf("599's snapshot = %s, want the two rows it left pending", describeBuilderRow(early))
+	}
+}
+
+// A pending transaction superseded by its own fee bump — same sender and
+// nonce, different hash, confirmed in a lower block — never appears in
+// blobs under its hash. The repair finds it through blob_replacements, which
+// the confirming block's superseded-delete writes in the same transaction.
+func TestIntegrationRepairRemovesSupersededCandidates(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+	idx.candidateSnapshotMaxLag = time.Minute
+	idx.candidateMinAge = 6 * time.Second
+
+	blockTime := time.Now().UTC().Truncate(time.Second)
+	seenAt := blockTime.Add(-time.Minute)
+
+	seedCommittedPredecessors(t, idx, 700)
+	seedCommittedPredecessors(t, idx, 699)
+	seedPendingCandidate(t, idx, "0xold-hash", "0xs1", 7, 2, "900", seenAt)
+	seedPendingCandidate(t, idx, "0xreal", "0xs2", 1, 1, "40", seenAt)
+
+	indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 700, BlockHash: "0xh700", ParentHash: "0xh699"}
+	builder := integrationBuilder(700, blockTime, []byte("Titan (titanbuilder.xyz)"), "0xTitan")
+	if err := idx.insertBlockData(nil, indexed, integrationBlockMetrics(700, blockTime), builder, 0); err != nil {
+		t.Fatalf("insertBlockData(700) error = %v", err)
+	}
+	if before := readBuilderRow(t, idx, 700); before.EligibleSkippedTxs == nil || *before.EligibleSkippedTxs != 2 {
+		t.Fatalf("unexpected snapshot before the repair: %s", describeBuilderRow(before))
+	}
+
+	// 699 lands afterwards and confirms the fee bump of the first sender's
+	// nonce-7 transaction under a new hash.
+	bump := integrationBlob(699, 0, "0xbumped-hash", "0xs1", true)
+	bump.Nonce = 7
+	bump.Timestamp = blockTime.Add(-12 * time.Second)
+	early := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 699, BlockHash: "0xh699", ParentHash: "0xh698"}
+	if err := idx.insertBlockData([]models.Blob{bump}, early, integrationBlockMetrics(699, bump.Timestamp),
+		integrationBuilder(699, bump.Timestamp, []byte("beaverbuild.org"), "0xBeaver"), 0); err != nil {
+		t.Fatalf("insertBlockData(699) error = %v", err)
+	}
+	var logged int
+	if err := database.GetContext(ctx, &logged,
+		"SELECT COUNT(*) FROM blob_replacements WHERE chain_id = $1 AND replaced_tx_hash = $2 AND replacement_tx_hash = $3",
+		integrationChainID, "0xold-hash", "0xbumped-hash"); err != nil {
+		t.Fatalf("count replacements: %v", err)
+	}
+	if logged != 1 {
+		t.Fatalf("expected the confirming block to log the replacement, got %d rows", logged)
+	}
+
+	idx.repairIncludedCandidates(ctx)
+
+	after := readBuilderRow(t, idx, 700)
+	if after.PendingCandidateTxs == nil || *after.PendingCandidateTxs != 1 ||
+		after.EligibleSkippedTxs == nil || *after.EligibleSkippedTxs != 1 ||
+		after.EligibleSkippedBlobs == nil || *after.EligibleSkippedBlobs != 1 ||
+		after.EligibleSkippedMaxTip == nil || *after.EligibleSkippedMaxTip != "40" {
+		t.Fatalf("aggregates after the repair = %s, want pending=1 skipped_txs=1 skipped_blobs=1 max_tip=40", describeBuilderRow(after))
+	}
+	var remaining []string
+	if err := database.SelectContext(ctx, &remaining,
+		"SELECT tx_hash FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_number = 700", integrationChainID); err != nil {
+		t.Fatalf("read candidates: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0] != "0xreal" {
+		t.Fatalf("remaining candidate rows = %v, want exactly [0xreal]", remaining)
+	}
+}
+
+// Successive fee bumps: A is in block 800's snapshot, then B bumps A while
+// still pending (the pending path logs A→B and evicts A), then block 799
+// confirms C, which supersedes B (B→C). C is the only hash in blobs, so the
+// repair has to walk the chain from A to reach it.
+func TestIntegrationRepairFollowsTheReplacementChain(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+	idx.candidateSnapshotMaxLag = time.Minute
+	idx.candidateMinAge = 6 * time.Second
+
+	blockTime := time.Now().UTC().Truncate(time.Second)
+	seenAt := blockTime.Add(-time.Minute)
+
+	seedCommittedPredecessors(t, idx, 800)
+	seedCommittedPredecessors(t, idx, 799)
+	seedPendingCandidate(t, idx, "0xchain-a", "0xs1", 9, 2, "900", seenAt)
+	seedPendingCandidate(t, idx, "0xreal", "0xs2", 1, 1, "40", seenAt)
+
+	indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 800, BlockHash: "0xh800", ParentHash: "0xh799"}
+	builder := integrationBuilder(800, blockTime, []byte("Titan (titanbuilder.xyz)"), "0xTitan")
+	if err := idx.insertBlockData(nil, indexed, integrationBlockMetrics(800, blockTime), builder, 0); err != nil {
+		t.Fatalf("insertBlockData(800) error = %v", err)
+	}
+	if before := readBuilderRow(t, idx, 800); before.EligibleSkippedTxs == nil || *before.EligibleSkippedTxs != 2 {
+		t.Fatalf("unexpected snapshot before the repair: %s", describeBuilderRow(before))
+	}
+
+	// B bumps A in the pool: the pending path evicts A and logs A→B.
+	seedPendingCandidate(t, idx, "0xchain-b", "0xs1", 9, 2, "950", seenAt.Add(time.Second))
+
+	// 799 lands afterwards confirming C, which supersedes B: B→C.
+	confirmed := integrationBlob(799, 0, "0xchain-c", "0xs1", true)
+	confirmed.Nonce = 9
+	confirmed.Timestamp = blockTime.Add(-12 * time.Second)
+	early := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 799, BlockHash: "0xh799", ParentHash: "0xh798"}
+	if err := idx.insertBlockData([]models.Blob{confirmed}, early, integrationBlockMetrics(799, confirmed.Timestamp),
+		integrationBuilder(799, confirmed.Timestamp, []byte("beaverbuild.org"), "0xBeaver"), 0); err != nil {
+		t.Fatalf("insertBlockData(799) error = %v", err)
+	}
+	var hops []string
+	if err := database.SelectContext(ctx, &hops,
+		"SELECT replaced_tx_hash || '>' || replacement_tx_hash FROM blob_replacements WHERE chain_id = $1 ORDER BY 1",
+		integrationChainID); err != nil {
+		t.Fatalf("read replacements: %v", err)
+	}
+	if len(hops) != 2 || hops[0] != "0xchain-a>0xchain-b" || hops[1] != "0xchain-b>0xchain-c" {
+		t.Fatalf("replacement log = %v, want [0xchain-a>0xchain-b 0xchain-b>0xchain-c]", hops)
+	}
+
+	if !idx.repairIncludedCandidates(ctx) {
+		t.Fatal("repair reported failure")
+	}
+
+	after := readBuilderRow(t, idx, 800)
+	if after.PendingCandidateTxs == nil || *after.PendingCandidateTxs != 1 ||
+		after.EligibleSkippedTxs == nil || *after.EligibleSkippedTxs != 1 ||
+		after.EligibleSkippedMaxTip == nil || *after.EligibleSkippedMaxTip != "40" {
+		t.Fatalf("aggregates after the repair = %s, want pending=1 skipped_txs=1 max_tip=40", describeBuilderRow(after))
+	}
+	var remaining []string
+	if err := database.SelectContext(ctx, &remaining,
+		"SELECT tx_hash FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_number = 800", integrationChainID); err != nil {
+		t.Fatalf("read candidates: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0] != "0xreal" {
+		t.Fatalf("remaining candidate rows = %v, want exactly [0xreal]", remaining)
 	}
 }

@@ -890,6 +890,7 @@ func TestInsertBlockDataBuilderErrors(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectQuery("candidate_snapshot FROM block_builders").
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(false))
+		expectPredecessorsCommitted(mock, idx, 901, true)
 		mock.ExpectQuery("FROM mempool_blobs").
 			WillReturnError(errors.New("pool read failed"))
 		mock.ExpectRollback()
@@ -909,6 +910,7 @@ func TestInsertBlockDataBuilderErrors(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectQuery("candidate_snapshot FROM block_builders").
 			WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(false))
+		expectPredecessorsCommitted(mock, idx, 901, true)
 		mock.ExpectQuery("FROM mempool_blobs").
 			WillReturnRows(sqlmock.NewRows([]string{
 				"tx_hash", "from_address", "user_attribution", "nonce", "blob_count",
@@ -975,6 +977,7 @@ func TestInsertBlockDataTakesCandidateSnapshot(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery("candidate_snapshot FROM block_builders").
 		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(false))
+	expectPredecessorsCommitted(mock, idx, 902, true)
 	mock.ExpectQuery("FROM mempool_blobs").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"tx_hash", "from_address", "user_attribution", "nonce", "blob_count",
@@ -1302,7 +1305,8 @@ func TestRunMempoolCleanupPrunesCandidatesWithoutTheMempoolSweep(t *testing.T) {
 	idxDB, mock := newMockIndexerDB(t)
 	idx.db = idxDB
 
-	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_inclusion_candidates")).
+	expectCandidateRepair(mock, idx, nil)
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_timestamp < $2")).
 		WithArgs(idx.network.ChainID, utcTimeArg{}).
 		WillReturnResult(sqlmock.NewResult(0, 3))
 
@@ -1333,11 +1337,14 @@ func TestRunMempoolCleanupPrunesCandidatesAfterEarlierFailures(t *testing.T) {
 	idxDB, mock := newMockIndexerDB(t)
 	idx.db = idxDB
 
+	// The repair runs first and succeeds; the sweep and the replacement
+	// prune then fail, and the candidate prune still runs.
+	expectCandidateRepair(mock, idx, nil)
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND COALESCE(last_seen, timestamp) < $2")).
 		WillReturnError(errors.New("pending sweep failed"))
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_replacements WHERE chain_id = $1 AND replaced_at < $2")).
 		WillReturnError(errors.New("replacement prune failed"))
-	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_inclusion_candidates")).
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_timestamp < $2")).
 		WithArgs(idx.network.ChainID, utcTimeArg{}).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -1384,5 +1391,42 @@ func TestCandidateLivenessWindow(t *testing.T) {
 				t.Fatalf("candidateLivenessWindow() = %s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+// A failed repair holds back both prunes for the tick: the replacement log
+// and the candidate detail are the evidence a later repair needs, and
+// pruning them first would leave the permanent aggregates wrong for good.
+// The mempool sweep, which the repair does not depend on, still runs.
+func TestRunMempoolCleanupHoldsPrunesWhenTheRepairFails(t *testing.T) {
+	idx := newTestIndexer()
+	idx.mempoolCleanupInterval = 40 * time.Millisecond
+	idx.candidateRetention = time.Hour
+
+	idxDB, mock := newMockIndexerDB(t)
+	idx.db = idxDB
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("DELETE FROM blob_inclusion_candidates c")).
+		WillReturnError(errors.New("repair failed"))
+	mock.ExpectRollback()
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND COALESCE(last_seen, timestamp) < $2")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	// No blob_replacements prune and no candidate prune follow.
+
+	done := make(chan struct{})
+	go func() {
+		idx.runMempoolCleanup()
+		close(done)
+	}()
+	time.Sleep(60 * time.Millisecond)
+	idx.cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runMempoolCleanup did not stop")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations not met: %v", err)
 	}
 }

@@ -3540,11 +3540,12 @@ func TestRunMempoolCleanup(t *testing.T) {
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
 
-		// One tick sweeps stale pending blobs then stale replacements. The
-		// cutoffs must be UTC: they are compared server-side against
-		// timezone-less TIMESTAMP columns, which discard the offset lib/pq
-		// encodes — a local-zone cutoff would sweep shifted by the UTC offset
-		// on non-UTC hosts.
+		// One tick repairs candidates, then sweeps stale pending blobs, then
+		// stale replacements. The cutoffs must be UTC: they are compared
+		// server-side against timezone-less TIMESTAMP columns, which discard
+		// the offset lib/pq encodes — a local-zone cutoff would sweep shifted
+		// by the UTC offset on non-UTC hosts.
+		expectCandidateRepair(mock, idx, nil)
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND COALESCE(last_seen, timestamp) < $2")).
 			WithArgs(idx.network.ChainID, utcTimeArg{}).
 			WillReturnResult(sqlmock.NewResult(0, 0))
@@ -3581,6 +3582,7 @@ func TestRunMempoolCleanup(t *testing.T) {
 		idxDB, mock := newMockIndexerDB(t)
 		idx.db = idxDB
 
+		expectCandidateRepair(mock, idx, nil)
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM mempool_blobs WHERE chain_id = $1 AND COALESCE(last_seen, timestamp) < $2")).
 			WithArgs(idx.network.ChainID, utcTimeArg{}).
 			WillReturnError(errors.New("db connection lost"))

@@ -16,6 +16,8 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 
+	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
+
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
 )
 
@@ -426,6 +428,119 @@ func (db *DB) DeleteStaleBlobInclusionCandidates(ctx context.Context, networkID 
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// RepairIncludedBlobInclusionCandidates deletes candidate rows whose
+// transaction could no longer be included at the block that recorded it as
+// pending — the transaction itself, or the same-sender same-nonce fee bump
+// that replaced it (blob_replacements), was confirmed in a lower block — and
+// recomputes the affected block_builders aggregates from the rows that
+// remain. Such a row is impossible by definition and only exists because
+// the recording block's snapshot ran before the lower block committed (see
+// indexer/commit_order.go). The replacement chain is followed to its end
+// (bounded, in case the log ever loops): with successive bumps A→B→C the
+// candidate for A is stale once C is confirmed below it even though B never
+// reaches blobs.
+//
+// The aggregates are recomputed only where the block still carries its
+// detail: a row past the retention prune has no rows to recompute from and
+// keeps its stored values. Rows that remain keep their reason; a
+// 'nonce_gap' row whose lower-nonce sibling was just removed stays a
+// nonce_gap, which undercounts the builder's eligible skips rather than
+// blaming it, and is left alone.
+//
+// It returns the number of rows removed and the distinct blocks they
+// belonged to.
+func (db *DB) RepairIncludedBlobInclusionCandidates(ctx context.Context, networkID int) (removed int64, blocks []int64, err error) {
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	rows, err := tx.QueryContext(ctx, `
+		DELETE FROM blob_inclusion_candidates c
+		WHERE c.chain_id = $1
+			AND (
+				EXISTS (
+					SELECT 1 FROM blobs b
+					WHERE b.chain_id = c.chain_id
+						AND b.tx_hash = c.tx_hash
+						AND b.block_number < c.block_number
+				)
+				OR EXISTS (
+					WITH RECURSIVE chain AS (
+						SELECT r.replacement_tx_hash AS tx_hash, 1 AS depth
+						FROM blob_replacements r
+						WHERE r.chain_id = c.chain_id AND r.replaced_tx_hash = c.tx_hash
+						UNION ALL
+						SELECT r.replacement_tx_hash, chain.depth + 1
+						FROM chain
+						JOIN blob_replacements r ON r.chain_id = c.chain_id AND r.replaced_tx_hash = chain.tx_hash
+						WHERE chain.depth < 32
+					)
+					SELECT 1 FROM chain
+					JOIN blobs b ON b.chain_id = c.chain_id AND b.tx_hash = chain.tx_hash
+					WHERE b.block_number < c.block_number
+				)
+			)
+		RETURNING c.block_number
+	`, networkID)
+	if err != nil {
+		return 0, nil, err
+	}
+	seen := make(map[int64]struct{})
+	for rows.Next() {
+		var blockNumber int64
+		if err = rows.Scan(&blockNumber); err != nil {
+			rows.Close()
+			return 0, nil, err
+		}
+		removed++
+		if _, dup := seen[blockNumber]; !dup {
+			seen[blockNumber] = struct{}{}
+			blocks = append(blocks, blockNumber)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return 0, nil, err
+	}
+	rows.Close()
+
+	if removed > 0 {
+		_, err = tx.ExecContext(ctx, `
+			UPDATE block_builders AS bb SET
+				pending_candidate_txs = r.pending,
+				eligible_skipped_txs = r.skipped_txs,
+				eligible_skipped_blobs = r.skipped_blobs,
+				eligible_skipped_max_tip = r.max_tip
+			FROM (
+				SELECT a.block_number,
+					COUNT(c.tx_hash)::int AS pending,
+					COUNT(c.tx_hash) FILTER (WHERE c.reason = $3)::int AS skipped_txs,
+					COALESCE(SUM(c.blob_count) FILTER (WHERE c.reason = $3), 0)::int AS skipped_blobs,
+					MAX(c.max_priority_fee_per_gas) FILTER (WHERE c.reason = $3) AS max_tip
+				FROM unnest($2::bigint[]) AS a(block_number)
+				LEFT JOIN blob_inclusion_candidates c
+					ON c.chain_id = $1 AND c.block_number = a.block_number
+				GROUP BY a.block_number
+			) AS r
+			WHERE bb.chain_id = $1 AND bb.block_number = r.block_number AND bb.candidate_snapshot
+		`, networkID, pq.Array(blocks), models.CandidateEligible)
+		if err != nil {
+			return 0, nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, nil, err
+	}
+	return removed, blocks, nil
 }
 
 // DeleteStalePendingBlobs removes pending blobs whose liveness watermark is
