@@ -824,9 +824,13 @@ func TestBuilderQueryPlansStayOnRangeIndexes(t *testing.T) {
 
 	// A sequential scan of any of these means the window bound is not being
 	// pushed into an index, which is the whole reason range=all is rejected.
-	// block_metrics is included because it has no timestamp index at all:
-	// only the block-number bounds the builder queries derive keep it off a
-	// full scan of the chain's history.
+	// block_metrics is included because it is joined by block number: only
+	// the window's timestamp bound on the join lets the planner use
+	// idx_block_metrics_chain_timestamp_cover instead of hashing the whole
+	// chain's history. (The leaderboard also reads blob_params_max, which is
+	// not in that index's INCLUDE list, so at a window that is a large share
+	// of the table the planner may legitimately prefer a sequential scan;
+	// the 24h slice of this 60d fixture is far below that.)
 	assertNoSeqScan := func(name, plan string, tables ...string) {
 		t.Helper()
 		for _, table := range tables {
