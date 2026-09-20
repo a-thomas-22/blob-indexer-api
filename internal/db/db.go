@@ -437,10 +437,10 @@ func (db *DB) DeleteStaleBlobInclusionCandidates(ctx context.Context, networkID 
 // recomputes the affected block_builders aggregates from the rows that
 // remain. Such a row is impossible by definition and only exists because
 // the recording block's snapshot ran before the lower block committed (see
-// indexer/commit_order.go). One replacement hop is enough: a hash evicted
-// by a pending fee bump leaves the pool at that moment, not at a block, so
-// only the hash a confirming block superseded can be caught in a later
-// snapshot.
+// indexer/commit_order.go). The replacement chain is followed to its end
+// (bounded, in case the log ever loops): with successive bumps A→B→C the
+// candidate for A is stale once C is confirmed below it even though B never
+// reaches blobs.
 //
 // The aggregates are recomputed only where the block still carries its
 // detail: a row past the retention prune has no rows to recompute from and
@@ -473,11 +473,19 @@ func (db *DB) RepairIncludedBlobInclusionCandidates(ctx context.Context, network
 						AND b.block_number < c.block_number
 				)
 				OR EXISTS (
-					SELECT 1 FROM blob_replacements r
-					JOIN blobs b ON b.chain_id = r.chain_id AND b.tx_hash = r.replacement_tx_hash
-					WHERE r.chain_id = c.chain_id
-						AND r.replaced_tx_hash = c.tx_hash
-						AND b.block_number < c.block_number
+					WITH RECURSIVE chain AS (
+						SELECT r.replacement_tx_hash AS tx_hash, 1 AS depth
+						FROM blob_replacements r
+						WHERE r.chain_id = c.chain_id AND r.replaced_tx_hash = c.tx_hash
+						UNION ALL
+						SELECT r.replacement_tx_hash, chain.depth + 1
+						FROM chain
+						JOIN blob_replacements r ON r.chain_id = c.chain_id AND r.replaced_tx_hash = chain.tx_hash
+						WHERE chain.depth < 32
+					)
+					SELECT 1 FROM chain
+					JOIN blobs b ON b.chain_id = c.chain_id AND b.tx_hash = chain.tx_hash
+					WHERE b.block_number < c.block_number
 				)
 			)
 		RETURNING c.block_number

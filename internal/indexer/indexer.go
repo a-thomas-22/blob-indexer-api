@@ -2842,14 +2842,14 @@ func (i *Indexer) maintenanceInterval() time.Duration {
 // blob inclusion candidate rows written out of order, and prunes
 // per-transaction candidate detail past its retention window.
 //
-// The jobs are independent. The first two are gated on the mempool TTL;
-// candidate pruning is gated only on indexer.candidate_retention and runs
-// on every tick regardless, including after any of the others failed — a
-// deployment that turns the mempool TTL off must not silently leave the
-// LOGGED candidate table growing forever. The repair runs before the prune
-// on every tick: the prune deletes the per-transaction detail the repair
-// needs to find the blocks whose permanent aggregates it must recompute,
-// so a stale row must never age out unrepaired.
+// The mempool sweep and the two prunes are gated on the mempool TTL and on
+// indexer.candidate_retention respectively, and a failed sweep never skips
+// the candidate prune — a deployment that turns the mempool TTL off must not
+// silently leave the LOGGED candidate table growing forever. The repair
+// runs first on every tick and, when it fails, both prunes are held back
+// for that tick: the replacement log and the per-transaction detail are the
+// evidence the repair needs to find the blocks whose permanent aggregates it
+// must recompute, so a stale row must never age out unrepaired.
 func (i *Indexer) runMempoolCleanup() {
 	logger.Info("Indexer maintenance starting",
 		zap.String("network", i.network.Name),
@@ -2866,12 +2866,16 @@ func (i *Indexer) runMempoolCleanup() {
 			logger.Info("Indexer maintenance stopped", zap.String("network", i.network.Name))
 			return
 		case <-ticker.C:
+			repaired := i.repairIncludedCandidates(i.ctx)
 			if i.mempoolCleanupDue() {
 				i.cleanupStalePendingBlobs()
-				i.pruneStaleBlobReplacements()
+				if repaired {
+					i.pruneStaleBlobReplacements()
+				}
 			}
-			i.repairIncludedCandidates(i.ctx)
-			i.pruneStaleCandidates(i.ctx)
+			if repaired {
+				i.pruneStaleCandidates(i.ctx)
+			}
 		}
 	}
 }

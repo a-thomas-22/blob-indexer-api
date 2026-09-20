@@ -453,12 +453,12 @@ func (i *Indexer) insertCandidates(tx *sqlx.Tx, candidates []models.BlobInclusio
 // block below the recording one had already included or superseded, and
 // recomputes the aggregates those rows fed. Start runs it once
 // unconditionally; the maintenance loop runs it on every tick, ahead of the
-// prune that would delete its evidence. The commit-order wait and the
-// snapshot gate (commit_order.go) make such rows rare; this is the backstop
-// for what still slips past them, and for rows an earlier binary wrote. A
-// non-zero repair is logged at Warn because it means the gate let something
-// through.
-func (i *Indexer) repairIncludedCandidates(ctx context.Context) {
+// prunes that would delete its evidence, and skips those prunes when it
+// reports failure. The commit-order wait and the snapshot gate
+// (commit_order.go) make such rows rare; this is the backstop for what
+// still slips past them, and for rows an earlier binary wrote. A non-zero
+// repair is logged at Warn because it means the gate let something through.
+func (i *Indexer) repairIncludedCandidates(ctx context.Context) bool {
 	unlockWrites := i.lockDBWrites()
 	removed, blocks, err := i.db.RepairIncludedBlobInclusionCandidates(ctx, i.network.ChainID)
 	unlockWrites()
@@ -468,7 +468,7 @@ func (i *Indexer) repairIncludedCandidates(ctx context.Context) {
 				zap.String("network", i.network.Name),
 				zap.Error(err))
 		}
-		return
+		return false
 	}
 	if removed > 0 {
 		logger.Warn("Removed candidate rows for transactions included before the block that recorded them",
@@ -476,6 +476,7 @@ func (i *Indexer) repairIncludedCandidates(ctx context.Context) {
 			zap.Int64("removed_rows", removed),
 			zap.Int("blocks", len(blocks)))
 	}
+	return true
 }
 
 // upsertBlockBuilder writes the block's builder row. The identity columns are

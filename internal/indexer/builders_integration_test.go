@@ -1191,3 +1191,72 @@ func TestIntegrationRepairRemovesSupersededCandidates(t *testing.T) {
 		t.Fatalf("remaining candidate rows = %v, want exactly [0xreal]", remaining)
 	}
 }
+
+// Successive fee bumps: A is in block 800's snapshot, then B bumps A while
+// still pending (the pending path logs A→B and evicts A), then block 799
+// confirms C, which supersedes B (B→C). C is the only hash in blobs, so the
+// repair has to walk the chain from A to reach it.
+func TestIntegrationRepairFollowsTheReplacementChain(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+	idx.candidateSnapshotMaxLag = time.Minute
+	idx.candidateMinAge = 6 * time.Second
+
+	blockTime := time.Now().UTC().Truncate(time.Second)
+	seenAt := blockTime.Add(-time.Minute)
+
+	seedCommittedPredecessors(t, idx, 800)
+	seedCommittedPredecessors(t, idx, 799)
+	seedPendingCandidate(t, idx, "0xchain-a", "0xs1", 9, 2, "900", seenAt)
+	seedPendingCandidate(t, idx, "0xreal", "0xs2", 1, 1, "40", seenAt)
+
+	indexed := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 800, BlockHash: "0xh800", ParentHash: "0xh799"}
+	builder := integrationBuilder(800, blockTime, []byte("Titan (titanbuilder.xyz)"), "0xTitan")
+	if err := idx.insertBlockData(nil, indexed, integrationBlockMetrics(800, blockTime), builder, 0); err != nil {
+		t.Fatalf("insertBlockData(800) error = %v", err)
+	}
+	if before := readBuilderRow(t, idx, 800); before.EligibleSkippedTxs == nil || *before.EligibleSkippedTxs != 2 {
+		t.Fatalf("unexpected snapshot before the repair: %s", describeBuilderRow(before))
+	}
+
+	// B bumps A in the pool: the pending path evicts A and logs A→B.
+	seedPendingCandidate(t, idx, "0xchain-b", "0xs1", 9, 2, "950", seenAt.Add(time.Second))
+
+	// 799 lands afterwards confirming C, which supersedes B: B→C.
+	confirmed := integrationBlob(799, 0, "0xchain-c", "0xs1", true)
+	confirmed.Nonce = 9
+	confirmed.Timestamp = blockTime.Add(-12 * time.Second)
+	early := models.IndexedBlock{ChainID: integrationChainID, BlockNumber: 799, BlockHash: "0xh799", ParentHash: "0xh798"}
+	if err := idx.insertBlockData([]models.Blob{confirmed}, early, integrationBlockMetrics(799, confirmed.Timestamp),
+		integrationBuilder(799, confirmed.Timestamp, []byte("beaverbuild.org"), "0xBeaver"), 0); err != nil {
+		t.Fatalf("insertBlockData(799) error = %v", err)
+	}
+	var hops []string
+	if err := database.SelectContext(ctx, &hops,
+		"SELECT replaced_tx_hash || '>' || replacement_tx_hash FROM blob_replacements WHERE chain_id = $1 ORDER BY 1",
+		integrationChainID); err != nil {
+		t.Fatalf("read replacements: %v", err)
+	}
+	if len(hops) != 2 || hops[0] != "0xchain-a>0xchain-b" || hops[1] != "0xchain-b>0xchain-c" {
+		t.Fatalf("replacement log = %v, want [0xchain-a>0xchain-b 0xchain-b>0xchain-c]", hops)
+	}
+
+	if !idx.repairIncludedCandidates(ctx) {
+		t.Fatal("repair reported failure")
+	}
+
+	after := readBuilderRow(t, idx, 800)
+	if after.PendingCandidateTxs == nil || *after.PendingCandidateTxs != 1 ||
+		after.EligibleSkippedTxs == nil || *after.EligibleSkippedTxs != 1 ||
+		after.EligibleSkippedMaxTip == nil || *after.EligibleSkippedMaxTip != "40" {
+		t.Fatalf("aggregates after the repair = %s, want pending=1 skipped_txs=1 max_tip=40", describeBuilderRow(after))
+	}
+	var remaining []string
+	if err := database.SelectContext(ctx, &remaining,
+		"SELECT tx_hash FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_number = 800", integrationChainID); err != nil {
+		t.Fatalf("read candidates: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0] != "0xreal" {
+		t.Fatalf("remaining candidate rows = %v, want exactly [0xreal]", remaining)
+	}
+}

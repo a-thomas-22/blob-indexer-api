@@ -412,7 +412,9 @@ func TestRepairIncludedCandidates(t *testing.T) {
 
 		expectCandidateRepair(mock, idx, []int64{5, 5, 7})
 
-		idx.repairIncludedCandidates(idx.ctx)
+		if !idx.repairIncludedCandidates(idx.ctx) {
+			t.Fatal("a successful repair must report success")
+		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("expectations not met: %v", err)
 		}
@@ -475,7 +477,9 @@ func TestRepairIncludedCandidates(t *testing.T) {
 				idx.db = idxDB
 				arrange(mock)
 
-				idx.repairIncludedCandidates(idx.ctx)
+				if idx.repairIncludedCandidates(idx.ctx) {
+					t.Fatal("a failed repair must report failure so the prunes are held back")
+				}
 				if err := mock.ExpectationsWereMet(); err != nil {
 					t.Fatalf("expectations not met: %v", err)
 				}
