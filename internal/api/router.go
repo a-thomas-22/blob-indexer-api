@@ -415,6 +415,7 @@ func (a *API) mountPublicRoutes(r chi.Router, aggregateLimit func(http.Handler) 
 			r.Get("/pricing", a.GetBlobPricing)
 			r.Get("/by-hash/{versionedHash}", a.GetBlobByVersionedHash)
 			r.Get("/{txHash}", a.GetBlobByTxHash)
+			r.Get("/{txHash}/inclusion", a.GetBlobInclusion)
 		})
 
 		// Block endpoint
