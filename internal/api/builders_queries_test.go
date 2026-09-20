@@ -23,17 +23,14 @@ func builderQueries() map[string]string {
 		"queryBlobInclusionCandidatesForBlock": queryBlobInclusionCandidatesForBlock,
 		"builderTxSourceSQL":                   builderTxSourceSQL("$1", "$2", "$3"),
 		"builderEntityKeyedTxsSQL":             builderEntityKeyedTxsSQL("$1", "$2", "$3"),
-		"builderBlockNumberBoundsSQL":          builderBlockNumberBoundsSQL,
-		"builderMetricsBlockBoundSQL":          builderMetricsBlockBoundSQL,
+		"builderMetricsWindowSQL":              builderMetricsWindowSQL,
 		"builderAddressAttributionSQL":         builderAddressAttributionSQL("src"),
 		"builderShareSeriesSQL":                builderShareSeriesSQL("$5"),
 		"builderShareSelectSQL":                builderShareSelectSQL,
 	}
 }
 
-// boundsCTERef matches a reference to a CTE named exactly `bounds`. The
-// underscore in range_block_bounds is a word character, so the deliberate
-// block-number bounds CTE does not trip it.
+// boundsCTERef matches a reference to a CTE named exactly `bounds`.
 var boundsCTERef = regexp.MustCompile(`(?i)\bbounds\b`)
 
 // TestBuilderQueriesCarryNoBoundsCTE keeps HL-38 from coming back. Holding
@@ -66,6 +63,8 @@ func TestBuilderQueriesBindTheirWindow(t *testing.T) {
 		"queryBuilderAggregates": {
 			"bb.block_timestamp >= $2::timestamp",
 			"bb.block_timestamp < $3::timestamp",
+			"bm.block_timestamp >= $2::timestamp",
+			"bm.block_timestamp < $3::timestamp",
 			"bl.timestamp >= $2::timestamp",
 			"bl.timestamp < $3::timestamp",
 		},
@@ -84,10 +83,14 @@ func TestBuilderQueriesBindTheirWindow(t *testing.T) {
 		"queryBuilderShareTimeChart": {
 			"bb.block_timestamp >= $2::timestamp",
 			"bb.block_timestamp < $3::timestamp",
+			"bm.block_timestamp >= $2::timestamp",
+			"bm.block_timestamp < $3::timestamp",
 		},
 		"queryBuilderShareBlockChart": {
 			"bb.block_timestamp >= $2::timestamp",
 			"bb.block_timestamp < $3::timestamp",
+			"bm.block_timestamp >= $2::timestamp",
+			"bm.block_timestamp < $3::timestamp",
 		},
 	}
 	queries := builderQueries()

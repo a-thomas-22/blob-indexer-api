@@ -36,30 +36,37 @@ import "fmt"
 // would also defeat the fence, but inline parameters are immune to the
 // planning rules entirely — see HL-38.
 //
-// block_metrics carries no timestamp index — only its primary key
-// (chain_id, block_number) and (chain_id, block_number DESC) — so a join
-// that constrains block_builders by timestamp alone leaves the planner free
-// to hash the whole chain's metrics history against the window's handful of
-// builder rows, which it does. builderBlockNumberBoundsSQL derives the
-// window's block-number extent from the already-materialized builder rows,
-// and builderMetricsBlockBoundSQL feeds it back as scalar sub-selects: those
-// evaluate once as InitPlan parameters and are usable as index bounds, so
-// block_metrics is reached by a primary-key range scan over the window
-// instead of a sequential scan. range_block_bounds must follow a CTE named
-// range_builder_blocks holding the window's builder rows.
+// block_metrics is joined by block number but bounded by the window's
+// timestamps as well. Its primary key (chain_id, block_number) and
+// idx_block_metrics_chain_timestamp_cover (chain_id, block_timestamp DESC,
+// INCLUDE blob_count among others) are its only general indexes: the
+// (chain_id, block_number DESC) duplicate was dropped in migration 000004.
+// A plain equality join would give the planner nothing to bound the metrics
+// side with, and it hashes the whole chain's history against the window's
+// builder rows (a sequential scan of block_metrics, measured at ~1M rows).
+// The timestamp predicate is the cheapest bound available: block_builders
+// and block_metrics carry the same header timestamp for a block, written in
+// the same transaction, so the predicate is a no-op on the result, and the
+// planner sees the literal window and reaches block_metrics through the
+// timestamp index — an index-only scan where only blob_count is read
+// (the builder-share charts), a heap-backed index scan where blob_params_max
+// is also read (the leaderboard), which is not in the INCLUDE list.
 //
-// An empty window yields NULL bounds, which makes the predicate NULL: the
-// LEFT JOIN then matches nothing, which is the same answer an empty window
-// would have produced anyway.
-const builderBlockNumberBoundsSQL = `
-	range_block_bounds AS (
-		SELECT MIN(block_number) AS min_block, MAX(block_number) AS max_block
-		FROM range_builder_blocks
-	),`
-
-const builderMetricsBlockBoundSQL = `
-			AND bm.block_number >= (SELECT min_block FROM range_block_bounds)
-			AND bm.block_number <= (SELECT max_block FROM range_block_bounds)`
+// queryBuilderRecentBlocks is the exception: it is LIMIT-driven, so a
+// nested loop of primary-key lookups from the few builder rows it returns
+// is the right shape, and it joins by (chain_id, block_number) alone.
+//
+// This replaced an earlier scheme that derived MIN/MAX block_number from the
+// builder rows in a CTE and fed them back as InitPlan scalars, which bounded
+// the primary key instead. On the 1M-block fixture the timestamp bound scans
+// block_metrics five to seven times faster for the charts, and unlike
+// InitPlan parameters it is visible at plan time: the scalar bounds left the
+// planner at its default range selectivity (a few thousand rows whatever the
+// window), which at 30d underestimated the metrics side about forty-fold
+// and made the hash join resize and spill to a second batch.
+const builderMetricsWindowSQL = `
+			AND bm.block_timestamp >= $2::timestamp
+			AND bm.block_timestamp < $3::timestamp`
 
 // builderTxSourceSQL collapses the range's confirmed blob rows to one row per
 // transaction — the unit tips and inclusion latency are measured in — keyed
@@ -110,7 +117,6 @@ var queryBuilderAggregates = `
 			AND bb.block_timestamp >= $2::timestamp
 			AND bb.block_timestamp < $3::timestamp
 	),
-	` + builderBlockNumberBoundsSQL + `
 	range_blocks AS MATERIALIZED (
 		SELECT
 			rb.*,
@@ -120,7 +126,7 @@ var queryBuilderAggregates = `
 		LEFT JOIN block_metrics bm
 			ON bm.chain_id = $1
 			AND bm.block_number = rb.block_number
-			` + builderMetricsBlockBoundSQL + `
+			` + builderMetricsWindowSQL + `
 	),
 	totals AS (
 		SELECT
@@ -683,7 +689,6 @@ var queryBuilderShareTimeChart = `
 			AND bb.block_timestamp >= $2::timestamp
 			AND bb.block_timestamp < $3::timestamp
 	),
-	` + builderBlockNumberBoundsSQL + `
 	builder_rows AS MATERIALIZED (
 		SELECT
 			rb.bucket_start,
@@ -694,7 +699,7 @@ var queryBuilderShareTimeChart = `
 		LEFT JOIN block_metrics bm
 			ON bm.chain_id = $1
 			AND bm.block_number = rb.block_number
-			` + builderMetricsBlockBoundSQL + `
+			` + builderMetricsWindowSQL + `
 	),
 ` + builderShareSeriesSQL("$5") + fmt.Sprintf(builderShareSelectSQL, "NULL::bigint", "b.bucket_start ASC")
 
@@ -722,7 +727,6 @@ var queryBuilderShareBlockChart = `
 		SELECT block_number, bucket_start, range_start, range_end
 		FROM range_builder_blocks
 	),
-	` + builderBlockNumberBoundsSQL + `
 	builder_rows AS MATERIALIZED (
 		SELECT
 			rb.bucket_start,
@@ -733,6 +737,6 @@ var queryBuilderShareBlockChart = `
 		LEFT JOIN block_metrics bm
 			ON bm.chain_id = $1
 			AND bm.block_number = rb.block_number
-			` + builderMetricsBlockBoundSQL + `
+			` + builderMetricsWindowSQL + `
 	),
 ` + builderShareSeriesSQL("$4") + fmt.Sprintf(builderShareSelectSQL, "b.block_number", "b.block_number ASC")
