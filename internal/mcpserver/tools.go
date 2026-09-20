@@ -52,6 +52,7 @@ const (
 	toolGetBlobReplacements      = "get_blob_replacements"
 	toolGetBlock                 = "get_block"
 	toolGetBlobByTxHash          = "get_blob_by_tx_hash"
+	toolGetBlobInclusion         = "get_blob_inclusion"
 	toolGetBlobByVersionedHash   = "get_blob_by_versioned_hash"
 	toolSearch                   = "search"
 )
@@ -465,6 +466,18 @@ var toolSpecs = []toolSpec{
 				return "", nil, err
 			}
 			return "/blob/" + hash, newQuery(in.Network), nil
+		}),
+	},
+	{
+		name:        toolGetBlobInclusion,
+		title:       "Blob inclusion timeline",
+		description: "How long a blob transaction waited between our node first seeing it pending and a block including it, and which blocks arrived in between without including it: each with its builder, blob occupancy and the reason (only 'eligible' reflects a builder choice). Per-block detail exists only for blocks indexed live and is pruned after the indexer's candidate retention window (a week by default); the window field says how many blocks in the wait could carry it.",
+		register: registerTool(func(in txHashInput) (string, url.Values, error) {
+			hash, err := requirePathValue("tx_hash", in.TxHash)
+			if err != nil {
+				return "", nil, err
+			}
+			return "/blob/" + hash + "/inclusion", newQuery(in.Network), nil
 		}),
 	},
 	{
