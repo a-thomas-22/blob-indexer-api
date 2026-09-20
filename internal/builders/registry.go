@@ -53,6 +53,10 @@ type registryEntry struct {
 // builder in the block itself.
 var registry = []registryEntry{
 	{Match: "titanbuilder", Key: "titan", Name: "Titan"},
+	// BuilderNet blocks carry the bare project name.
+	{Match: "buildernet", Key: "buildernet", Name: "BuilderNet"},
+	{Match: "eurekabuilder", Key: "eureka", Name: "Eureka"},
+	{Match: "builder.ultrasound.money", Key: "ultrasound", Name: "Ultrasound"},
 	selfNamed("beaverbuild"),
 	{Match: "rsync-builder", Key: "rsync", Name: "rsync-builder"},
 	// The Flashbots builder stamps this (sic) phrase rather than a domain.
