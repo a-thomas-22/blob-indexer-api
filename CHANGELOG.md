@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.21.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.20.0...blob-indexer-api-v0.21.0) (2026-09-20)
+
+
+### Features
+
+* **api:** attach builder attribution to /blob/pricing recent blocks ([#347](https://github.com/a-thomas-22/blob-indexer-api/issues/347)) ([893c652](https://github.com/a-thomas-22/blob-indexer-api/commit/893c65249e55887e05c1b40be2f7464386566253))
+
+
+### Bug Fixes
+
+* keep builder endpoints under the 5s budget at 7d and 30d windows ([#350](https://github.com/a-thomas-22/blob-indexer-api/issues/350)) ([6577388](https://github.com/a-thomas-22/blob-indexer-api/commit/65773881a3bfaa1619afc82cbc2c340caada988e))
+
+
+### Performance Improvements
+
+* **indexer:** run the block builder backfill newest first ([#349](https://github.com/a-thomas-22/blob-indexer-api/issues/349)) ([e84e083](https://github.com/a-thomas-22/blob-indexer-api/commit/e84e0831d99e7d947a0f1749fe44e5be96a05e17))
+
 ## [0.20.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.19.0...blob-indexer-api-v0.20.0) (2026-09-20)
 
 
