@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.7.0...blob-indexer-chart-v0.8.0) (2026-09-20)
+
+
+### Features
+
+* block builder attribution, inclusion timing and builder stats API ([#338](https://github.com/a-thomas-22/blob-indexer-api/issues/338)) ([b4f7cb4](https://github.com/a-thomas-22/blob-indexer-api/commit/b4f7cb4ad01f9f8e83fd1a7a7564d305d07e8ea9))
+
+
+### Bug Fixes
+
+* **helm:** update chart app version to 0.19.0 ([25343c3](https://github.com/a-thomas-22/blob-indexer-api/commit/25343c383eb0cc7292a7830de7e3d61bb2f376d5))
+
 ## [0.7.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-chart-v0.6.14...blob-indexer-chart-v0.7.0) (2026-09-07)
 
 
