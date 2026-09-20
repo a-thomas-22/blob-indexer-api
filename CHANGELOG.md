@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.20.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.19.0...blob-indexer-api-v0.20.0) (2026-09-20)
+
+
+### Features
+
+* blob inclusion timeline route ([#342](https://github.com/a-thomas-22/blob-indexer-api/issues/342)) ([e855ab6](https://github.com/a-thomas-22/blob-indexer-api/commit/e855ab6204674fea57cbe016ee3177faa47e28de))
+
+
+### Bug Fixes
+
+* **api:** inline builder range bounds so blobs stays on its timestamp index ([#341](https://github.com/a-thomas-22/blob-indexer-api/issues/341)) ([ba0f477](https://github.com/a-thomas-22/blob-indexer-api/commit/ba0f4774a927c698b09de3fbf7951d9f2c646427))
+* **api:** inline chart range bounds so blobs stays on its timestamp indexes ([#343](https://github.com/a-thomas-22/blob-indexer-api/issues/343)) ([8bfd6ca](https://github.com/a-thomas-22/blob-indexer-api/commit/8bfd6ca48270161ca98fd3e46cb79f7b58f59fe9))
+
+
+### Performance Improvements
+
+* **api:** bound the builder block_metrics join by timestamp, correct index docs ([#345](https://github.com/a-thomas-22/blob-indexer-api/issues/345)) ([de3e25e](https://github.com/a-thomas-22/blob-indexer-api/commit/de3e25e12e6989be5a94be139b07c3516fe79a53))
+
 ## [0.19.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.18.0...blob-indexer-api-v0.19.0) (2026-09-20)
 
 
