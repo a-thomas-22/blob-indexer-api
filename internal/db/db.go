@@ -215,6 +215,22 @@ type MetadataKV struct {
 	Value string
 }
 
+// DeleteNetworkMetadata removes one metadata key for a network and reports
+// whether a row existed. A key that is already absent is not an error, so
+// callers can retire a key on every start without checking first.
+func (db *DB) DeleteNetworkMetadata(ctx context.Context, networkID int, key string) (bool, error) {
+	result, err := db.ExecContext(ctx,
+		"DELETE FROM indexer_metadata WHERE chain_id = $1 AND key = $2", networkID, key)
+	if err != nil {
+		return false, fmt.Errorf("failed to delete metadata for key %s and network %d: %w", key, networkID, err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to read metadata delete count for key %s and network %d: %w", key, networkID, err)
+	}
+	return deleted > 0, nil
+}
+
 // SetNetworkMetadataBatch upserts multiple metadata values for a network in a
 // single statement, avoiding one round-trip per key. Keys must be distinct
 // within a call: a duplicate key would make ON CONFLICT DO UPDATE affect the

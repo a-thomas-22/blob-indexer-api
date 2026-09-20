@@ -23,8 +23,8 @@ import (
 const (
 	// defaultBuilderBackfillWindowBlocks is how many blocks one walk step
 	// covers. A step is one anti-join over indexed_blocks plus the fetches
-	// and inserts for whatever it finds; the checkpoint advances per step,
-	// so the width bounds how much a restart repeats.
+	// and inserts for whatever it finds; the floor descends per step, so
+	// the width bounds how much a restart repeats.
 	defaultBuilderBackfillWindowBlocks int64 = 2000
 	// defaultBuilderBackfillInsertBatch is how many blocks one write
 	// transaction carries. Builder rows fire no triggers, but the blob
@@ -35,8 +35,8 @@ const (
 	// within a batch; the RPC client's own rate limit applies on top.
 	defaultBuilderBackfillFetchWorkers = 4
 	// builderBackfillFetchAttempts is how many times one fetch or write is
-	// retried before the walk gives up on it for this process. The
-	// checkpoint means the next start resumes at the failed window.
+	// retried before the walk gives up on it for this process. The floor
+	// means the next start resumes at the failed window.
 	builderBackfillFetchAttempts = 3
 	// defaultBuilderBackfillRetryBackoff scales the wait between retries.
 	defaultBuilderBackfillRetryBackoff = 2 * time.Second
@@ -76,9 +76,18 @@ func newBuilderBackfillSettings(cfg config.IndexerConfig) builderBackfillSetting
 
 // runBuilderBackfill gives blocks indexed before migration 000017 the
 // block_builders row live indexing now writes, and fills blobs.tx_index for
-// their blob rows from the same fetch. It walks indexed history oldest first
+// their blob rows from the same fetch. It walks indexed history newest first
 // in fixed block windows, lists the blocks in each window with no builder
 // row, refetches them with their transactions, and inserts.
+//
+// Newest first because the API only serves builder statistics over bounded
+// recent windows (30 days at most): filling the tail of history first makes
+// those windows complete within hours of a deploy, while the years of older
+// blocks nobody queries follow behind. The walk can start at the indexed tip
+// without a search for where the gap begins: live indexing writes a block's
+// builder row in the same transaction as the block itself, and every reorg
+// or reindex cleanup deletes both together, so a window of live blocks lists
+// nothing and costs one primary-key anti-join.
 //
 // Nothing is deleted and no existing row is overwritten: the insert is
 // ON CONFLICT DO NOTHING, so a live insert that raced ahead keeps its
@@ -88,13 +97,23 @@ func newBuilderBackfillSettings(cfg config.IndexerConfig) builderBackfillSetting
 // "not observed" rather than "nothing was pending". The candidates table is
 // never touched.
 //
-// Progress checkpoints in indexer_metadata. The checkpoint only advances
-// over a contiguous prefix of windows proven complete: after a window is
-// processed it is listed again, and any block still without a builder row (a
-// fetch that failed every attempt, or a batch a reorg cleanup invalidated in
-// flight) leaves the window incomplete. The walk carries on through later
-// windows so one bad block cannot wedge the rest of history, but the
-// checkpoint stays at the incomplete window so the next start retries it.
+// Progress checkpoints in indexer_metadata as a floor: the lowest block such
+// that every indexed block from it up to the tip has been verified to carry
+// a builder row. The floor only descends over a contiguous run of windows
+// proven complete: after a window is processed it is listed again, and any
+// block still without a builder row (a fetch that failed every attempt, or a
+// batch a reorg cleanup invalidated in flight) leaves the window incomplete.
+// The walk carries on through lower windows so one bad block cannot wedge
+// the rest of history, but the floor stays above the incomplete window so
+// the next start resumes exactly there. A restart never walks above the
+// floor: the blocks live indexing wrote meanwhile already have rows and are
+// neither listed nor fetched again.
+//
+// The floor is a different metadata key from the checkpoint the oldest-first
+// walk of earlier releases kept (the highest block of a complete prefix).
+// The two mean opposite things, so the old key is deleted rather than
+// reinterpreted — on every start, so a failed delete is simply retried — and
+// the prefix it covered is walked again at one empty listing per window.
 //
 // indexer.builder_backfill_enabled turns the whole walk off; the gate lives
 // here rather than at the call site because the walk is chained onto the
@@ -128,32 +147,48 @@ func (i *Indexer) runBuilderBackfill() {
 		windowBlocks = defaultBuilderBackfillWindowBlocks
 	}
 
-	from := bounds.Min
-	if resume, ok := i.builderBackfillWatermark(); ok && resume >= from {
-		from = resume + 1
+	i.retireAscendingBuilderBackfillCheckpoint()
+
+	floor, found, err := i.builderBackfillFloor()
+	if err != nil {
+		// Walking from the tip on a transient read error would overwrite
+		// the floor with a much higher one and forget the verified history
+		// below it; the next start reads it again instead.
+		if i.ctx.Err() == nil {
+			logger.Error("Failed to read builder backfill floor; skipping the walk until the next start",
+				zap.String("network", i.network.Name),
+				zap.Error(err))
+		}
+		return
 	}
-	if from > bounds.Max {
+	top := bounds.Max
+	// A floor above the tip describes history a reindex has since removed;
+	// the walk starts over from the tip and lowers it.
+	if found && floor <= bounds.Max {
+		top = floor - 1
+	}
+	if top < bounds.Min {
 		logger.Debug("Builder backfill already covers indexed history",
 			zap.String("network", i.network.Name),
-			zap.Int64("through_block", bounds.Max))
+			zap.Int64("down_to_block", bounds.Min))
 		return
 	}
 
-	logger.Info("Backfilling block builders",
+	logger.Info("Backfilling block builders newest first",
 		zap.String("network", i.network.Name),
-		zap.Int64("from_block", from),
-		zap.Int64("to_block", bounds.Max),
+		zap.Int64("from_block", top),
+		zap.Int64("down_to_block", bounds.Min),
 		zap.Int64("window_blocks", windowBlocks),
 		zap.Duration("pause", i.builderBackfill.pause))
 
 	began := time.Now()
 	var windows, blocksFilled, rowsInserted, blobsIndexed, incompleteWindows int64
-	checkpoint := from - 1
-	checkpointStalled := false
-	for windowStart := from; windowStart <= bounds.Max; windowStart += windowBlocks {
-		windowEnd := windowStart + windowBlocks - 1
-		if windowEnd > bounds.Max {
-			windowEnd = bounds.Max
+	floor = top + 1
+	floorStalled := false
+	for windowEnd := top; windowEnd >= bounds.Min; windowEnd -= windowBlocks {
+		windowStart := windowEnd - windowBlocks + 1
+		if windowStart < bounds.Min {
+			windowStart = bounds.Min
 		}
 
 		complete, filled, inserted, indexed, err := i.backfillBuilderWindow(windowStart, windowEnd)
@@ -164,34 +199,34 @@ func (i *Indexer) runBuilderBackfill() {
 			if i.ctx.Err() == nil {
 				logger.Error("Block builder backfill aborted; history stays partial until the next start",
 					zap.String("network", i.network.Name),
-					zap.Int64("window_start", windowStart),
-					zap.Int64("checkpoint", checkpoint),
+					zap.Int64("window_end", windowEnd),
+					zap.Int64("floor", floor),
 					zap.Error(err))
 			}
 			return
 		}
 		if !complete {
 			incompleteWindows++
-			if !checkpointStalled {
-				checkpointStalled = true
-				logger.Warn("Block builder backfill window left blocks without a builder row; checkpoint holds here while the walk continues",
+			if !floorStalled {
+				floorStalled = true
+				logger.Warn("Block builder backfill window left blocks without a builder row; floor holds here while the walk continues",
 					zap.String("network", i.network.Name),
 					zap.Int64("window_start", windowStart),
 					zap.Int64("window_end", windowEnd))
 			}
 		}
-		if !checkpointStalled {
-			checkpoint = windowEnd
-			i.setBuilderBackfillWatermark(windowEnd)
+		if !floorStalled {
+			floor = windowStart
+			i.setBuilderBackfillFloor(windowStart)
 		}
 
 		windows++
 		if windows%builderBackfillProgressEvery == 0 {
 			logger.Info("Block builder backfill progress",
 				zap.String("network", i.network.Name),
-				zap.Int64("through_block", windowEnd),
-				zap.Int64("checkpoint", checkpoint),
-				zap.Int64("to_block", bounds.Max),
+				zap.Int64("reached_block", windowStart),
+				zap.Int64("floor", floor),
+				zap.Int64("down_to_block", bounds.Min),
 				zap.Int64("blocks_filled", blocksFilled),
 				zap.Int64("rows_inserted", rowsInserted),
 				zap.Int64("blobs_indexed", blobsIndexed),
@@ -199,16 +234,16 @@ func (i *Indexer) runBuilderBackfill() {
 				zap.Duration("elapsed", time.Since(began)))
 		}
 
-		if windowEnd < bounds.Max && !i.pauseBuilderBackfill() {
+		if windowStart > bounds.Min && !i.pauseBuilderBackfill() {
 			return
 		}
 	}
 
 	if incompleteWindows > 0 {
-		logger.Warn("Block builder backfill walked all indexed history but left blocks without a builder row; the next start retries from the checkpoint",
+		logger.Warn("Block builder backfill walked all indexed history but left blocks without a builder row; the next start resumes below the floor",
 			zap.String("network", i.network.Name),
-			zap.Int64("checkpoint", checkpoint),
-			zap.Int64("to_block", bounds.Max),
+			zap.Int64("floor", floor),
+			zap.Int64("down_to_block", bounds.Min),
 			zap.Int64("incomplete_windows", incompleteWindows),
 			zap.Int64("blocks_filled", blocksFilled),
 			zap.Int64("rows_inserted", rowsInserted),
@@ -218,7 +253,7 @@ func (i *Indexer) runBuilderBackfill() {
 	}
 	logger.Info("Block builder backfill complete",
 		zap.String("network", i.network.Name),
-		zap.Int64("through_block", bounds.Max),
+		zap.Int64("down_to_block", bounds.Min),
 		zap.Int64("blocks_filled", blocksFilled),
 		zap.Int64("rows_inserted", rowsInserted),
 		zap.Int64("blobs_indexed", blobsIndexed),
@@ -342,7 +377,7 @@ func missingBlockNumbers(blocks []db.MissingBuilderBlock) []int64 {
 // fetchBuilderBackfillBatch fetches a batch of blocks concurrently and
 // derives their builder rows and blob transaction positions, in block order.
 // A block that fails every fetch attempt contributes nothing; it stays
-// builder-less and the window recheck holds the checkpoint on it, so the
+// builder-less and the window recheck holds the floor above it, so the
 // batch still lands for the blocks that did fetch rather than losing them
 // all.
 //
@@ -351,7 +386,7 @@ func missingBlockNumbers(blocks []db.MissingBuilderBlock) []int64 {
 // number, so a reorg the live path has not yet cleaned up would otherwise
 // pair one fork's builder — and its transaction positions — with another
 // fork's stored metrics and blobs. Skipping leaves the window incomplete,
-// the checkpoint where it is, and the block to the next pass, by which time
+// the floor where it is, and the block to the next pass, by which time
 // the live reorg handling has resolved which fork is canonical.
 func (i *Indexer) fetchBuilderBackfillBatch(blocks []db.MissingBuilderBlock) ([]models.BlockBuilder, []db.BlobTxIndexUpdate) {
 	workers := i.builderBackfill.fetchWorkers
@@ -482,7 +517,7 @@ func blobTxIndexUpdates(block *types.Block) []db.BlobTxIndexUpdate {
 // like every other write path, so the blobs update cannot interleave with
 // this indexer's own block inserts. A batch the epoch check rejects is
 // dropped without error: the window recheck sees those blocks again and
-// holds the checkpoint on them.
+// holds the floor above them.
 func (i *Indexer) writeBuilderBackfillBatch(rows []models.BlockBuilder, txIndexes []db.BlobTxIndexUpdate, fetchEpoch uint64) (inserted, indexed int64, err error) {
 	if len(rows) == 0 {
 		return 0, 0, nil
@@ -532,42 +567,72 @@ func (i *Indexer) waitBuilderBackfillRetry(attempt int, step string, block int64
 	}
 }
 
-// builderBackfillWatermark reads the highest block a previous run completed.
-// Absent or unparsable means "start from the beginning", which repeats cheap
-// window scans but never leaves blocks behind.
-func (i *Indexer) builderBackfillWatermark() (int64, bool) {
-	value, err := i.db.GetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataBlockBuilderBackfillBlock)
+// builderBackfillFloor reads the lowest block a previous run verified,
+// together with everything above it. Absent or unparsable means "start from
+// the tip", which repeats cheap window listings but never leaves blocks
+// behind. A read that fails outright is returned as an error rather than
+// treated as absent: the caller must not walk from the tip on a transient
+// failure, because the first window it completes would overwrite a floor that
+// may be millions of blocks lower.
+func (i *Indexer) builderBackfillFloor() (floor int64, found bool, err error) {
+	value, err := i.db.GetNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataBlockBuilderBackfillFloor)
 	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) && i.ctx.Err() == nil {
-			logger.Warn("Failed to read builder backfill watermark; walking from the earliest indexed block",
-				zap.String("network", i.network.Name),
-				zap.Error(err))
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, false, nil
 		}
-		return 0, false
+		return 0, false, err
 	}
 	block, parseErr := strconv.ParseInt(value, 10, 64)
 	if parseErr != nil {
-		logger.Warn("Ignoring unparsable builder backfill watermark",
+		logger.Warn("Ignoring unparsable builder backfill floor",
 			zap.String("network", i.network.Name),
 			zap.String("value", value),
 			zap.Error(parseErr))
-		return 0, false
+		return 0, false, nil
 	}
-	return block, true
+	return block, true, nil
 }
 
-// setBuilderBackfillWatermark checkpoints a completed window. A failed write
-// only costs a repeated window on the next start.
-func (i *Indexer) setBuilderBackfillWatermark(block int64) {
+// setBuilderBackfillFloor checkpoints a completed window by its lowest
+// block. A failed write only costs a repeated window on the next start.
+func (i *Indexer) setBuilderBackfillFloor(block int64) {
 	// Under Indexer.mu like every other metadata write.
 	i.mu.Lock()
 	err := i.db.SetNetworkMetadata(i.ctx, i.network.ChainID,
-		models.MetadataBlockBuilderBackfillBlock, strconv.FormatInt(block, 10))
+		models.MetadataBlockBuilderBackfillFloor, strconv.FormatInt(block, 10))
 	i.mu.Unlock()
 	if err != nil && i.ctx.Err() == nil {
-		logger.Warn("Failed to checkpoint builder backfill; the next start repeats this window",
+		logger.Warn("Failed to checkpoint builder backfill floor; the next start repeats this window",
 			zap.String("network", i.network.Name),
 			zap.Int64("block", block),
 			zap.Error(err))
+	}
+}
+
+// retireAscendingBuilderBackfillCheckpoint deletes the checkpoint the
+// oldest-first walk of earlier releases kept. That key recorded the highest
+// block of a complete prefix of history — the opposite of the floor — so it
+// cannot seed the descending walk and must not be mistaken for it. The
+// delete runs on every start: it is one idempotent statement per network,
+// and gating it on "no floor yet" would let a single failed delete leave the
+// stale key behind forever once the same run writes a floor. A failure is
+// logged and the next start retries.
+func (i *Indexer) retireAscendingBuilderBackfillCheckpoint() {
+	i.mu.Lock()
+	deleted, err := i.db.DeleteNetworkMetadata(i.ctx, i.network.ChainID, models.MetadataBlockBuilderBackfillBlock)
+	i.mu.Unlock()
+	if err != nil {
+		if i.ctx.Err() == nil {
+			logger.Warn("Failed to retire the oldest-first builder backfill checkpoint",
+				zap.String("network", i.network.Name),
+				zap.String("key", models.MetadataBlockBuilderBackfillBlock),
+				zap.Error(err))
+		}
+		return
+	}
+	if deleted {
+		logger.Info("Retired the oldest-first builder backfill checkpoint; the walk now runs newest first from the tip",
+			zap.String("network", i.network.Name),
+			zap.String("key", models.MetadataBlockBuilderBackfillBlock))
 	}
 }

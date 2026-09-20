@@ -1538,6 +1538,7 @@ func TestBlockBuildersDownMigrationClearsIndexerCheckpoints(t *testing.T) {
 	// one per network, plus the registry fingerprint.
 	if _, err := db.Exec(`
 		INSERT INTO indexer_metadata (chain_id, key, value) VALUES
+			(1, 'block_builder_backfill_floor', '2'),
 			(1, 'block_builder_backfill_block', '4'),
 			(1, 'block_builder_registry_version', 'deadbeefdeadbeef'),
 			(1, 'records_streak_backfill_block', '4')
@@ -1552,7 +1553,7 @@ func TestBlockBuildersDownMigrationClearsIndexerCheckpoints(t *testing.T) {
 	var stale int
 	if err := db.Get(&stale, `
 		SELECT COUNT(*) FROM indexer_metadata
-		WHERE key IN ('block_builder_backfill_block', 'block_builder_registry_version')`); err != nil {
+		WHERE key IN ('block_builder_backfill_floor', 'block_builder_backfill_block', 'block_builder_registry_version')`); err != nil {
 		t.Fatalf("count builder checkpoints after down: %v", err)
 	}
 	if stale != 0 {
@@ -1575,7 +1576,7 @@ func TestBlockBuildersDownMigrationClearsIndexerCheckpoints(t *testing.T) {
 	}
 	if err := db.Get(&stale, `
 		SELECT COUNT(*) FROM indexer_metadata
-		WHERE key IN ('block_builder_backfill_block', 'block_builder_registry_version')`); err != nil {
+		WHERE key IN ('block_builder_backfill_floor', 'block_builder_backfill_block', 'block_builder_registry_version')`); err != nil {
 		t.Fatalf("count builder checkpoints after up: %v", err)
 	}
 	if stale != 0 {

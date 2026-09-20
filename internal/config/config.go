@@ -156,8 +156,8 @@ type IndexerConfig struct {
 	CandidateRetention time.Duration `mapstructure:"candidate_retention" yaml:"candidate_retention"`
 	// BuilderBackfillEnabled gates the startup walk that inserts
 	// block_builders rows for blocks indexed before that table existed. The
-	// walk refetches each such block and inserts the row without deleting
-	// anything, so it only costs RPC calls.
+	// walk runs newest first, refetches each such block and inserts the row
+	// without deleting anything, so it only costs RPC calls.
 	BuilderBackfillEnabled bool `mapstructure:"builder_backfill_enabled" yaml:"builder_backfill_enabled"`
 	// BuilderBackfillPause is the wait between builder backfill windows,
 	// which throttles the RPC load that walk adds alongside live indexing.

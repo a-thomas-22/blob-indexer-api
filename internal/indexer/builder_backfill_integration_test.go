@@ -4,6 +4,8 @@ package indexer
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -56,9 +58,10 @@ func readBackfilledBlob(t *testing.T, idx *Indexer, blockNumber int64) backfille
 	return row
 }
 
-// The backfill gives every builder-less indexed block a row, fills the blob
-// rows' tx_index from the same fetch, checkpoints its progress, and leaves
-// the candidates table alone.
+// The backfill gives every builder-less indexed block a row, newest first,
+// fills the blob rows' tx_index from the same fetch, checkpoints its floor,
+// retires the oldest-first checkpoint earlier releases kept, and leaves the
+// candidates table alone.
 func TestIntegrationBuilderBackfillFillsHistory(t *testing.T) {
 	idx, database := newIntegrationIndexer(t)
 	ctx := context.Background()
@@ -83,6 +86,10 @@ func TestIntegrationBuilderBackfillFillsHistory(t *testing.T) {
 
 	for _, block := range []int64{100, 101, 102} {
 		seedBuilderlessBlock(t, idx, block, timestamp, blobTx.Hash().Hex(), source.hashAt(block))
+	}
+	// The checkpoint an oldest-first walk of an earlier release left behind.
+	if err := database.SetNetworkMetadata(ctx, integrationChainID, models.MetadataBlockBuilderBackfillBlock, "100"); err != nil {
+		t.Fatalf("seed legacy checkpoint: %v", err)
 	}
 
 	var builderRows int
@@ -136,20 +143,103 @@ func TestIntegrationBuilderBackfillFillsHistory(t *testing.T) {
 		t.Fatalf("expected the backfill to leave the candidates table alone, got %d rows", candidates)
 	}
 
-	checkpoint, err := database.GetNetworkMetadata(ctx, integrationChainID, models.MetadataBlockBuilderBackfillBlock)
-	if err != nil {
-		t.Fatalf("read checkpoint: %v", err)
-	}
-	if checkpoint != "102" {
-		t.Fatalf("checkpoint = %q, want \"102\"", checkpoint)
+	// Two-block windows over 100..102 walk [101,102] before [100,100], so
+	// the oldest block is the last one fetched.
+	order := source.fetchOrder()
+	if len(order) != 3 || order[2] != 100 {
+		t.Fatalf("fetch order = %v, want the oldest block 100 fetched last", order)
 	}
 
-	// A second run finds nothing left to do: the resume point is past the
-	// tip, so no block is fetched again.
+	floor, err := database.GetNetworkMetadata(ctx, integrationChainID, models.MetadataBlockBuilderBackfillFloor)
+	if err != nil {
+		t.Fatalf("read floor: %v", err)
+	}
+	if floor != "100" {
+		t.Fatalf("floor = %q, want \"100\"", floor)
+	}
+	if _, err := database.GetNetworkMetadata(ctx, integrationChainID, models.MetadataBlockBuilderBackfillBlock); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected the oldest-first checkpoint to be retired, got err = %v", err)
+	}
+
+	// A second run finds nothing left to do: the resume point is below the
+	// earliest indexed block, so no block is fetched again.
 	before := len(source.fetched)
 	idx.runBuilderBackfill()
 	if len(source.fetched) != before {
 		t.Fatalf("a caught-up backfill refetched blocks: %v", source.fetched)
+	}
+}
+
+// A restart resumes below the floor and never lists the blocks above it, so
+// blocks live indexing wrote after the previous run cost the walk nothing.
+func TestIntegrationBuilderBackfillResumesBelowFloor(t *testing.T) {
+	idx, database := newIntegrationIndexer(t)
+	ctx := context.Background()
+	timestamp := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	blobTx := newSignedBlobTx(t, int64(integrationChainID), 7)
+	source := &fakeBlockSource{
+		txs:      []*types.Transaction{blobTx},
+		extra:    []byte("beaverbuild.org"),
+		coinbase: common.HexToAddress("0xb01dface"),
+	}
+	idx.builderBackfill = builderBackfillSettings{
+		enabled:      true,
+		windowBlocks: 2,
+		insertBatch:  2,
+		fetchWorkers: 1,
+		blockSource:  source.fetch,
+	}
+
+	// History 200..205 with no builder rows anywhere, and a floor saying the
+	// previous run verified 204 and up; block 204 and 205 are deliberately
+	// left builder-less to prove the walk does not look there.
+	for _, block := range []int64{200, 201, 202, 203, 204, 205} {
+		seedBuilderlessBlock(t, idx, block, timestamp, blobTx.Hash().Hex(), source.hashAt(block))
+	}
+	if err := database.SetNetworkMetadata(ctx, integrationChainID, models.MetadataBlockBuilderBackfillFloor, "204"); err != nil {
+		t.Fatalf("seed floor: %v", err)
+	}
+	// A legacy checkpoint whose delete failed on the start that wrote the
+	// floor: this start must still remove it.
+	if err := database.SetNetworkMetadata(ctx, integrationChainID, models.MetadataBlockBuilderBackfillBlock, "150"); err != nil {
+		t.Fatalf("seed legacy checkpoint: %v", err)
+	}
+
+	idx.runBuilderBackfill()
+
+	if _, err := database.GetNetworkMetadata(ctx, integrationChainID, models.MetadataBlockBuilderBackfillBlock); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected the oldest-first checkpoint to be retired even with a floor present, got err = %v", err)
+	}
+
+	for _, block := range []int64{200, 201, 202, 203} {
+		if row := readBuilderRow(t, idx, block); row.BuilderKey != "beaverbuild" {
+			t.Fatalf("block %d builder_key = %q, want beaverbuild", block, row.BuilderKey)
+		}
+	}
+	for _, block := range []int64{204, 205} {
+		if source.count(uint64(block)) != 0 {
+			t.Fatalf("block %d above the floor was fetched: %v", block, source.fetched)
+		}
+	}
+	var above int
+	if err := database.GetContext(ctx, &above,
+		"SELECT COUNT(*) FROM block_builders WHERE chain_id = $1 AND block_number >= 204", integrationChainID); err != nil {
+		t.Fatalf("count rows above the floor: %v", err)
+	}
+	if above != 0 {
+		t.Fatalf("expected no rows above the floor, got %d", above)
+	}
+	order := source.fetchOrder()
+	if len(order) != 4 || order[0] != 202 || order[1] != 203 || order[2] != 200 || order[3] != 201 {
+		t.Fatalf("fetch order = %v, want [202 203 200 201]", order)
+	}
+	floor, err := database.GetNetworkMetadata(ctx, integrationChainID, models.MetadataBlockBuilderBackfillFloor)
+	if err != nil {
+		t.Fatalf("read floor: %v", err)
+	}
+	if floor != "200" {
+		t.Fatalf("floor = %q, want \"200\"", floor)
 	}
 }
 

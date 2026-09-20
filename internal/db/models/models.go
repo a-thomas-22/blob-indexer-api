@@ -347,11 +347,19 @@ const (
 	// execution-layer fees; the backfill refetches their blocks and fills the
 	// fees in place, and this checkpoint lets a restart resume the walk.
 	MetadataPriorityFeeBackfillBlock = "priority_fee_backfill_block"
-	// MetadataBlockBuilderBackfillBlock is the highest block the block
-	// builder backfill has walked. Blocks indexed before migration 000017
-	// have no block_builders row; the backfill refetches them and inserts
-	// the row (never touching blobs), and this checkpoint lets a restart
-	// resume the walk.
+	// MetadataBlockBuilderBackfillFloor is the lowest block the block builder
+	// backfill has verified: every indexed block from it up to the tip
+	// carries a block_builders row. Blocks indexed before migration 000017
+	// have none; the backfill walks newest first, refetches them and inserts
+	// the row (filling blobs.tx_index alongside), and a restart resumes the
+	// walk just below this floor.
+	MetadataBlockBuilderBackfillFloor = "block_builder_backfill_floor"
+	// MetadataBlockBuilderBackfillBlock was the checkpoint of the oldest-first
+	// builder backfill earlier releases ran: the highest block of a complete
+	// prefix of history, the opposite of the floor. The backfill deletes it on
+	// every start so the two are never confused; the constant remains for
+	// that cleanup. The 000017 down migration deletes the same key by its
+	// literal name, so the two spellings must be kept in sync by hand.
 	MetadataBlockBuilderBackfillBlock = "block_builder_backfill_block"
 	// MetadataBlockBuilderRegistryVersion fingerprints the builder registry
 	// the block_builders labels were resolved with. When the running
