@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1108,8 +1109,13 @@ func TestGetBlobPricing_Success(t *testing.T) {
 }
 
 func TestGetBlobPricing_EmptyMetrics(t *testing.T) {
+	builderReads := 0
 	db := &mockDB{
 		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return nil
+		},
+		builderSelectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			builderReads++
 			return nil
 		},
 	}
@@ -1120,6 +1126,117 @@ func TestGetBlobPricing_EmptyMetrics(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if builderReads != 0 {
+		t.Fatalf("expected no builder read for an empty window, got %d", builderReads)
+	}
+}
+
+// TestGetBlobPricing_RecentBlockBuilders verifies each recent block carries
+// its builder attribution when a block_builders row exists, and no builder
+// object at all when the backfill has not reached it. blob-flow assembles its
+// block list from this window, so without it the initial page load has no
+// builders while live WebSocket blocks do.
+func TestGetBlobPricing_RecentBlockBuilders(t *testing.T) {
+	var builderArgs []interface{}
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setSliceResult(dest, []models.BlockMetrics{
+				{
+					ChainID: 42, BlockNumber: 101, BlockTimestamp: time.Now(),
+					BlobCount: 3, BlobGasUsed: 393216, BlobGasTarget: 393216, BlobGasLimit: 786432,
+					BlobBaseFee: "1", UtilizationRatio: "1.000000",
+					BlobParamsTarget: 3, BlobParamsMax: 6, UpdateFraction: 3338477,
+				},
+				{
+					ChainID: 42, BlockNumber: 100, BlockTimestamp: time.Now().Add(-12 * time.Second),
+					BlobCount: 0, BlobGasUsed: 0, BlobGasTarget: 393216, BlobGasLimit: 786432,
+					BlobBaseFee: "1", UtilizationRatio: "0.000000",
+					BlobParamsTarget: 3, BlobParamsMax: 6, UpdateFraction: 3338477,
+				},
+			})
+			return nil
+		},
+		builderSelectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			builderArgs = args
+			if _, ok := dest.(*[]models.BlockBuilder); ok {
+				setSliceResult(dest, []models.BlockBuilder{{
+					ChainID:      42,
+					BlockNumber:  101,
+					FeeRecipient: "0x4838B106FCe9647Bdf1E7877BF73cE8B0BAD5f97",
+					ExtraData:    "0x546974616e",
+					BuilderKey:   "titan",
+					BuilderName:  "Titan",
+					TxCount:      210,
+				}})
+			}
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	w := httptest.NewRecorder()
+	a.GetBlobPricing(w, httptest.NewRequest(http.MethodGet, "/?blocks=2", http.NoBody))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Data PricingResponse `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Data.RecentBlocks) != 2 {
+		t.Fatalf("expected 2 recent blocks, got %d", len(resp.Data.RecentBlocks))
+	}
+	newest := resp.Data.RecentBlocks[0]
+	if newest.Builder == nil {
+		t.Fatalf("block %d: expected builder attribution", newest.BlockNumber)
+	}
+	if newest.Builder.Key != "titan" || newest.Builder.Name != "Titan" || newest.Builder.ExtraDataText != "Titan" {
+		t.Fatalf("block %d: unexpected builder %+v", newest.BlockNumber, newest.Builder)
+	}
+	if older := resp.Data.RecentBlocks[1]; older.Builder != nil {
+		t.Fatalf("block %d: expected no builder before the backfill reaches it, got %+v", older.BlockNumber, older.Builder)
+	}
+
+	// The builder read must cover exactly the window's block numbers.
+	if len(builderArgs) != 2 || builderArgs[0] != 42 {
+		t.Fatalf("unexpected builder query args: %v", builderArgs)
+	}
+	numbers, err := builderArgs[1].(driver.Valuer).Value()
+	if err != nil {
+		t.Fatalf("builder block numbers: %v", err)
+	}
+	if got := fmt.Sprint(numbers); got != "{101,100}" {
+		t.Fatalf("builder block numbers = %s, want {101,100}", got)
+	}
+}
+
+// TestGetBlobPricing_BuilderReadError verifies a failing builder read fails
+// the request rather than serving a window that silently lost its builders,
+// which the client would cache and display as "not yet backfilled".
+func TestGetBlobPricing_BuilderReadError(t *testing.T) {
+	db := &mockDB{
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setSliceResult(dest, []models.BlockMetrics{{
+				ChainID: 42, BlockNumber: 100, BlockTimestamp: time.Now(),
+				BlobCount: 3, BlobGasUsed: 393216, BlobGasTarget: 393216, BlobGasLimit: 786432,
+				BlobBaseFee: "1", UtilizationRatio: "1.000000",
+				BlobParamsTarget: 3, BlobParamsMax: 6, UpdateFraction: 3338477,
+			}})
+			return nil
+		},
+		builderSelectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			return fmt.Errorf("db error")
+		},
+	}
+	a := newTestAPIWithDB(db)
+	w := httptest.NewRecorder()
+	a.GetBlobPricing(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
 	}
 }
 
