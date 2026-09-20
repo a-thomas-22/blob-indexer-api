@@ -335,6 +335,38 @@ func (db *DB) DeleteBlockMetricsFromBlock(ctx context.Context, networkID int, fr
 	return err
 }
 
+// DeleteBlockBuildersFromBlock deletes block builder rows at or above the
+// given block number for a network. Builder rows are per-block facts derived
+// from the block header, so a reorg invalidates them exactly like the block
+// metrics they sit next to.
+func (db *DB) DeleteBlockBuildersFromBlock(ctx context.Context, networkID int, fromBlock int64) error {
+	query := "DELETE FROM block_builders WHERE chain_id = $1 AND block_number >= $2"
+	_, err := db.ExecContext(ctx, query, networkID, fromBlock)
+	return err
+}
+
+// DeleteBlobInclusionCandidatesFromBlock deletes the per-transaction
+// candidate detail at or above the given block number for a network. The
+// rows describe a block that no longer exists, and the replacement block
+// writes its own snapshot.
+func (db *DB) DeleteBlobInclusionCandidatesFromBlock(ctx context.Context, networkID int, fromBlock int64) error {
+	query := "DELETE FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_number >= $2"
+	_, err := db.ExecContext(ctx, query, networkID, fromBlock)
+	return err
+}
+
+// DeleteStaleBlobInclusionCandidates removes per-transaction candidate detail
+// for blocks older than the given cutoff. The aggregates the rows were
+// summarized into live on block_builders and are not touched.
+func (db *DB) DeleteStaleBlobInclusionCandidates(ctx context.Context, networkID int, cutoff time.Time) (int64, error) {
+	query := "DELETE FROM blob_inclusion_candidates WHERE chain_id = $1 AND block_timestamp < $2"
+	res, err := db.ExecContext(ctx, query, networkID, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // DeleteStalePendingBlobs removes pending blobs whose liveness watermark is
 // older than the given cutoff time. last_seen is bumped whenever the node
 // still reports the tx as pending, so this reaps txs the node stopped

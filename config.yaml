@@ -56,6 +56,21 @@ indexer:
   # refetching each block and updating in place. Resumable; pause throttles RPC use.
   priority_fee_backfill_enabled: true
   priority_fee_backfill_pause: 250ms
+  # Record what the pending blob pool held when a block arrived, but only for
+  # blocks that just arrived: an older block is indexed with no snapshot
+  # rather than one of a pool that has moved on.
+  candidate_snapshot_max_lag: 60s
+  # How long a pending blob tx must have been visible before a builder is
+  # held to have had a chance to include it.
+  candidate_min_age: 6s
+  # How long the per-transaction candidate detail is kept; the per-block
+  # aggregates on block_builders are permanent.
+  candidate_retention: 168h
+  # Startup walk that adds builder rows to blocks indexed before the table
+  # existed and fills their blob rows' tx_index, refetching each block.
+  # Resumable and non-destructive; pause throttles RPC use.
+  builder_backfill_enabled: true
+  builder_backfill_pause: 250ms
 
 attribution:
   blob_list_enabled: true

@@ -24,6 +24,7 @@ Tool guide:
 - Start with get_blob_market_overview for a one-call snapshot (current fee, pressure, mempool backlog, rolling stats, indexer freshness).
 - Use list_networks to discover networks; pass network as a name (mainnet, sepolia) or chain ID. When only one network is indexed the parameter is optional.
 - Use get_blob_pricing for the current fee and recent blocks, get_blob_market_chart for history, get_top_blob_users / get_entity for who is posting, get_blob_records for all-time extremes.
+- Use get_builders / get_builder / get_builder_share_chart for who BUILDS the blocks blobs land in and how each builder behaves. These windows are capped at 30d (range=all is rejected), and their "skipped" counts are what our own node saw pending and not included — not proof a builder passed on a transaction.
 - Check get_indexer_status (last indexed block, lag) before trusting "current" values.
 - Every successful result is JSON of the form {"data": ..., "meta": ...}; failures return an error message you can act on (for example an invalid range value).`
 
@@ -40,6 +41,9 @@ const (
 	toolGetAttributionUsageChart = "get_attribution_usage_chart"
 	toolGetCostComparisonChart   = "get_cost_comparison_chart"
 	toolGetBlobTipsChart         = "get_blob_tips_chart"
+	toolGetBuilderShareChart     = "get_builder_share_chart"
+	toolGetBuilders              = "get_builders"
+	toolGetBuilder               = "get_builder"
 	toolGetTopBlobUsers          = "get_top_blob_users"
 	toolGetEntity                = "get_entity"
 	toolGetBlobRecords           = "get_blob_records"
@@ -151,6 +155,24 @@ type entityInput struct {
 	Range string `json:"range,omitempty" jsonschema:"Aggregation window: 1h, 24h, 7d, 30d, or all (default all)."`
 }
 
+type builderRangeInput struct {
+	networkInput
+	Range string `json:"range,omitempty" jsonschema:"Time range: 1h, 24h, 7d, or 30d (default 24h). all is not supported."`
+}
+
+type builderInput struct {
+	networkInput
+	Key   string `json:"key" jsonschema:"Builder key exactly as get_builders returns it (e.g. titan, beaverbuild, extra:geth)."`
+	Range string `json:"range,omitempty" jsonschema:"Time range: 1h, 24h, 7d, or 30d (default 24h). all is not supported."`
+}
+
+type builderChartInput struct {
+	networkInput
+	Range       string `json:"range,omitempty" jsonschema:"Time range: 1h, 24h, 7d, or 30d (default 24h). all is not supported."`
+	Granularity string `json:"granularity,omitempty" jsonschema:"Bucket size: auto, block, minute, hour, or day (default auto)."`
+	Limit       int    `json:"limit,omitempty" jsonschema:"Number of top builders to keep before grouping the long tail into 'other' (default 8, max 25)."`
+}
+
 type recordsInput struct {
 	networkInput
 	Limit int `json:"limit,omitempty" jsonschema:"Entries per leaderboard (default 10, max 100)."`
@@ -225,6 +247,8 @@ func requirePathValue(label, value string) (string, error) {
 }
 
 var errEntityKeyRequired = errors.New("key is required")
+
+var errBuilderKeyRequired = errors.New("key is required")
 
 // toolSpecs is the full tool catalog. Order is the order clients see.
 var toolSpecs = []toolSpec{
@@ -316,6 +340,42 @@ var toolSpecs = []toolSpec{
 		description: "Time series of execution-layer priority fees (tips) paid by blob transactions, grouped by attributed entity. range=all is not supported.",
 		register: registerTool(func(in seriesChartInput) (string, url.Values, error) {
 			return "/charts/blob-tips", seriesChartQuery(in), nil
+		}),
+	},
+	{
+		name:        toolGetBuilderShareChart,
+		title:       "Builder share chart",
+		description: "Time series of blocks and blobs per block builder, with the long tail grouped into 'other', plus each builder's share of the range. Answers who has been building the blocks blobs land in. range=all is not supported.",
+		register: registerTool(func(in builderChartInput) (string, url.Values, error) {
+			q := newQuery(in.Network)
+			setString(q, "range", in.Range)
+			setString(q, "granularity", in.Granularity)
+			setInt(q, "limit", in.Limit)
+			return "/charts/builder-share", q, nil
+		}),
+	},
+	{
+		name:        toolGetBuilders,
+		title:       "Block builders",
+		description: "Leaderboard of the builders that produced blocks over a window: block and blob volume and share, how often they filled a block, MEV-Boost proposer payments, the spread of priority fees the blob transactions they included paid, how long those transactions waited, and how many eligible pending blob transactions they left out. range=all is not supported.",
+		register: registerTool(func(in builderRangeInput) (string, url.Values, error) {
+			q := newQuery(in.Network)
+			setString(q, "range", in.Range)
+			return "/builders", q, nil
+		}),
+	},
+	{
+		name:        toolGetBuilder,
+		title:       "Builder detail",
+		description: "Detail for one block builder: its aggregates over the window plus which senders it included (with an inclusion index comparing the sender's share on this builder against its share of the whole market), which eligible pending transactions it left out, and its most recent blocks. The per-sender skipped list is rebuilt from candidate rows that are pruned after about a week, while builder.candidates sums permanent aggregates, so on a longer range the two do not add up: skipped_detail_from says when the breakdown starts covering the window.",
+		register: registerTool(func(in builderInput) (string, url.Values, error) {
+			key, err := requirePathValue("key", in.Key)
+			if err != nil {
+				return "", nil, errBuilderKeyRequired
+			}
+			q := newQuery(in.Network)
+			setString(q, "range", in.Range)
+			return "/builders/" + key, q, nil
 		}),
 	},
 	{

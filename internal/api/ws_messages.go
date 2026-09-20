@@ -71,6 +71,12 @@ type NewBlockData struct {
 	Timestamp   time.Time             `json:"timestamp"`
 	Blobs       []BlobResponse        `json:"blobs"`
 	Pricing     *BlockPricingResponse `json:"pricing,omitempty"`
+	// Builder identifies who built the block, from the header's fee
+	// recipient and extra data. Omitted for blocks with no builder row —
+	// blocks indexed before builder attribution existed, until the
+	// indexer's backfill reaches them. The row is written in the same
+	// transaction as the block's metrics, so it is never half-present.
+	Builder *BlockBuilderResponse `json:"builder,omitempty"`
 }
 
 // BlockSnapshotData is the payload for EventBlockSnapshot. Blocks are ordered

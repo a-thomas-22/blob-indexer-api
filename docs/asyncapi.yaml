@@ -182,6 +182,92 @@ components:
           allOf:
             - $ref: '#/components/schemas/BlockPricingResponse'
           description: Recent-block pricing and capacity fields matching `/api/v1/blob/pricing` recent block entries when block metrics are available.
+        builder:
+          allOf:
+            - $ref: '#/components/schemas/BlockBuilderResponse'
+          description: >-
+            Who built the block, from the header's fee recipient and extra
+            data. Omitted for blocks with no builder row — blocks indexed
+            before builder attribution existed, until the indexer's backfill
+            reaches them. The row is written in the same transaction as the
+            block's metrics, so it is never half-present, and a failed
+            builder read defers the whole event rather than publishing it
+            without this field: an omitted `builder` always means "no row",
+            never "the lookup failed". `GET /api/v1/block/{number}` carries
+            the same object, plus a REST-only `candidates` list that this
+            event does not.
+    BlockBuilderResponse:
+      type: object
+      description: >-
+        Identity of a block's builder plus, when the indexer saw the block
+        arrive live, a summary of its own pending blob pool at that moment.
+        `key`/`name` are what the indexer's builder registry resolved from the
+        raw header fields; `fee_recipient` and `extra_data` stay
+        authoritative, so a later registry release can relabel a block without
+        the raw evidence changing.
+      required:
+        - key
+        - name
+        - known
+        - fee_recipient
+        - extra_data
+        - tx_count
+        - candidate_snapshot
+      properties:
+        key:
+          type: string
+          description: Grouping key shared with `/api/v1/builders` and `/api/v1/charts/builder-share`.
+          example: beaverbuild
+        name:
+          type: string
+          example: beaverbuild
+        known:
+          type: boolean
+          description: True only when the registry recognized the builder; false means the key was derived from the extra data (`extra:` prefix) or the fee recipient (`addr:` prefix).
+        fee_recipient:
+          type: string
+          description: The header's coinbase. Under MEV-Boost this is usually the builder's own address; for a locally built block it is the proposer's fee recipient, so it is ambiguous on its own.
+        extra_data:
+          type: string
+          description: The header's extraData as 0x-hex.
+          example: '0x6265617665726275696c642e6f7267'
+        extra_data_text:
+          type: string
+          description: extra_data decoded as text, present only when every byte is printable ASCII.
+          example: beaverbuild.org
+        tx_count:
+          type: integer
+          description: Transactions in the block, blob-carrying or not.
+        proposer_payment_wei:
+          allOf:
+            - $ref: '#/components/schemas/WeiString'
+          description: >-
+            Value of the block's last transaction when the fee recipient sent
+            it — the conventional MEV-Boost proposer payment. Omitted
+            otherwise, which is a heuristic; some builders pay the proposer by
+            setting coinbase to the proposer's fee recipient instead.
+        proposer_payment_eth:
+          $ref: '#/components/schemas/DecimalString'
+        proposer_payment_to:
+          type: string
+        candidate_snapshot:
+          type: boolean
+          description: Whether the indexer classified its pending blob pool against this block. False for blocks indexed from history — the pool is meaningless for a block that arrived long ago — and the four aggregates below are then omitted.
+        pending_candidate_txs:
+          type: integer
+        eligible_skipped_txs:
+          type: integer
+          description: >-
+            Pending blob transactions our node had seen that nothing
+            disqualified and the block did not include. Our node's mempool is
+            not the builder's, so read this as "visible to our node and not
+            included", not as proof the builder passed on them.
+        eligible_skipped_blobs:
+          type: integer
+        eligible_skipped_max_tip:
+          $ref: '#/components/schemas/WeiString'
+        eligible_skipped_max_tip_gwei:
+          $ref: '#/components/schemas/DecimalString'
     BlockPricingResponse:
       type: object
       properties:
@@ -461,6 +547,26 @@ components:
           format: int64
           description: The beacon slot of the including block — the key beacon-side blob reads (e.g. BlobArchive's /eth/v1/beacon/blobs/{slot}) are indexed by. Omitted for pending (mempool) blobs, which have no slot until inclusion, and for networks whose beacon genesis time is not configured.
           example: 11813607
+        tx_index:
+          type: integer
+          description: The carrying transaction's position in its block. Omitted for pending (mempool) blobs, which have no position until inclusion, and for confirmed rows indexed before it was stored that no backfill or reindex has revisited.
+          example: 12
+        first_seen_at:
+          allOf:
+            - $ref: '#/components/schemas/ISODateTime'
+          description: When the indexer first saw the transaction pending. For pending blobs it is the row's own first-seen time; for confirmed ones it is that time carried over when the block promoted the row. Omitted when the transaction was never observed pending (indexed from history, or it arrived with its block) and for rows indexed before it was stored.
+        time_to_inclusion_ms:
+          type: integer
+          format: int64
+          description: >-
+            How long the transaction waited: the including block's timestamp
+            minus first_seen_at. Omitted for pending blobs and whenever
+            first_seen_at is. CAN BE NEGATIVE — a block's timestamp is its
+            slot start, so a transaction our node first saw after that instant
+            but which still made the block yields a negative wait. That is
+            real information (the builder had it before we did), so it is
+            reported rather than clamped.
+          example: 4200
     StatsResponse:
       type: object
       description: Network identity comes from the connection query. `network_id` and `network_name` may be omitted in WebSocket stats updates.

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/a-thomas-22/blob-indexer-api/internal/config"
+	"github.com/a-thomas-22/blob-indexer-api/internal/db/models"
 	_ "github.com/a-thomas-22/blob-indexer-api/internal/testutil"
 )
 
@@ -17,6 +18,26 @@ type mockDB struct {
 	selectFn func(ctx context.Context, dest interface{}, query string, args ...interface{}) error
 	getFn    func(ctx context.Context, dest interface{}, query string, args ...interface{}) error
 	execFn   func(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	// builderGetFn and builderSelectFn serve the block_builders and
+	// blob_inclusion_candidates reads that /block/{number}, the WebSocket
+	// new_block broadcast, and the reconnect snapshot issue alongside their
+	// metrics and blob reads. They are routed by destination type and
+	// default to "this block has no builder row and no candidate detail",
+	// so tests aimed at the older reads need not know about builder
+	// attribution.
+	builderGetFn    func(ctx context.Context, dest interface{}, query string, args ...interface{}) error
+	builderSelectFn func(ctx context.Context, dest interface{}, query string, args ...interface{}) error
+}
+
+// isBuilderDest reports whether a Select destination belongs to the builder
+// attribution reads.
+func isBuilderDest(dest interface{}) bool {
+	switch dest.(type) {
+	case *[]models.BlockBuilder, *[]models.BlobInclusionCandidate:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *mockDB) SelectContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
@@ -27,6 +48,12 @@ func (m *mockDB) SelectContext(ctx context.Context, dest interface{}, query stri
 	if _, ok := dest.(*[]blobScheduleQueryRow); ok {
 		return nil
 	}
+	if isBuilderDest(dest) {
+		if m.builderSelectFn != nil {
+			return m.builderSelectFn(ctx, dest, query, args...)
+		}
+		return nil
+	}
 	if m.selectFn != nil {
 		return m.selectFn(ctx, dest, query, args...)
 	}
@@ -34,6 +61,12 @@ func (m *mockDB) SelectContext(ctx context.Context, dest interface{}, query stri
 }
 
 func (m *mockDB) GetContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+	if _, ok := dest.(*models.BlockBuilder); ok {
+		if m.builderGetFn != nil {
+			return m.builderGetFn(ctx, dest, query, args...)
+		}
+		return sql.ErrNoRows
+	}
 	if m.getFn != nil {
 		return m.getFn(ctx, dest, query, args...)
 	}

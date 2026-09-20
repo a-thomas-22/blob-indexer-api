@@ -328,6 +328,76 @@ func TestGetBlockByNumber_BlockVanishesOnRetry(t *testing.T) {
 	}
 }
 
+// A rewrite that keeps the blob count identical is invisible to the count
+// check, so the metrics row itself is re-read after the builder and
+// candidate reads: a changed row means the payload was assembled across two
+// generations of this height.
+func TestGetBlockByNumber_RewriteWithEqualBlobCountIsTorn(t *testing.T) {
+	getCalls := 0
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			getCalls++
+			metric := testBlockMetrics(100, 1)
+			if getCalls == 2 {
+				// The re-check lands on the replacement block: same number
+				// of blobs, different content.
+				metric.BlobBaseFee = "2000000"
+			}
+			setStructResult(dest, metric)
+			return nil
+		},
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setSliceResult(dest, []models.Blob{blockTestBlob(100, 0)})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	w := httptest.NewRecorder()
+	a.GetBlockByNumber(w, newBlockRequest("100"))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// Read, re-check (torn), then the retry's read and its re-check, which
+	// agree — so the settled payload is cacheable.
+	if getCalls != 4 {
+		t.Errorf("expected the rewrite to force one retry, got %d metrics reads", getCalls)
+	}
+	if got := w.Header().Get("Cache-Control"); got == "" {
+		t.Error("expected the settled retry to be cacheable")
+	}
+}
+
+// If the consistency re-check cannot run, the payload is served without
+// cache headers rather than pinned at the edge.
+func TestGetBlockByNumber_RecheckErrorServedUncached(t *testing.T) {
+	getCalls := 0
+	db := &mockDB{
+		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			getCalls++
+			if getCalls%2 == 0 {
+				return fmt.Errorf("db error")
+			}
+			setStructResult(dest, testBlockMetrics(100, 1))
+			return nil
+		},
+		selectFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+			setSliceResult(dest, []models.Blob{blockTestBlob(100, 0)})
+			return nil
+		},
+	}
+	a := newTestAPIWithDB(db)
+	w := httptest.NewRecorder()
+	a.GetBlockByNumber(w, newBlockRequest("100"))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "" {
+		t.Errorf("expected no Cache-Control when the re-check failed, got %q", got)
+	}
+}
+
 func TestGetBlockByNumber_MetricsDBError(t *testing.T) {
 	db := &mockDB{
 		getFn: func(ctx context.Context, dest interface{}, query string, args ...interface{}) error {

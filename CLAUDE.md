@@ -27,7 +27,7 @@ Two separate binaries:
 - **API server** (`cmd/api/main.go`): HTTP server serving REST endpoints. Reads blob data and indexer status from PostgreSQL.
 - **Indexer** (`cmd/indexer/main.go`): Connects to Ethereum RPC nodes, indexes blob transactions, writes to PostgreSQL.
 
-The indexer runs resumable startup jobs over already-indexed history alongside live indexing: the fine chart rollup backfill, the `/records` streak rebuild, and the priority fee backfill (`internal/indexer/priority_fees.go`), which refetches blocks whose blob rows predate migration 000015 and fills `priority_fee_per_gas` and its caps in place without deleting anything. Progress checkpoints live in `indexer_metadata`. Gate and throttle the fee backfill with `indexer.priority_fee_backfill_enabled` and `indexer.priority_fee_backfill_pause`.
+The indexer runs resumable startup jobs over already-indexed history alongside live indexing: the fine chart rollup backfill, the `/records` streak rebuild, the priority fee backfill (`internal/indexer/priority_fees.go`), which refetches blocks whose blob rows predate migration 000015 and fills `priority_fee_per_gas` and its caps in place without deleting anything, and the block builder backfill (`internal/indexer/builder_backfill.go`), which refetches blocks with no `block_builders` row (history predating migration 000017), inserts the row with `candidate_snapshot=false` and NULL aggregates via `ON CONFLICT DO NOTHING` so a live write always wins, and fills those blocks' `blobs.tx_index` in the same transaction. It runs after the builder relabel pass and never touches `blob_inclusion_candidates` or `first_seen_at`. Progress checkpoints live in `indexer_metadata`. Gate and throttle the fee backfill with `indexer.priority_fee_backfill_enabled` / `indexer.priority_fee_backfill_pause`, and the builder backfill with `indexer.builder_backfill_enabled` / `indexer.builder_backfill_pause`.
 
 Both share the same database. Production deployments run migrations with the dedicated migration runner: Helm uses a pre-install/pre-upgrade hook for external databases and init containers when the chart owns PostgreSQL. Runtime binaries only run migrations when `database.run_migrations: true` is explicitly configured, which is intended for local development.
 
@@ -41,6 +41,7 @@ Both share the same database. Production deployments run migrations with the ded
 | indexer | `internal/indexer/` | Core block/blob indexing engine (one per network) |
 | ethereum | `internal/ethereum/` | go-ethereum client wrapper (HTTP + WebSocket) |
 | attribution | `internal/attribution/` | Maps sender addresses to known rollup names |
+| builders | `internal/builders/` | Resolves a block's builder key/name from header extra data and fee recipient (registry + deterministic fallbacks; keys are API-pinned, changes trigger the relabel pass) |
 | mcpserver | `internal/mcpserver/` | Permissioned MCP server (API-key auth, per-key tool allowlists and rate limits) whose tools loop back into the public REST routes in-process |
 | logger | `internal/logger/` | Zap-based structured JSON logging |
 
@@ -49,7 +50,7 @@ Both share the same database. Production deployments run migrations with the ded
 - PostgreSQL with golang-migrate (migrations in `internal/db/migrations/`)
 - Migrations run via `cmd/migrate`, `make db-migrate`, Helm-managed migration containers, or local `database.run_migrations: true`
 - Migration authoring rules (fast DDL-only files, no explicit transaction control, idempotent, heavy backfills chunked outside schema migrations): see `internal/db/migrations/README.md`. A dirty schema left by a killed migration run is auto-recovered by `db.RunMigrations` when verifiably safe.
-- Key tables: `blobs` (confirmed only), `mempool_blobs` (pending; UNLOGGED, reconstructible from the node's mempool), `blob_replacements` (fee-bump eviction log; LOGGED, pruned after ~a week), `blob_block_streaks` (maximal runs of full/above-target blocks powering `/records`; trigger-maintained, rebuildable from `block_metrics`), `networks`, `blob_users`, `indexer_metadata`, `indexed_blocks`, `block_metrics`
+- Key tables: `blobs` (confirmed only), `mempool_blobs` (pending; UNLOGGED, reconstructible from the node's mempool), `blob_replacements` (fee-bump eviction log; LOGGED, pruned after ~a week), `blob_block_streaks` (maximal runs of full/above-target blocks powering `/records`; trigger-maintained, rebuildable from `block_metrics`), `block_builders` (per-block builder identity + proposer-payment heuristic + permanent pending-pool snapshot aggregates; live blocks only get snapshots), `blob_inclusion_candidates` (per-tx detail of pending blob txs a live block did not include, with an eligibility reason; LOGGED, pruned after `indexer.candidate_retention`), `networks`, `blob_users`, `indexer_metadata`, `indexed_blocks`, `block_metrics`
 - Connection pooling: 25 max open, 10 idle
 
 ### API Routes
@@ -59,16 +60,17 @@ Canonical routes are under `/api/v1`. Legacy `/api/*` paths redirect to `/api/v1
 - `/api/v1/ws` — WebSocket updates
 - `/api/v1/networks`, `/api/v1/networks/{chainId}` — network listing and status
 - `/api/v1/blob/latest`, `/api/v1/blob/mempool`, `/api/v1/blob/pricing`, `/api/v1/blob/replacements`, `/api/v1/blob/by-hash/{versionedHash}`, `/api/v1/blob/{txHash}` — blob queries
-- `/api/v1/block/{number}` — single indexed block with its blobs (matches the WebSocket `new_block` payload)
+- `/api/v1/block/{number}` — single indexed block with its blobs, pricing and `builder` (shared fields match the WebSocket `new_block` payload), plus a REST-only `candidates` list from `blob_inclusion_candidates`
 - `/api/v1/users` — top blob users
 - `/api/v1/entities/{key}` — attributed entity detail (aggregates + per-address breakdown; key shared with `/charts/attribution-usage` shares). `/blob/latest` and `/blob/mempool` accept `entity={key}` to filter across the entity's addresses
+- `/api/v1/builders`, `/api/v1/builders/{key}` — block-builder leaderboard and detail over a bounded window (`range` in `1h|24h|7d|30d`, default `24h`; `all` rejected). Reads `block_builders` joined to `block_metrics` and `blobs`; the detail adds per-entity `users` (with `inclusion_index`), `skipped` (eligible `blob_inclusion_candidates`, grouped by the same address-first rule as `/users?group=entity`) with `skipped_detail_from` marking where the pruned detail starts inside the window, and `recent_blocks`, and 404s when the key has no blocks in range. `block_metrics` has no timestamp index, so every builder query bounds its join by the window's min/max `block_number`; the EXPLAIN integration test enforces it
 - `/api/v1/records` — historical leaderboards (streaks, base fee peaks, busiest hours)
-- `/api/v1/charts/blob-market`, `/api/v1/charts/attribution-usage`, `/api/v1/charts/cost-comparison`, `/api/v1/charts/blob-tips`, `/api/v1/charts/rolling-stats` — bucketed chart series. `blob-tips` reads `blobs.priority_fee_per_gas` directly (no rollup carries it), so it rejects `range=all`
+- `/api/v1/charts/blob-market`, `/api/v1/charts/attribution-usage`, `/api/v1/charts/cost-comparison`, `/api/v1/charts/blob-tips`, `/api/v1/charts/builder-share`, `/api/v1/charts/rolling-stats` — bucketed chart series. `blob-tips` reads `blobs.priority_fee_per_gas` directly and `builder-share` reads `block_builders` (no rollup carries either), so both reject `range=all`
 - `/api/v1/stats` — historical stats
 - `/api/v1/status` — indexer status
 - `/api/v1/dev/*` — development/debug endpoints (metrics, dashboard, logs, queries), gated by `server.dev_mode` and optional `server.dev_api_key`
 - `/swagger/*` — Swagger UI
-- `/mcp` (outside `/api/v1`; path from `mcp.path`) — streamable-HTTP MCP endpoint for LLM clients, mounted only when `mcp.enabled`. Fails closed: Bearer/X-API-Key must match a configured `mcp.keys` entry; each key may carry a tool allowlist. Tools dispatch to the REST handlers through `API.loopbackHandler()` (no edge middleware; the loopback clears the inherited chi route context), so they return the exact REST payloads. Tool catalogue lives in `internal/mcpserver/tools.go`; `cmd/api` validates allowlists against it at startup
+- `/mcp` (outside `/api/v1`; path from `mcp.path`) — streamable-HTTP MCP endpoint for LLM clients, mounted only when `mcp.enabled`. Fails closed: Bearer/X-API-Key must match a configured `mcp.keys` entry; each key may carry a tool allowlist. Tools dispatch to the REST handlers through `API.loopbackHandler()` (no edge middleware; the loopback clears the inherited chi route context), so they return the exact REST payloads. Tool catalogue (including `get_builders`, `get_builder`, `get_builder_share_chart`) lives in `internal/mcpserver/tools.go`; `cmd/api` validates allowlists against it at startup
 
 ### Configuration
 

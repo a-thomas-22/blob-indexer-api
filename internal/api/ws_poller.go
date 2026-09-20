@@ -390,10 +390,36 @@ func (p *Poller) broadcastBlock(ctx context.Context, network config.NetworkConfi
 		return false
 	}
 
+	// The builder row commits with the block's metrics, so a missing one
+	// means the backfill has not reached this height rather than a torn
+	// read — which is exactly why a failed read must not be broadcast as an
+	// absent builder: clients cannot tell the two apart, and the event is
+	// never repeated. Retry once, and if that fails too, fall through to the
+	// same handling as a metrics or blob failure: unmark the height so the
+	// trailing scan re-broadcasts it with its builder.
+	var builders []models.BlockBuilder
+	builderErr := p.db.SelectContext(queryCtx, &builders, queryBlockBuildersByBlockNumbers, network.ChainID, pq.Array([]int64{int64(blockNumber)}))
+	if builderErr != nil {
+		builders = nil
+		builderErr = p.db.SelectContext(queryCtx, &builders, queryBlockBuildersByBlockNumbers, network.ChainID, pq.Array([]int64{int64(blockNumber)}))
+	}
+	if builderErr != nil {
+		logger.Error("Poller: failed to query block builder for broadcast",
+			zap.String("network", network.Name),
+			zap.Uint64("block", blockNumber),
+			zap.Error(builderErr))
+		delete(st.seen, blockNumber)
+		return false
+	}
+
 	pricing := toBlockPricingResponse(metric)
 	brs := make([]BlobResponse, 0, len(blobs))
 	for _, blob := range blobs {
 		brs = append(brs, toBlobResponse(blob, network))
+	}
+	var builder *BlockBuilderResponse
+	if response, ok := blockBuildersByNumber(builders)[metric.BlockNumber]; ok {
+		builder = &response
 	}
 
 	p.hub.BroadcastEvent(network.Name, WSEvent{
@@ -404,6 +430,7 @@ func (p *Poller) broadcastBlock(ctx context.Context, network config.NetworkConfi
 			Timestamp:   metric.BlockTimestamp,
 			Blobs:       brs,
 			Pricing:     &pricing,
+			Builder:     builder,
 		},
 	})
 

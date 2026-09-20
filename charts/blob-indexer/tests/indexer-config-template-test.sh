@@ -73,7 +73,12 @@ assert "$defaults" '{
   "startup_gap_scan_blocks": 10000,
   "rpc_rate_limit": 0,
   "priority_fee_backfill_enabled": true,
-  "priority_fee_backfill_pause": "250ms"
+  "priority_fee_backfill_pause": "250ms",
+  "candidate_snapshot_max_lag": "60s",
+  "candidate_min_age": "6s",
+  "candidate_retention": "168h",
+  "builder_backfill_enabled": true,
+  "builder_backfill_pause": "250ms"
 }'
 
 # 2. Operator overrides: every key set under appConfig.indexer must land in the
@@ -95,6 +100,11 @@ helm template "$RELEASE" "$CHART_DIR" \
   --set appConfig.indexer.rpc_rate_limit=12.5 \
   --set appConfig.indexer.priority_fee_backfill_enabled=false \
   --set-string appConfig.indexer.priority_fee_backfill_pause=2s \
+  --set-string appConfig.indexer.candidate_snapshot_max_lag=30s \
+  --set-string appConfig.indexer.candidate_min_age=3s \
+  --set-string appConfig.indexer.candidate_retention=24h \
+  --set appConfig.indexer.builder_backfill_enabled=false \
+  --set-string appConfig.indexer.builder_backfill_pause=1s \
   > "$overrides"
 assert "$overrides" '{
   "version": "v9.9.9",
@@ -110,7 +120,12 @@ assert "$overrides" '{
   "startup_gap_scan_blocks": 0,
   "rpc_rate_limit": 12.5,
   "priority_fee_backfill_enabled": false,
-  "priority_fee_backfill_pause": "2s"
+  "priority_fee_backfill_pause": "2s",
+  "candidate_snapshot_max_lag": "30s",
+  "candidate_min_age": "3s",
+  "candidate_retention": "24h",
+  "builder_backfill_enabled": false,
+  "builder_backfill_pause": "1s"
 }'
 
 echo "Indexer ConfigMap template tests passed."
