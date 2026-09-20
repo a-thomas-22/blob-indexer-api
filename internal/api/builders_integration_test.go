@@ -734,7 +734,7 @@ const (
 	planBlocksPerDay   = 120
 	planTotalBlocks    = planDays * planBlocksPerDay
 	planSecondsPerStep = 86400 / planBlocksPerDay
-	planBlobsPerBlock  = 39
+	planBlobsPerBlock  = 40
 )
 
 // seedBuilderPlanFixture lays 60 days of blocks, builders, blobs and
@@ -775,7 +775,7 @@ func seedBuilderPlanFixture(t *testing.T, sqlxDB *sqlx.DB, now time.Time) {
 			1000000000, 60000000000, 1000000000,
 			$1::timestamp + (g * $2 * INTERVAL '1 second') - INTERVAL '3 seconds', i
 		FROM generate_series(1, $3) AS g
-		CROSS JOIN generate_series(0, $4) AS i
+		CROSS JOIN generate_series(0, $4 - 1) AS i
 		-- Scramble the physical order so ANALYZE records a near-zero
 		-- correlation between blobs.timestamp and the heap, which is what
 		-- production looks like after in-place backfills have rewritten
