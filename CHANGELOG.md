@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.19.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.18.0...blob-indexer-api-v0.19.0) (2026-09-20)
+
+
+### Features
+
+* block builder attribution, inclusion timing and builder stats API ([#338](https://github.com/a-thomas-22/blob-indexer-api/issues/338)) ([b4f7cb4](https://github.com/a-thomas-22/blob-indexer-api/commit/b4f7cb4ad01f9f8e83fd1a7a7564d305d07e8ea9))
+
+
+### Dependencies
+
+* bump github.com/golang-migrate/migrate/v4 from 4.19.1 to 4.20.1 ([#337](https://github.com/a-thomas-22/blob-indexer-api/issues/337)) ([dd8e0b4](https://github.com/a-thomas-22/blob-indexer-api/commit/dd8e0b4be306648f3a5a09cc65de1f80608d8d32))
+* bump github.com/modelcontextprotocol/go-sdk from 1.7.0 to 1.8.0 ([#334](https://github.com/a-thomas-22/blob-indexer-api/issues/334)) ([590ebb4](https://github.com/a-thomas-22/blob-indexer-api/commit/590ebb483f271781866538471eacf70eccc10bd9))
+* bump golang.org/x/sync from 0.22.0 to 0.23.0 ([#336](https://github.com/a-thomas-22/blob-indexer-api/issues/336)) ([df799c4](https://github.com/a-thomas-22/blob-indexer-api/commit/df799c48d58684e0b9578922440d89188c4fb859))
+* bump golang.org/x/time from 0.15.0 to 0.16.0 ([#335](https://github.com/a-thomas-22/blob-indexer-api/issues/335)) ([4de827d](https://github.com/a-thomas-22/blob-indexer-api/commit/4de827da96d4aa3a93734efafa08339e357de079))
+* bump helm/kind-action from 1.14.0 to 1.15.0 ([#333](https://github.com/a-thomas-22/blob-indexer-api/issues/333)) ([148daee](https://github.com/a-thomas-22/blob-indexer-api/commit/148daee000f9b4b0d2c164c7bf0bd392fad0d46d))
+
 ## [0.18.0](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.17.0...blob-indexer-api-v0.18.0) (2026-09-07)
 
 
