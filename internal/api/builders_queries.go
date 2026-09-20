@@ -74,6 +74,13 @@ const builderMetricsWindowSQL = `
 // across a transaction's blob rows, so MIN() is just a group-by-compatible
 // pick rather than an aggregate with meaning.
 //
+// Every column it and builderEntityKeyedTxsSQL read is in the INCLUDE list
+// of idx_blobs_chain_timestamp_builder_cover (migration 000019), so the
+// window is an index-only scan. Reading a column outside that list turns it
+// back into a heap fetch per blob row — tens of thousands of scattered
+// pages for a 7d window, which is what timed these endpoints out before the
+// index existed; the EXPLAIN integration test pins the index-only path.
+//
 // The caller passes its own placeholders for the chain id and the window so
 // the bounds land in the predicate as literals the planner can use.
 func builderTxSourceSQL(chain, rangeStart, rangeEnd string) string {

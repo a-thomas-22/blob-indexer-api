@@ -803,8 +803,11 @@ func seedBuilderPlanFixture(t *testing.T, sqlxDB *sqlx.DB, now time.Time) {
 	`, oldest, planSecondsPerStep, planTotalBlocks); err != nil {
 		t.Fatalf("seed blob_inclusion_candidates: %v", err)
 	}
-	if _, err := sqlxDB.Exec("ANALYZE"); err != nil {
-		t.Fatalf("analyze: %v", err)
+	// VACUUM sets the visibility map, which an index-only scan needs to
+	// skip the heap; production's autovacuum keeps it current for the
+	// recent pages the builder windows read.
+	if _, err := sqlxDB.Exec("VACUUM ANALYZE"); err != nil {
+		t.Fatalf("vacuum analyze: %v", err)
 	}
 }
 
@@ -886,14 +889,31 @@ func TestBuilderQueryPlansStayOnRangeIndexes(t *testing.T) {
 		assertNoBoundsCTE(name, plan)
 	}
 
+	// The per-transaction CTEs read six columns of every blob row in the
+	// window. Only idx_blobs_chain_timestamp_builder_cover (migration
+	// 000019) carries all of them, so the read must be an index-only scan
+	// of that index: through any other index the planner fetches the heap
+	// page of every row, ~40k scattered pages for a 7d mainnet window,
+	// which is what timed the builder endpoints out in production.
+	assertBlobsIndexOnly := func(name, plan string) {
+		t.Helper()
+		const want = "Index Only Scan using idx_blobs_chain_timestamp_builder_cover on blobs"
+		if !strings.Contains(plan, want) {
+			t.Errorf("%s: plan does not read blobs through the builder cover index (%q):\n%s", name, want, plan)
+		}
+	}
+
 	plan := explain("builders 24h", queryBuilderAggregates, 1, start, end, "")
 	assertPlan("builders 24h", plan, "blobs", "block_builders", "block_metrics")
+	assertBlobsIndexOnly("builders 24h", plan)
 
 	plan = explain("builder detail 24h", queryBuilderAggregates, 1, start, end, "builder-1")
 	assertPlan("builder detail 24h", plan, "blobs", "block_builders", "block_metrics")
+	assertBlobsIndexOnly("builder detail 24h", plan)
 
 	plan = explain("builder users 24h", queryBuilderUsers, 1, start, end, "builder-1")
 	assertPlan("builder users 24h", plan, "blobs", "block_builders")
+	assertBlobsIndexOnly("builder users 24h", plan)
 
 	plan = explain("builder skipped 24h", queryBuilderSkipped, 1, start, end, "builder-1")
 	assertPlan("builder skipped 24h", plan, "block_builders", "blob_inclusion_candidates")
