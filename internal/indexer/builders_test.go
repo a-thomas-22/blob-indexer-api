@@ -3,6 +3,7 @@ package indexer
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math/big"
 	"regexp"
 	"strings"
@@ -1087,6 +1088,7 @@ func TestPruneStaleCandidates(t *testing.T) {
 
 func TestRunBuilderRelabel(t *testing.T) {
 	metadataQuery := regexp.QuoteMeta("SELECT value FROM indexer_metadata")
+	distinctQuery := regexp.QuoteMeta("SELECT DISTINCT fee_recipient, extra_data, builder_key, builder_name")
 
 	t.Run("relabels rows when the registry changed", func(t *testing.T) {
 		idx := newTestIndexer()
@@ -1095,15 +1097,90 @@ func TestRunBuilderRelabel(t *testing.T) {
 
 		mock.ExpectQuery(metadataQuery).
 			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("stale-version"))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT fee_recipient, extra_data FROM block_builders")).
+		beaver := "0x" + common.Bytes2Hex([]byte("beaverbuild.org"))
+		titan := "0x" + common.Bytes2Hex([]byte("Titan (titanbuilder.xyz)"))
+		mock.ExpectQuery(distinctQuery).
 			WithArgs(idx.network.ChainID).
-			WillReturnRows(sqlmock.NewRows([]string{"fee_recipient", "extra_data"}).
-				AddRow("0xabc", "0x"+common.Bytes2Hex([]byte("beaverbuild.org"))))
-		mock.ExpectExec(regexp.QuoteMeta("UPDATE block_builders")).
-			WithArgs(idx.network.ChainID, "0xabc", "0x"+common.Bytes2Hex([]byte("beaverbuild.org")), "beaverbuild", "beaverbuild").
+			WillReturnRows(sqlmock.NewRows([]string{"fee_recipient", "extra_data", "builder_key", "builder_name"}).
+				// Labeled by an older registry: queued once, though its rows
+				// carry two different stale labels.
+				AddRow("0xabc", beaver, "extra:beaverbuild-org", "beaverbuild.org").
+				AddRow("0xabc", beaver, "fee:0xabc", "0xabc").
+				// Already correct: not queued.
+				AddRow("0xdef", titan, "titan", "Titan"))
+		// One UPDATE carries every changed pair; the correct one is absent.
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE block_builders AS bb")).
+			WithArgs(idx.network.ChainID, "0xabc", beaver, "beaverbuild", "beaverbuild").
 			WillReturnResult(sqlmock.NewResult(0, 4))
 		mock.ExpectExec("INSERT INTO indexer_metadata").
 			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		idx.runBuilderRelabel()
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("expectations not met: %v", err)
+		}
+	})
+
+	t.Run("nothing changed writes nothing", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectQuery(metadataQuery).
+			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("stale-version"))
+		mock.ExpectQuery(distinctQuery).
+			WithArgs(idx.network.ChainID).
+			WillReturnRows(sqlmock.NewRows([]string{"fee_recipient", "extra_data", "builder_key", "builder_name"}).
+				AddRow("0xdef", "0x"+common.Bytes2Hex([]byte("Titan (titanbuilder.xyz)")), "titan", "Titan"))
+		mock.ExpectExec("INSERT INTO indexer_metadata").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		idx.runBuilderRelabel()
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("expectations not met: %v", err)
+		}
+	})
+
+	t.Run("changed pairs are batched", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		rows := sqlmock.NewRows([]string{"fee_recipient", "extra_data", "builder_key", "builder_name"})
+		for n := 0; n < relabelBatchPairs+1; n++ {
+			// Unknown extra data resolves by fee recipient, so a stale key
+			// on every distinct recipient is a change for each.
+			rows.AddRow(fmt.Sprintf("0x%040x", n), "0x", "stale", "stale")
+		}
+		mock.ExpectQuery(metadataQuery).
+			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("stale-version"))
+		mock.ExpectQuery(distinctQuery).WithArgs(idx.network.ChainID).WillReturnRows(rows)
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE block_builders AS bb")).
+			WillReturnResult(sqlmock.NewResult(0, int64(relabelBatchPairs)))
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE block_builders AS bb")).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec("INSERT INTO indexer_metadata").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		idx.runBuilderRelabel()
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("expectations not met: %v", err)
+		}
+	})
+
+	t.Run("a failed UPDATE stops the pass", func(t *testing.T) {
+		idx := newTestIndexer()
+		idxDB, mock := newMockIndexerDB(t)
+		idx.db = idxDB
+
+		mock.ExpectQuery(metadataQuery).
+			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("stale-version"))
+		mock.ExpectQuery(distinctQuery).
+			WithArgs(idx.network.ChainID).
+			WillReturnRows(sqlmock.NewRows([]string{"fee_recipient", "extra_data", "builder_key", "builder_name"}).
+				AddRow("0xabc", "0x", "stale", "stale"))
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE block_builders AS bb")).
+			WillReturnError(errors.New("update failed"))
 
 		idx.runBuilderRelabel()
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -1145,7 +1222,7 @@ func TestRunBuilderRelabel(t *testing.T) {
 
 		mock.ExpectQuery(metadataQuery).
 			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("stale-version"))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT fee_recipient, extra_data FROM block_builders")).
+		mock.ExpectQuery(distinctQuery).
 			WillReturnError(errors.New("scan failed"))
 
 		idx.runBuilderRelabel()
@@ -1161,8 +1238,8 @@ func TestRunBuilderRelabel(t *testing.T) {
 
 		mock.ExpectQuery(metadataQuery).
 			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("stale-version"))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT fee_recipient, extra_data FROM block_builders")).
-			WillReturnRows(sqlmock.NewRows([]string{"fee_recipient", "extra_data"}))
+		mock.ExpectQuery(distinctQuery).
+			WillReturnRows(sqlmock.NewRows([]string{"fee_recipient", "extra_data", "builder_key", "builder_name"}))
 		mock.ExpectExec("INSERT INTO indexer_metadata").
 			WillReturnError(errors.New("metadata write failed"))
 
