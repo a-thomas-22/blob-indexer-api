@@ -520,7 +520,9 @@ func (a *API) GetBuilders(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 
 		var rows []builderAggregateRow
-		if err := a.db.SelectContext(queryCtx, &rows, queryBuilderAggregates, network.ChainID, start, end, ""); err != nil {
+		if err := a.withoutNestedLoops(queryCtx, func(q windowQuerier) error {
+			return q.SelectContext(queryCtx, &rows, queryBuilderAggregates, network.ChainID, start, end, "")
+		}); err != nil {
 			return nil, err
 		}
 		return buildBuildersResponse(network.ChainID, network.Name, rangeLabel, start, end, generatedAt, rows), nil
@@ -613,22 +615,46 @@ func (a *API) GetBuilderByKey(w http.ResponseWriter, r *http.Request) {
 // read runs first and short-circuits to errBuilderNotFound, so an unknown
 // key costs one query rather than five.
 //
-// The reads are not wrapped in a transaction, so a block committing between
-// them can leave the response internally inconsistent by up to one block:
-// the aggregate can predate a commit the user rows already include, and a
-// reorg can move a block out from under a later read. The tear window is the
-// span of these queries — milliseconds — and the response cache and edge TTL
-// bound how long such a composite can be served, the same accepted bound the
-// entity and chart endpoints already carry. A serializable snapshot would
-// cost a transaction per request on the read path's hottest endpoints for an
-// inconsistency smaller than the cache staleness a client already tolerates.
+// The window reads share one transaction only to scope the nested-loop
+// guard (see withoutNestedLoops); it runs at the default READ COMMITTED
+// level, so each statement still takes its own snapshot and a block
+// committing between them can leave the response internally inconsistent
+// by up to one block: the aggregate can predate a commit the user rows
+// already include, and a reorg can move a block out from under a later
+// read. The tear window is the span of these queries — milliseconds — and
+// the response cache and edge TTL bound how long such a composite can be
+// served, the same accepted bound the entity and chart endpoints already
+// carry. A repeatable-read snapshot would buy nothing a client could see
+// past that cache staleness.
 func (a *API) builderDetail(ctx context.Context, chainID int, networkName, key, rangeLabel string, start, end, generatedAt time.Time) (BuilderDetailResponse, error) {
-	var aggregates []builderAggregateRow
-	if err := a.db.SelectContext(ctx, &aggregates, queryBuilderAggregates, chainID, start, end, key); err != nil {
+	var (
+		aggregates  []builderAggregateRow
+		userRows    []builderUserRow
+		skippedRows []builderSkippedRow
+		detailFrom  sql.NullTime
+	)
+	if err := a.withoutNestedLoops(ctx, func(q windowQuerier) error {
+		if err := q.SelectContext(ctx, &aggregates, queryBuilderAggregates, chainID, start, end, key); err != nil {
+			return err
+		}
+		if len(aggregates) == 0 {
+			return errBuilderNotFound
+		}
+		if err := q.SelectContext(ctx, &userRows, queryBuilderUsers, chainID, start, end, key); err != nil {
+			return err
+		}
+		if err := q.SelectContext(ctx, &skippedRows, queryBuilderSkipped, chainID, start, end, key); err != nil {
+			return err
+		}
+		// How much of the window the skipped rows actually cover: candidate
+		// detail is pruned while the aggregates in builder.candidates are
+		// permanent.
+		if err := q.GetContext(ctx, &detailFrom, queryBuilderSkippedDetailFrom, chainID, start, end); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		return nil
+	}); err != nil {
 		return BuilderDetailResponse{}, err
-	}
-	if len(aggregates) == 0 {
-		return BuilderDetailResponse{}, errBuilderNotFound
 	}
 
 	response := BuilderDetailResponse{
@@ -648,10 +674,6 @@ func (a *API) builderDetail(ctx context.Context, chainID int, networkName, key, 
 		RecentBlocks: []BuilderRecentBlock{},
 	}
 
-	var userRows []builderUserRow
-	if err := a.db.SelectContext(ctx, &userRows, queryBuilderUsers, chainID, start, end, key); err != nil {
-		return BuilderDetailResponse{}, err
-	}
 	for _, row := range userRows {
 		user := BuilderUserRow{
 			Key:                       row.Key,
@@ -679,10 +701,6 @@ func (a *API) builderDetail(ctx context.Context, chainID int, networkName, key, 
 		response.Users = append(response.Users, user)
 	}
 
-	var skippedRows []builderSkippedRow
-	if err := a.db.SelectContext(ctx, &skippedRows, queryBuilderSkipped, chainID, start, end, key); err != nil {
-		return BuilderDetailResponse{}, err
-	}
 	for _, row := range skippedRows {
 		skipped := BuilderSkippedRow{
 			Key:      row.Key,
@@ -702,17 +720,13 @@ func (a *API) builderDetail(ctx context.Context, chainID int, networkName, key, 
 		response.Skipped = append(response.Skipped, skipped)
 	}
 
-	// How much of the window the rows above actually cover: candidate detail
-	// is pruned while the aggregates in builder.candidates are permanent.
-	var detailFrom sql.NullTime
-	if err := a.db.GetContext(ctx, &detailFrom, queryBuilderSkippedDetailFrom, chainID, start, end); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return BuilderDetailResponse{}, err
-	}
 	if detailFrom.Valid {
 		from := detailFrom.Time.UTC()
 		response.SkippedDetailFrom = &from
 	}
 
+	// Outside the guard: this read is LIMIT-driven and its right plan is a
+	// nested loop of primary-key lookups from the few builder rows it keeps.
 	var blockRows []builderRecentBlockRow
 	if err := a.db.SelectContext(ctx, &blockRows, queryBuilderRecentBlocks, chainID, start, end, key, builderRecentBlockLimit); err != nil {
 		return BuilderDetailResponse{}, err

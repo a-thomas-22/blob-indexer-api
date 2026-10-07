@@ -744,48 +744,8 @@ const (
 func seedBuilderPlanFixture(t *testing.T, sqlxDB *sqlx.DB, now time.Time) {
 	t.Helper()
 	oldest := now.Add(-planDays * 24 * time.Hour)
+	insertBuilderPlanBlocks(t, sqlxDB, oldest, 1, planTotalBlocks)
 
-	if _, err := sqlxDB.Exec(`
-		INSERT INTO block_metrics (chain_id, block_number, block_timestamp, blob_count, blob_params_max)
-		SELECT 1, g, $1::timestamp + (g * $2 * INTERVAL '1 second'), 3, 6
-		FROM generate_series(1, $3) AS g
-	`, oldest, planSecondsPerStep, planTotalBlocks); err != nil {
-		t.Fatalf("seed block_metrics: %v", err)
-	}
-	if _, err := sqlxDB.Exec(`
-		INSERT INTO block_builders (
-			chain_id, block_number, block_timestamp, fee_recipient, extra_data,
-			builder_key, builder_name, tx_count, candidate_snapshot
-		)
-		SELECT 1, g, $1::timestamp + (g * $2 * INTERVAL '1 second'), '0xBuilder' || (g % 5),
-			'0x67657468', 'builder-' || (g % 5), 'Builder ' || (g % 5), 100, FALSE
-		FROM generate_series(1, $3) AS g
-	`, oldest, planSecondsPerStep, planTotalBlocks); err != nil {
-		t.Fatalf("seed block_builders: %v", err)
-	}
-	if _, err := sqlxDB.Exec(`
-		INSERT INTO blobs (
-			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
-			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
-			timestamp, max_fee_per_blob_gas, blob_gas_used,
-			max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas, first_seen_at, tx_index
-		)
-		SELECT 1, g, i, '0xtx' || g || '_' || i, '0xsender' || (g % 7), '', 131072, 10, 2, 1310720,
-			$1::timestamp + (g * $2 * INTERVAL '1 second'), 12, 131072,
-			1000000000, 60000000000, 1000000000,
-			$1::timestamp + (g * $2 * INTERVAL '1 second') - INTERVAL '3 seconds', i
-		FROM generate_series(1, $3) AS g
-		CROSS JOIN generate_series(0, $4 - 1) AS i
-		-- Scramble the physical order so ANALYZE records a near-zero
-		-- correlation between blobs.timestamp and the heap, which is what
-		-- production looks like after in-place backfills have rewritten
-		-- rows. With a perfectly correlated heap the planner can still
-		-- reach a hidden window through a bitmap scan and the plan
-		-- assertions below stop discriminating. md5 keeps it deterministic.
-		ORDER BY md5((g * 1000 + i)::text)
-	`, oldest, planSecondsPerStep, planTotalBlocks, planBlobsPerBlock); err != nil {
-		t.Fatalf("seed blobs: %v", err)
-	}
 	// blob_inclusion_candidates needs rows too: an empty table is always
 	// sequentially scanned, which would make the plan assertions vacuous
 	// rather than a real check that the window bound reaches the
@@ -808,6 +768,55 @@ func seedBuilderPlanFixture(t *testing.T, sqlxDB *sqlx.DB, now time.Time) {
 	// recent pages the builder windows read.
 	if _, err := sqlxDB.Exec("VACUUM ANALYZE"); err != nil {
 		t.Fatalf("vacuum analyze: %v", err)
+	}
+}
+
+// insertBuilderPlanBlocks writes blocks first..last of the plan fixture
+// (block g lands at oldest + g steps) into block_metrics, block_builders and
+// blobs.
+func insertBuilderPlanBlocks(t *testing.T, sqlxDB *sqlx.DB, oldest time.Time, first, last int) {
+	t.Helper()
+
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO block_metrics (chain_id, block_number, block_timestamp, blob_count, blob_params_max)
+		SELECT 1, g, $1::timestamp + (g * $2 * INTERVAL '1 second'), 3, 6
+		FROM generate_series($3::int, $4::int) AS g
+	`, oldest, planSecondsPerStep, first, last); err != nil {
+		t.Fatalf("seed block_metrics: %v", err)
+	}
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO block_builders (
+			chain_id, block_number, block_timestamp, fee_recipient, extra_data,
+			builder_key, builder_name, tx_count, candidate_snapshot
+		)
+		SELECT 1, g, $1::timestamp + (g * $2 * INTERVAL '1 second'), '0xBuilder' || (g % 5),
+			'0x67657468', 'builder-' || (g % 5), 'Builder ' || (g % 5), 100, FALSE
+		FROM generate_series($3::int, $4::int) AS g
+	`, oldest, planSecondsPerStep, first, last); err != nil {
+		t.Fatalf("seed block_builders: %v", err)
+	}
+	if _, err := sqlxDB.Exec(`
+		INSERT INTO blobs (
+			chain_id, block_number, blob_index, tx_hash, from_address, user_attribution,
+			blob_size_bytes, base_fee_per_blob_gas, tip_per_blob_gas, total_cost_wei,
+			timestamp, max_fee_per_blob_gas, blob_gas_used,
+			max_priority_fee_per_gas, max_fee_per_gas, priority_fee_per_gas, first_seen_at, tx_index
+		)
+		SELECT 1, g, i, '0xtx' || g || '_' || i, '0xsender' || (g % 7), '', 131072, 10, 2, 1310720,
+			$1::timestamp + (g * $2 * INTERVAL '1 second'), 12, 131072,
+			1000000000, 60000000000, 1000000000,
+			$1::timestamp + (g * $2 * INTERVAL '1 second') - INTERVAL '3 seconds', i
+		FROM generate_series($3::int, $4::int) AS g
+		CROSS JOIN generate_series(0, $5 - 1) AS i
+		-- Scramble the physical order so ANALYZE records a near-zero
+		-- correlation between blobs.timestamp and the heap, which is what
+		-- production looks like after in-place backfills have rewritten
+		-- rows. With a perfectly correlated heap the planner can still
+		-- reach a hidden window through a bitmap scan and the plan
+		-- assertions below stop discriminating. md5 keeps it deterministic.
+		ORDER BY md5((g * 1000 + i)::text)
+	`, oldest, planSecondsPerStep, first, last, planBlobsPerBlock); err != nil {
+		t.Fatalf("seed blobs: %v", err)
 	}
 }
 
@@ -953,4 +962,105 @@ func TestBuilderQueryPlansStayOnRangeIndexes(t *testing.T) {
 		t.Fatalf("seeded blobs table is too small to make the plan assertions meaningful: %d rows", totalBlobs)
 	}
 	fmt.Printf("builder EXPLAIN fixture: %d of %d block_builders rows in the 24h window, %d blob rows\n", inWindow, total, totalBlobs)
+}
+
+// TestBuilderWindowQueriesSurviveStaleStatistics reproduces the October 2026
+// outage. The fixture is analyzed, then one more day of blocks lands past
+// the histogram's upper bound, which is where production sits between
+// ANALYZEs: none of the tables has an index led by its timestamp, so the
+// planner cannot probe the live maximum and estimates the newest window at
+// about one row. Unguarded, that estimate bought nested loops whose inner
+// side was the whole window again (sepolia 24h: 352M rows discarded by join
+// filters, 54s). Run through withoutNestedLoops, every builder window query
+// must stay linear in the window however wrong the estimate is.
+func TestBuilderWindowQueriesSurviveStaleStatistics(t *testing.T) {
+	sqlxDB, _ := resetBuilderSchema(t, "api_builders_stale_stats")
+	analyzedTo := time.Now().UTC().Truncate(time.Hour).Add(-24 * time.Hour)
+	seedBuilderPlanFixture(t, sqlxDB, analyzedTo)
+
+	oldest := analyzedTo.Add(-planDays * 24 * time.Hour)
+	insertBuilderPlanBlocks(t, sqlxDB, oldest, planTotalBlocks+1, planTotalBlocks+planBlocksPerDay)
+	start := analyzedTo.Add(time.Second)
+	end := analyzedTo.Add(24*time.Hour + time.Second)
+
+	ctx := context.Background()
+	a := newTestAPIWithDB(&db.DB{DB: sqlxDB})
+
+	// Precondition: the planner really believes the new window is empty.
+	// If a future Postgres learns to extrapolate here the fixture no longer
+	// reproduces the outage and this test needs a new way to go stale.
+	var estimate []string
+	if err := sqlxDB.Select(&estimate, `EXPLAIN SELECT 1 FROM block_builders WHERE chain_id = 1 AND block_timestamp >= $1 AND block_timestamp < $2`, start, end); err != nil {
+		t.Fatalf("explain estimate: %v", err)
+	}
+	if !strings.Contains(estimate[0], " rows=1 ") {
+		t.Fatalf("fixture statistics are not stale: the planner estimates the new window as %q", estimate[0])
+	}
+
+	var inWindow int
+	if err := sqlxDB.Get(&inWindow, `SELECT COUNT(*) FROM block_builders WHERE chain_id = 1 AND block_timestamp >= $1 AND block_timestamp < $2`, start, end); err != nil {
+		t.Fatalf("count window: %v", err)
+	}
+	if inWindow != planBlocksPerDay {
+		t.Fatalf("window holds %d blocks, want %d", inWindow, planBlocksPerDay)
+	}
+
+	// Linear means each window row is discarded by a join filter at most a
+	// few times over (the series-limit and totals joins compare against a
+	// handful of rows). The quadratic shape discards blocks × transactions
+	// — 120 × 4,800 here, 576k — so a bound of ten per blob row separates
+	// them by an order of magnitude.
+	maxRemoved := planBlocksPerDay * planBlobsPerBlock * 10
+
+	removedByJoinFilters := func(plan []string) int {
+		total := 0
+		for _, line := range plan {
+			idx := strings.Index(line, "Rows Removed by Join Filter: ")
+			if idx < 0 {
+				continue
+			}
+			var n int
+			if _, err := fmt.Sscanf(line[idx:], "Rows Removed by Join Filter: %d", &n); err == nil {
+				total += n
+			}
+		}
+		return total
+	}
+
+	check := func(name, query string, args ...interface{}) {
+		t.Helper()
+		var unguarded []string
+		if err := sqlxDB.Select(&unguarded, "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) "+query, args...); err != nil {
+			t.Fatalf("%s: unguarded explain: %v", name, err)
+		}
+		var plan []string
+		if err := a.withoutNestedLoops(ctx, func(q windowQuerier) error {
+			return q.SelectContext(ctx, &plan, "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) "+query, args...)
+		}); err != nil {
+			t.Fatalf("%s: guarded explain: %v", name, err)
+		}
+		removed := removedByJoinFilters(plan)
+		t.Logf("%s: rows removed by join filters: unguarded %d, guarded %d", name, removedByJoinFilters(unguarded), removed)
+		if removed > maxRemoved {
+			t.Errorf("%s: guarded plan discarded %d rows in join filters (bound %d), nested loops are back:\n%s",
+				name, removed, maxRemoved, strings.Join(plan, "\n"))
+		}
+	}
+
+	check("builders", queryBuilderAggregates, 1, start, end, "")
+	check("builder detail", queryBuilderAggregates, 1, start, end, "builder-1")
+	check("builder users", queryBuilderUsers, 1, start, end, "builder-1")
+	check("builder skipped", queryBuilderSkipped, 1, start, end, "builder-1")
+	check("builder-share chart", queryBuilderShareTimeChart, 1, start, end, int64(3600), defaultBuilderSeriesLimit)
+	check("builder-share chart by block", queryBuilderShareBlockChart, 1, start, end, defaultBuilderSeriesLimit)
+
+	// SET LOCAL must not leak: the connection goes back to the pool with
+	// nested loops enabled again.
+	var setting string
+	if err := sqlxDB.Get(&setting, "SHOW enable_nestloop"); err != nil {
+		t.Fatalf("show enable_nestloop: %v", err)
+	}
+	if setting != "on" {
+		t.Errorf("enable_nestloop leaked out of the guard: %q", setting)
+	}
 }
