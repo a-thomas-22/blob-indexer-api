@@ -175,7 +175,9 @@ func (a *API) GetBuilderShareChart(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var rows []builderShareChartRow
-		if err := a.db.SelectContext(queryCtx, &rows, query, args...); err != nil {
+		if err := a.withoutNestedLoops(queryCtx, func(q windowQuerier) error {
+			return q.SelectContext(queryCtx, &rows, query, args...)
+		}); err != nil {
 			return nil, err
 		}
 		return buildBuilderShareChartResponse(network.ChainID, network.Name, chart, rows), nil
