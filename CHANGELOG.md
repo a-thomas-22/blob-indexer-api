@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.2](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.21.1...blob-indexer-api-v0.21.2) (2026-10-07)
+
+
+### Bug Fixes
+
+* **api:** keep builder windows linear when planner statistics go stale ([#357](https://github.com/a-thomas-22/blob-indexer-api/issues/357)) ([1c9d341](https://github.com/a-thomas-22/blob-indexer-api/commit/1c9d3414e9435f6feaae7b0f004cc86a42765103))
+
 ## [0.21.1](https://github.com/a-thomas-22/blob-indexer-api/compare/blob-indexer-api-v0.21.0...blob-indexer-api-v0.21.1) (2026-09-20)
 
 
